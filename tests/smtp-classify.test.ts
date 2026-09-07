@@ -101,3 +101,52 @@ describe("generateMessageId", () => {
     expect(generateMessageId("nodomain")).toContain("@localhost");
   });
 });
+
+/**
+ * Distinguishing a connection refusal from a socket dying mid-DATA. Both carry
+ * code ESOCKET, so a second signal is needed - and it must be the right one.
+ *
+ * These shapes were captured from real nodemailer failures, not invented.
+ */
+describe("classifySmtpError, connection-level failures", () => {
+  it("treats a connection refusal as retryable, not unknown", () => {
+    // Exact shape nodemailer produces against a dead port.
+    const result = classifySmtpError({
+      code: "ESOCKET",
+      errno: -111,
+      syscall: "connect",
+      command: "CONN",
+      message: "connect ECONNREFUSED 127.0.0.1:1",
+    });
+    expect(result).toMatchObject({ outcome: "failed", retryable: true });
+  });
+
+  it("treats a DNS lookup failure as permanent, not unknown", () => {
+    expect(
+      classifySmtpError({ code: "EDNS", syscall: "getaddrinfo", command: "CONN" }),
+    ).toMatchObject({ outcome: "failed", retryable: false });
+  });
+
+  it("does NOT use `command` to decide, because nodemailer reports CONN for a mid-DATA timeout", () => {
+    // Exact shape captured from a server that accepts DATA then goes silent.
+    // If `command: "CONN"` were treated as proof of a connection-stage failure,
+    // this - the single most dangerous case - would be retried and could
+    // deliver the same email twice.
+    const result = classifySmtpError({ code: "ETIMEDOUT", command: "CONN", message: "Timeout" });
+    expect(result).toMatchObject({ outcome: "unknown", retryable: false });
+  });
+
+  it("keeps a socket error with no syscall ambiguous", () => {
+    expect(classifySmtpError({ code: "ESOCKET", message: "socket hang up" })).toMatchObject({
+      outcome: "unknown",
+      retryable: false,
+    });
+  });
+
+  it("keeps auth failures permanent", () => {
+    expect(classifySmtpError({ code: "EAUTH", command: "AUTH" })).toMatchObject({
+      outcome: "failed",
+      retryable: false,
+    });
+  });
+});

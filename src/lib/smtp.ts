@@ -47,6 +47,7 @@ export type SendResult = SendSuccess | SendFailure;
 interface SmtpError {
   code?: string;
   command?: string;
+  syscall?: string;
   responseCode?: number;
   response?: string;
   message?: string;
@@ -69,6 +70,22 @@ const PRE_TRANSMISSION_CODES = new Set([
 
 /** Codes that mean "fix the configuration", where retrying changes nothing. */
 const PERMANENT_CODES = new Set(["EAUTH", "EDNS", "ENOTFOUND", "ETLS"]);
+
+/**
+ * A plain connection refusal surfaces as code `ESOCKET`, which on its own is
+ * indistinguishable from a socket dying mid-DATA - so without a second signal
+ * a transient network blip would be classified `unknown` and halt the contact
+ * permanently.
+ *
+ * The reliable signal is the failing syscall. `connect` can only occur while
+ * establishing the TCP connection, before any SMTP conversation exists, so
+ * nothing can have been transmitted.
+ *
+ * nodemailer's `command` field is NOT usable for this: it reports "CONN" even
+ * for a socket timeout that strikes during DATA, which would misclassify the
+ * single most dangerous case as retryable.
+ */
+const PRE_CONNECT_SYSCALLS = new Set(["connect", "getaddrinfo"]);
 
 export function classifySmtpError(error: unknown): SendFailure {
   const err = (error ?? {}) as SmtpError;
@@ -95,6 +112,18 @@ export function classifySmtpError(error: unknown): SendFailure {
       ok: false,
       outcome: "failed",
       retryable: !PERMANENT_CODES.has(code),
+      message,
+      code,
+      responseCode: null,
+    };
+  }
+
+  // The code alone was not conclusive, but the failing syscall may be.
+  if (err.syscall && PRE_CONNECT_SYSCALLS.has(err.syscall)) {
+    return {
+      ok: false,
+      outcome: "failed",
+      retryable: !(code && PERMANENT_CODES.has(code)),
       message,
       code,
       responseCode: null,

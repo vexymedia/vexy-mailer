@@ -364,6 +364,28 @@ async function processCampaign(campaign: Campaign, settings: AppSettings): Promi
   }
 
   const messageId = generateMessageId(mailbox.from_email);
+
+  // Final gate. Anything that changed since the claim committed stops the send
+  // here, and the claim row is retired as `skipped` so it is never retried.
+  const abortReason = await finalSendGuard(campaign.id, candidate.campaign_contact_id, candidate.email);
+  if (abortReason) {
+    await sql`
+      update email_sends
+         set status = 'skipped', sent_at = now(),
+             error = ${`Not sent: ${abortReason}`}
+       where id = ${send.id}
+    `;
+    await logActivity({
+      level: "warn",
+      action: `Email step ${step.step_number} not sent`,
+      detail: `${candidate.email}: ${abortReason}`,
+      campaignId: campaign.id,
+      contactId: candidate.contact_id,
+      campaignContactId: candidate.campaign_contact_id,
+    });
+    return { ...base, action: "blocked", detail: abortReason };
+  }
+
   const result = await sendMail(mailbox, {
     to: recipient.to,
     subject,
@@ -441,6 +463,45 @@ async function processCampaign(campaign: Campaign, settings: AppSettings): Promi
   });
 
   return { ...base, action: result.outcome === "unknown" ? "unknown" : "failed", detail: result.message };
+}
+
+/**
+ * Last-moment re-check of every condition that forbids delivery.
+ *
+ * The guards in the claim transaction are evaluated before that transaction
+ * commits, and the commit has to happen before SMTP is touched (layer 2 of the
+ * duplicate-send guarantee). That leaves a window in which the world can
+ * change, and it is genuinely reachable: the reply poller holds a different
+ * lease from the dispatcher, so it can mark a contact `replied` while dispatch
+ * sits between commit and send. An operator pressing "Do not contact" or
+ * "Pause" lands in the same window.
+ *
+ * Called immediately before sendMail, so the remaining window is the duration
+ * of one round trip to Postgres. It cannot be closed entirely - no database
+ * check can be made atomic with an external SMTP call - but this reduces it
+ * from "the whole of phase 2" to as close to zero as the design allows.
+ *
+ * Returns a reason to abort, or null when it is still safe to send.
+ */
+async function finalSendGuard(
+  campaignId: string,
+  campaignContactId: string,
+  email: string,
+): Promise<string | null> {
+  const [row] = await sql<{ suppressed: boolean; contact_status: string; campaign_status: string }[]>`
+    select exists (select 1 from suppression_list s where s.email = ${email}) as suppressed,
+           cc.status as contact_status,
+           cp.status as campaign_status
+      from campaign_contacts cc
+      join campaigns cp on cp.id = cc.campaign_id
+     where cc.id = ${campaignContactId}
+  `;
+  if (!row) return "The contact is no longer part of this campaign.";
+  if (row.suppressed) return `${email} was added to the do-not-contact list.`;
+  if (row.contact_status === "replied") return "The contact replied.";
+  if (row.contact_status === "unsubscribed") return "The contact unsubscribed.";
+  if (row.campaign_status !== "active") return `The campaign is ${row.campaign_status}.`;
+  return null;
 }
 
 /**
