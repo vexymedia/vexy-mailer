@@ -1,0 +1,41 @@
+{
+  "name": "vexy-mailer",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:migrate": "node scripts/migrate.mjs"
+  },
+  "dependencies": {
+    "imapflow": "^2.0.0",
+    "next": "^15.5.25",
+    "nodemailer": "^10.0.1",
+    "postgres": "^3.4.9",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3.3.7",
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/node": "^26.5.0",
+    "@types/nodemailer": "^8.0.1",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "@types/smtp-server": "^3.5.13",
+    "dotenv": "^17.4.2",
+    "eslint": "^9.39.5",
+    "eslint-config-next": "^15.5.25",
+    "postcss": "^8.5.28",
+    "smtp-server": "^3.19.9",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.0"
+  }
+}

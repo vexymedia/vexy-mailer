@@ -1,0 +1,73 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  @apply bg-zinc-50 text-zinc-900 antialiased;
+}
+
+/* ------------------------------------------------------------------ */
+/* A handful of shared classes. The app is small enough that a full    */
+/* component library would weigh more than the six patterns it reuses. */
+/*                                                                     */
+/* `btn` and `badge` are declared with @utility rather than inside     */
+/* @layer components, because Tailwind v4 can only @apply real         */
+/* utilities - and the variants below build on them.                   */
+/* ------------------------------------------------------------------ */
+
+@utility btn {
+  @apply inline-flex items-center justify-center gap-1.5 rounded-md px-3.5 py-2 text-sm font-medium
+         transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+}
+
+@utility badge {
+  @apply inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset;
+}
+
+@layer components {
+  .card {
+    @apply rounded-lg border border-zinc-200 bg-white shadow-sm;
+  }
+
+  .label {
+    @apply block text-sm font-medium text-zinc-700 mb-1.5;
+  }
+
+  .input {
+    @apply w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900
+           placeholder:text-zinc-400 shadow-sm
+           focus:border-zinc-900 focus:outline-none focus:ring-1 focus:ring-zinc-900
+           disabled:bg-zinc-100 disabled:text-zinc-500;
+  }
+
+  .hint {
+    @apply mt-1.5 text-xs text-zinc-500;
+  }
+
+  .btn-primary {
+    @apply btn bg-zinc-900 text-white hover:bg-zinc-700;
+  }
+  .btn-secondary {
+    @apply btn border border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50;
+  }
+  .btn-danger {
+    @apply btn border border-red-300 bg-white text-red-700 hover:bg-red-50;
+  }
+  .btn-go {
+    @apply btn bg-emerald-600 text-white hover:bg-emerald-700;
+  }
+
+  .th {
+    @apply px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-zinc-500;
+  }
+  .td {
+    @apply px-4 py-3 text-sm text-zinc-700 align-top;
+  }
+}
