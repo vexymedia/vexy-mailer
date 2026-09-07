@@ -10,10 +10,14 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
-import "dotenv/config";
+import { config as loadEnv } from "dotenv";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const dir = join(root, "supabase", "migrations");
+
+// Match Next.js's precedence: .env.local wins over .env.
+loadEnv({ path: join(root, ".env.local"), quiet: true });
+loadEnv({ path: join(root, ".env"), quiet: true });
 
 const url = process.env.DATABASE_URL;
 if (!url) {

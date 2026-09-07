@@ -65,7 +65,8 @@ export default async function DashboardPage() {
                   <p className="mt-0.5 text-xs text-zinc-500">
                     {campaign.mailbox_name} · {formatSendDays(campaign.send_days)}{" "}
                     {minutesToHHMM(campaign.send_start_minute)}–{minutesToHHMM(campaign.send_end_minute)}{" "}
-                    {campaign.timezone} · {campaign.sent_today}/{campaign.daily_limit} sent today
+                    {campaign.timezone} · {campaign.sent_today}/{campaign.daily_limit} of today&apos;s
+                    limit used
                   </p>
                 </div>
                 <StatusBadge status={campaign.status} />

@@ -22,7 +22,10 @@ create table if not exists app_settings (
   id              boolean primary key default true,
   test_mode       boolean not null default true,
   test_email      text,
-  test_behavior   text not null default 'redirect'
+  -- Defaults to 'simulate': a fresh install is both safe AND immediately
+  -- usable. 'redirect' would be equally safe but needs an address before it
+  -- can do anything, which reads as the app being broken.
+  test_behavior   text not null default 'simulate'
                     check (test_behavior in ('redirect', 'simulate')),
   updated_at      timestamptz not null default now(),
   constraint app_settings_singleton check (id)

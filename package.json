@@ -10,7 +10,9 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "db:migrate": "node scripts/migrate.mjs"
+    "db:migrate": "node scripts/migrate.mjs",
+    "test:e2e": "node tests/e2e/run.mjs",
+    "check": "npm run typecheck && npm run lint && npm run build && npm test"
   },
   "dependencies": {
     "imapflow": "^2.0.0",
@@ -32,6 +34,7 @@
     "dotenv": "^17.4.2",
     "eslint": "^9.39.5",
     "eslint-config-next": "^15.5.25",
+    "playwright": "^1.63.0",
     "postcss": "^8.5.28",
     "smtp-server": "^3.19.9",
     "tailwindcss": "^4.3.3",

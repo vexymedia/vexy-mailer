@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { saveStepsAction } from "@/lib/actions";
 import { ActionForm, SubmitButton } from "./action-form";
-import { TEMPLATE_VARIABLES } from "@/lib/template";
+import { TEMPLATE_VARIABLES, findUnknownVariables } from "@/lib/template";
 
 export interface StepValues {
   step_number: number;
@@ -16,6 +16,12 @@ export interface StepValues {
 
 const BLANK: StepValues = { step_number: 0, delay_days: 3, subject: "", body: "", locked: false };
 
+/**
+ * Fully controlled on purpose. With uncontrolled inputs, the server re-render
+ * that follows a save resets each field to its `defaultValue` - silently
+ * discarding whatever was typed into a step added in the browser. Holding the
+ * text in React state makes the form survive revalidation.
+ */
 export function SequenceEditor({
   campaignId,
   initialSteps,
@@ -26,10 +32,17 @@ export function SequenceEditor({
   readOnly: boolean;
 }) {
   const [steps, setSteps] = useState<StepValues[]>(
-    initialSteps.length > 0
-      ? initialSteps
-      : [{ ...BLANK, step_number: 1, delay_days: 0, subject: "", body: "" }],
+    initialSteps.length > 0 ? initialSteps : [{ ...BLANK, step_number: 1, delay_days: 0 }],
   );
+
+  function update(index: number, patch: Partial<StepValues>) {
+    setSteps((current) => current.map((step, i) => (i === index ? { ...step, ...patch } : step)));
+  }
+
+  // Live feedback on typos, rather than waiting for the server to reject them.
+  const unknownVariables = [
+    ...new Set(steps.flatMap((step) => [...findUnknownVariables(step.subject), ...findUnknownVariables(step.body)])),
+  ];
 
   return (
     <ActionForm action={saveStepsAction}>
@@ -50,6 +63,13 @@ export function SequenceEditor({
         </span>
       </div>
 
+      {unknownVariables.length > 0 ? (
+        <div className="mb-4 rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          Unknown variable(s): {unknownVariables.map((name) => `{{${name}}}`).join(", ")}. They would
+          render as empty text.
+        </div>
+      ) : null}
+
       <div className="space-y-4">
         {steps.map((step, index) => (
           <div key={index} className="card p-5">
@@ -57,7 +77,9 @@ export function SequenceEditor({
               <h3 className="text-sm font-semibold text-zinc-900">
                 {index === 0 ? "Email 1" : `Follow-up ${index}`}
                 {step.locked ? (
-                  <span className="ml-2 text-xs font-normal text-zinc-500">(already sent — cannot be removed)</span>
+                  <span className="ml-2 text-xs font-normal text-zinc-500">
+                    (already sent — cannot be removed)
+                  </span>
                 ) : null}
               </h3>
               <div className="flex items-center gap-2">
@@ -70,12 +92,15 @@ export function SequenceEditor({
                   type="number"
                   min={0}
                   max={365}
-                  defaultValue={index === 0 ? 0 : step.delay_days}
+                  value={index === 0 ? 0 : step.delay_days}
+                  onChange={(event) => update(index, { delay_days: Number(event.target.value) })}
                   readOnly={index === 0 || readOnly}
                   className="input w-20 text-center"
                 />
                 <span className="text-sm text-zinc-500">days</span>
-                {!step.locked && steps.length > 1 && !readOnly ? (
+                {/* The first email cannot be removed: promoting a follow-up in its
+                    place would leave step 1 with a non-zero delay, which is invalid. */}
+                {index > 0 && !step.locked && !readOnly ? (
                   <button
                     type="button"
                     onClick={() => setSteps(steps.filter((_, i) => i !== index))}
@@ -93,7 +118,8 @@ export function SequenceEditor({
                 <input
                   id={`step_${index}_subject`}
                   name={`step_${index}_subject`}
-                  defaultValue={step.subject}
+                  value={step.subject}
+                  onChange={(event) => update(index, { subject: event.target.value })}
                   disabled={readOnly}
                   className="input"
                   placeholder="Quick question about {{company}}"
@@ -104,7 +130,8 @@ export function SequenceEditor({
                 <textarea
                   id={`step_${index}_body`}
                   name={`step_${index}_body`}
-                  defaultValue={step.body}
+                  value={step.body}
+                  onChange={(event) => update(index, { body: event.target.value })}
                   disabled={readOnly}
                   rows={9}
                   className="input font-mono text-[13px] leading-relaxed"
@@ -128,9 +155,7 @@ export function SequenceEditor({
           </button>
         </div>
       ) : (
-        <p className="mt-5 text-sm text-zinc-500">
-          Pause the campaign to edit the sequence.
-        </p>
+        <p className="mt-5 text-sm text-zinc-500">Pause the campaign to edit the sequence.</p>
       )}
     </ActionForm>
   );
