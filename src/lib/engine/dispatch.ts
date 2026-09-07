@@ -454,7 +454,12 @@ async function processCampaign(campaign: Campaign, settings: AppSettings): Promi
 
   // Final gate. Anything that changed since the claim committed stops the send
   // here, and the claim row is retired as `skipped` so it is never retried.
-  const abortReason = await finalSendGuard(campaign.id, candidate.campaign_contact_id, candidate.email);
+  const abortReason = await finalSendGuard(
+    campaign.id,
+    candidate.campaign_contact_id,
+    candidate.email,
+    mailbox.id,
+  );
   if (abortReason) {
     await sql`
       update email_sends
@@ -595,11 +600,15 @@ async function finalSendGuard(
   campaignId: string,
   campaignContactId: string,
   email: string,
+  mailboxId: string,
 ): Promise<string | null> {
-  const [row] = await sql<{ suppressed: boolean; contact_status: string; campaign_status: string }[]>`
+  const [row] = await sql<
+    { suppressed: boolean; contact_status: string; campaign_status: string; mailbox_enabled: boolean | null }[]
+  >`
     select exists (select 1 from suppression_list s where s.email = ${email}) as suppressed,
            cc.status as contact_status,
-           cp.status as campaign_status
+           cp.status as campaign_status,
+           (select m.enabled from mailboxes m where m.id = ${mailboxId}) as mailbox_enabled
       from campaign_contacts cc
       join campaigns cp on cp.id = cc.campaign_id
      where cc.id = ${campaignContactId}
@@ -609,6 +618,10 @@ async function finalSendGuard(
   if (row.contact_status === "replied") return "The contact replied.";
   if (row.contact_status === "unsubscribed") return "The contact unsubscribed.";
   if (row.campaign_status !== "active") return `The campaign is ${row.campaign_status}.`;
+  // The sender can be switched off between the claim and the send, same as
+  // everything else above.
+  if (row.mailbox_enabled === null) return "The sender mailbox no longer exists.";
+  if (!row.mailbox_enabled) return "The sender mailbox was disabled.";
   return null;
 }
 

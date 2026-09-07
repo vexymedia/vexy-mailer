@@ -69,21 +69,6 @@ function usageCte(sql: Db) {
   `;
 }
 
-/** Capacity of every mailbox in a campaign's sender pool. */
-export async function poolCapacity(sql: Db, campaignId: string): Promise<MailboxCapacity[]> {
-  const rows = await sql<
-    Omit<MailboxCapacity, "remaining" | "utilisation">[]
-  >`
-    with ${usageCte(sql)}
-    select mu.mailbox_id, mu.from_email, mu.name, mu.enabled, mu.daily_limit, mu.used_today
-      from mailbox_usage mu
-      join campaign_mailboxes cm on cm.mailbox_id = mu.mailbox_id
-     where cm.campaign_id = ${campaignId}
-     order by mu.from_email
-  `;
-  return rows.map(decorate);
-}
-
 /** Capacity of every mailbox, for the Mailboxes screen. */
 export async function allMailboxCapacity(sql: Db): Promise<MailboxCapacity[]> {
   const rows = await sql<Omit<MailboxCapacity, "remaining" | "utilisation">[]>`
