@@ -1,0 +1,18 @@
+node_modules
+.next
+out
+build
+.DS_Store
+*.pem
+npm-debug.log*
+# Secrets. Every .env variant except the committed template, so a file like
+# .env.production can never be added by accident.
+.env
+.env.*
+!.env.example
+.vercel
+*.tsbuildinfo
+next-env.d.ts
+
+# scratch
+.tmp-e2e/

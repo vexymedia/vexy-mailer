@@ -1,0 +1,79 @@
+import { sql } from "@/lib/db";
+import { unsuppressEmailAction, suppressEmailAction } from "@/lib/actions";
+import { PageHeader, Table, DateTime } from "@/components/ui";
+import { ActionForm, SubmitButton } from "@/components/action-form";
+
+export const dynamic = "force-dynamic";
+
+interface SuppressionRow {
+  id: string;
+  email: string;
+  reason: string;
+  note: string | null;
+  created_at: Date;
+}
+
+export default async function SuppressionPage() {
+  const rows = await sql<SuppressionRow[]>`
+    select id, email, reason, note, created_at from suppression_list order by created_at desc
+  `;
+
+  return (
+    <>
+      <PageHeader
+        title="Do not contact"
+        description="A global block list. These addresses are removed from every campaign and the database refuses to add them to a new one."
+      />
+
+      <div className="mb-6 max-w-xl">
+        <ActionForm action={suppressEmailAction} className="card p-5">
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="flex-1">
+              <label className="label" htmlFor="email">Add an address</label>
+              <input id="email" name="email" type="email" required className="input" placeholder="someone@company.com" />
+            </div>
+            <input type="hidden" name="reason" value="manual" />
+            <SubmitButton pendingLabel="Adding…">Add</SubmitButton>
+          </div>
+        </ActionForm>
+      </div>
+
+      {rows.length === 0 ? (
+        <p className="card px-6 py-10 text-center text-sm text-zinc-500">The list is empty.</p>
+      ) : (
+        <Table
+          head={
+            <tr>
+              <th className="th">Email</th>
+              <th className="th">Reason</th>
+              <th className="th">Added</th>
+              <th className="th"></th>
+            </tr>
+          }
+        >
+          {rows.map((row) => (
+            <tr key={row.id}>
+              <td className="td font-medium text-zinc-900">{row.email}</td>
+              <td className="td">
+                {row.reason}
+                {row.note ? <div className="text-xs text-zinc-500">{row.note}</div> : null}
+              </td>
+              <td className="td text-xs"><DateTime value={row.created_at} /></td>
+              <td className="td text-right">
+                <ActionForm action={unsuppressEmailAction} hideMessages>
+                  <input type="hidden" name="email" value={row.email} />
+                  <SubmitButton
+                    className="btn-secondary !px-2 !py-1 text-xs"
+                    confirm={`Remove ${row.email} from the do-not-contact list? They will become contactable again.`}
+                  >
+                    Remove
+                  </SubmitButton>
+                </ActionForm>
+              </td>
+            </tr>
+          ))}
+        </Table>
+      )}
+    </>
+  );
+}
