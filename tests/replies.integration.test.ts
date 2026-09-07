@@ -209,3 +209,31 @@ describe("reply detection", () => {
     expect((await pollReplies(true)).mailboxes).toEqual([]);
   });
 });
+
+describe("a reply stops every sequence the contact is in", () => {
+  it("removes the contact from other campaigns too", async () => {
+    const seed = await seedCampaign();
+    await enableImap(seed.mailboxId);
+    const { startCampaign } = await import("@/lib/queries/campaigns");
+    await startCampaign(seed.campaignId);
+    await sendStepOne(seed.campaignId);
+    await sql`update email_sends set message_id = '<s1@example.com>', status = 'sent'
+               where campaign_id = ${seed.campaignId}`;
+
+    // The same person, enrolled in a second campaign.
+    const second = await seedCampaign({ contacts: [] });
+    const [contact] = await sql<{ id: string }[]>`select id from contacts where email = 'a@example.com'`;
+    await sql`insert into campaign_contacts (campaign_id, contact_id, status, next_send_at)
+              values (${second.campaignId}, ${contact.id}, 'scheduled', now())`;
+
+    inbox.messages = [message({ inReplyTo: "<s1@example.com>", from: "a@example.com" })];
+    const { pollReplies } = await import("@/lib/engine/replies");
+    await pollReplies(true);
+
+    const rows = await sql<{ status: string }[]>`
+      select status from campaign_contacts where contact_id = ${contact.id}
+    `;
+    expect(rows).toHaveLength(2);
+    expect(rows.every((r) => r.status === "replied")).toBe(true);
+  });
+});

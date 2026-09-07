@@ -1,6 +1,7 @@
 import { sql } from "../db";
 import { logActivity } from "../activity";
 import type { ParsedContactRow } from "../csv";
+import { schedulePendingContacts } from "./campaigns";
 
 export interface ImportResult {
   created: number;
@@ -68,6 +69,10 @@ export async function importContacts(
     }
   }
 
+  // A contact imported into a campaign that is already running still has to be
+  // scheduled, or it would never be sent anything.
+  if (campaignId) await schedulePendingContacts(campaignId);
+
   await logActivity({
     action: "Contacts imported",
     detail:
@@ -95,6 +100,7 @@ export async function addContactsToCampaign(
     on conflict (campaign_id, contact_id) do nothing
     returning id
   `;
+  await schedulePendingContacts(campaignId);
   return { added: rows.length, skipped: contactIds.length - rows.length };
 }
 

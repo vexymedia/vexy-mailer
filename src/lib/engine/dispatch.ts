@@ -310,7 +310,12 @@ async function processCampaign(campaign: Campaign, settings: AppSettings): Promi
     };
   })) as unknown as ClaimResult;
 
-  if (claim.kind === "none") return { ...base, action: "nothing_due" };
+  if (claim.kind === "none") {
+    // Nothing due may mean nothing is left at all - for instance every contact
+    // replied, so no send ever reached advanceContact to notice.
+    await maybeCompleteCampaign(campaign.id);
+    return { ...base, action: "nothing_due" };
+  }
 
   if (claim.kind === "finished") {
     await maybeCompleteCampaign(campaign.id);

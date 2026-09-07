@@ -403,3 +403,77 @@ describe("test mode", () => {
     expect(await sendRows(seed.campaignId)).toHaveLength(0);
   });
 });
+
+describe("edge cases around a running campaign", () => {
+  const lateContact = {
+    line: 2,
+    email: "late@example.com",
+    first_name: "Late",
+    last_name: null,
+    company: null,
+    website: null,
+  };
+
+  it("schedules contacts imported into an already-active campaign", async () => {
+    // Three steps, so the campaign is still running when the import happens.
+    const seed = await seedCampaign();
+    await startCampaign(seed.campaignId);
+    await clearPacing(seed.campaignId);
+    await dispatchTick();
+
+    const { importContacts } = await import("@/lib/queries/contacts");
+    await importContacts([lateContact], seed.campaignId);
+
+    const [cc] = await sql<{ status: string; next_send_at: Date | null }[]>`
+      select cc.status, cc.next_send_at from campaign_contacts cc
+        join contacts c on c.id = cc.contact_id
+       where c.email = 'late@example.com'
+    `;
+    expect(cc.status).toBe("scheduled");
+    expect(cc.next_send_at).not.toBeNull();
+
+    await clearPacing(seed.campaignId);
+    await dispatchTick();
+    const rows = await sendRows(seed.campaignId);
+    expect(rows.map((r) => r.intended_email)).toContain("late@example.com");
+  });
+
+  it("leaves contacts imported into a finished campaign pending until it is restarted", async () => {
+    // Auto-starting on import would be a nasty surprise, so the campaign has to
+    // be started again deliberately - at which point the newcomers are picked up.
+    const seed = await seedCampaign({ steps: [{ delay_days: 0, subject: "S", body: "B" }] });
+    await startCampaign(seed.campaignId);
+    await clearPacing(seed.campaignId);
+    await dispatchTick();
+
+    const [finished] = await sql`select status from campaigns where id = ${seed.campaignId}`;
+    expect(finished.status).toBe("completed");
+
+    const { importContacts } = await import("@/lib/queries/contacts");
+    await importContacts([lateContact], seed.campaignId);
+
+    await dispatchTick();
+    expect(await sendRows(seed.campaignId)).toHaveLength(1); // nothing sent yet
+
+    await startCampaign(seed.campaignId);
+    await clearPacing(seed.campaignId);
+    await dispatchTick();
+
+    const rows = await sendRows(seed.campaignId);
+    expect(rows.map((r) => r.intended_email)).toContain("late@example.com");
+  });
+
+  it("marks a campaign completed once every contact has replied", async () => {
+    const seed = await seedCampaign();
+    await startCampaign(seed.campaignId);
+    await sql`
+      update campaign_contacts set status = 'replied', replied_at = now(), next_send_at = null
+       where campaign_id = ${seed.campaignId}
+    `;
+    await sql`update campaigns set next_slot_at = null where id = ${seed.campaignId}`;
+    await dispatchTick();
+
+    const [campaign] = await sql`select status from campaigns where id = ${seed.campaignId}`;
+    expect(campaign.status).toBe("completed");
+  });
+});

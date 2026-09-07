@@ -95,6 +95,27 @@ export async function startCampaign(campaignId: string): Promise<CampaignReadine
   return { ok: true, problems: [] };
 }
 
+/**
+ * Promotes newly added contacts from `pending` to `scheduled` when the campaign
+ * is already running. Without this, anyone imported into an active campaign
+ * would sit at `pending` with no next_send_at and never be picked up by the
+ * dispatcher, which only looks at `scheduled` and `sent`.
+ */
+export async function schedulePendingContacts(campaignId: string): Promise<number> {
+  const [campaign] = await sql<Campaign[]>`select * from campaigns where id = ${campaignId}`;
+  if (!campaign || campaign.status !== "active") return 0;
+
+  const rows = await sql<{ id: string }[]>`
+    update campaign_contacts
+       set status = 'scheduled',
+           next_send_at = ${nextWindowOpen(windowOf(campaign), new Date())},
+           updated_at = now()
+     where campaign_id = ${campaignId} and status = 'pending'
+    returning id
+  `;
+  return rows.length;
+}
+
 export async function pauseCampaign(campaignId: string): Promise<void> {
   await sql`
     update campaigns set status = 'paused', updated_at = now()

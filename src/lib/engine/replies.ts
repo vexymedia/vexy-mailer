@@ -118,11 +118,16 @@ async function processMailbox(mailbox: Mailbox): Promise<ReplyPollSummary["mailb
 
       // Immediate removal from the sequence: next_send_at is cleared, so the
       // dispatcher's candidate query can never pick this contact up again.
+      //
+      // Every campaign this person is in stops, not only the one the reply was
+      // matched to. Somebody who has answered should not then receive a cold
+      // email from a different sequence, and the matched campaign is not always
+      // the one they care about.
       const updated = await sql<{ id: string }[]>`
         update campaign_contacts
            set status = 'replied', replied_at = now(), next_send_at = null, updated_at = now()
-         where id = ${target.campaign_contact_id}
-           and status not in ('replied', 'unsubscribed')
+         where contact_id = ${target.contact_id}
+           and status in ('pending', 'scheduled', 'sent', 'failed')
         returning id
       `;
       if (updated.length > 0) {
