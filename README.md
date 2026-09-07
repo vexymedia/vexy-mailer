@@ -176,7 +176,7 @@ npm run db:migrate  # apply supabase/migrations
 
 ### Tests
 
-`npm test` runs 128 tests. Most are ordinary unit tests, but the interesting
+`npm test` runs 132 tests. Most are ordinary unit tests, but the interesting
 ones need a real database:
 
 ```bash
