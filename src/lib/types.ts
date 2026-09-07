@@ -25,6 +25,10 @@ export interface AppSettings {
 export interface Mailbox {
   id: string;
   name: string;
+  daily_limit: number;
+  timezone: string;
+  enabled: boolean;
+  last_send_at: Date | null;
   from_name: string;
   from_email: string;
   smtp_host: string;
@@ -62,7 +66,8 @@ export interface Contact {
 export interface Campaign {
   id: string;
   name: string;
-  mailbox_id: string;
+  /** @deprecated superseded by campaign_mailboxes; retained for history. */
+  mailbox_id: string | null;
   status: CampaignStatus;
   daily_limit: number;
   send_days: number[];
@@ -97,6 +102,8 @@ export interface CampaignContact {
   completed_at: Date | null;
   last_error: string | null;
   thread_message_id: string | null;
+  /** Sticky sender: set on the first send, never reassigned automatically. */
+  sender_mailbox_id: string | null;
 }
 
 export interface EmailSend {
@@ -116,4 +123,81 @@ export interface EmailSend {
   next_retry_at: Date | null;
   claimed_at: Date;
   sent_at: Date | null;
+  mailbox_id: string | null;
+}
+
+// ------------------------------------------------------------- inbox
+
+export type Classification =
+  | "unclassified"
+  | "positive"
+  | "not_interested"
+  | "later"
+  | "wrong_person"
+  | "ooo"
+  | "unsubscribe"
+  | "other";
+
+export const CLASSIFICATIONS: { value: Classification; label: string }[] = [
+  { value: "unclassified", label: "Unclassified" },
+  { value: "positive", label: "Positive" },
+  { value: "not_interested", label: "Not interested" },
+  { value: "later", label: "Later" },
+  { value: "wrong_person", label: "Wrong person" },
+  { value: "ooo", label: "Out of office" },
+  { value: "unsubscribe", label: "Unsubscribe" },
+  { value: "other", label: "Other" },
+];
+
+export interface ConversationRow {
+  id: string;
+  unread_count: number;
+  classification: Classification;
+  last_message_at: Date;
+  last_inbound_at: Date | null;
+  subject: string | null;
+  contact_email: string;
+  contact_name: string | null;
+  company: string | null;
+  campaign_name: string | null;
+  campaign_id: string | null;
+  mailbox_email: string;
+  mailbox_id: string;
+  /** The address the prospect actually replied to. */
+  replied_to_email: string | null;
+  message_count: number;
+}
+
+export interface ConversationDetail {
+  id: string;
+  classification: Classification;
+  unread_count: number;
+  subject: string | null;
+  campaign_id: string | null;
+  campaign_contact_id: string | null;
+  contact_id: string;
+  mailbox_id: string;
+  contact_email: string;
+  contact_name: string | null;
+  company: string | null;
+  website: string | null;
+  campaign_name: string | null;
+  mailbox_email: string;
+  mailbox_from_name: string;
+  mailbox_enabled: boolean;
+  contact_status: CampaignContactStatus | null;
+}
+
+export interface MessageRow {
+  id: string;
+  direction: "outbound" | "inbound";
+  kind: "campaign" | "manual_reply" | "incoming";
+  from_email: string;
+  to_email: string;
+  subject: string | null;
+  body_text: string | null;
+  message_id: string | null;
+  in_reply_to: string | null;
+  occurred_at: Date;
+  is_read: boolean;
 }

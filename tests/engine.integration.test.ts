@@ -67,7 +67,7 @@ describe("campaign lifecycle", () => {
     await sql`update mailboxes set last_test_ok = null where id = ${seed.mailboxId}`;
     const result = await startCampaign(seed.campaignId);
     expect(result.ok).toBe(false);
-    expect(result.problems.join(" ")).toContain("has not been tested");
+    expect(result.problems.join(" ")).toContain("has not passed a connection test");
   });
 
   it("walks a contact through every step of the sequence, in order", async () => {
@@ -432,8 +432,13 @@ describe("edge cases around a running campaign", () => {
     expect(cc.status).toBe("scheduled");
     expect(cc.next_send_at).not.toBeNull();
 
-    await clearPacing(seed.campaignId);
-    await dispatchTick();
+    // clearPacing makes every contact due at once and the dispatcher sends at
+    // most one email per campaign per tick, so the first contact's remaining
+    // follow-ups compete for ticks with the newcomer. Four covers both.
+    for (let i = 0; i < 4; i++) {
+      await clearPacing(seed.campaignId);
+      await dispatchTick();
+    }
     const rows = await sendRows(seed.campaignId);
     expect(rows.map((r) => r.intended_email)).toContain("late@example.com");
   });

@@ -5,6 +5,7 @@ import { logActivity } from "../activity";
 import { fetchNewMessages, hasImapConfigured, type InboxMessage } from "../imap";
 import { withLock } from "./locks";
 import type { Mailbox } from "../types";
+import { recordInboundMessage } from "../queries/inbox";
 
 /**
  * Reply detection.
@@ -42,16 +43,25 @@ interface MatchTarget {
   send_id: string | null;
 }
 
-/** Pass 1: the reply quotes a Message-ID we generated. */
+/**
+ * Pass 1: the reply quotes a Message-ID we generated.
+ *
+ * Both In-Reply-To and the whole References chain are considered. Some clients
+ * drop In-Reply-To but keep References, and a reply several messages deep in a
+ * thread points at the most recent message rather than the first.
+ */
 async function matchByThread(message: InboxMessage): Promise<MatchTarget | null> {
-  if (!message.inReplyTo) return null;
+  const raw = [message.inReplyTo, ...(message.references ?? "").split(/\s+/)].filter(Boolean) as string[];
+  if (raw.length === 0) return null;
+
   // Normalise: some clients strip the angle brackets, some keep them.
-  const candidates = [message.inReplyTo, `<${message.inReplyTo.replace(/^<|>$/g, "")}>`];
+  const candidates = [...new Set(raw.flatMap((id) => [id, `<${id.replace(/^<|>$/g, "")}>`]))];
   const [row] = await sql<MatchTarget[]>`
     select es.campaign_contact_id, es.campaign_id, es.id as send_id, cc.contact_id
       from email_sends es
       join campaign_contacts cc on cc.id = es.campaign_contact_id
      where es.message_id = any(${candidates})
+     order by es.sent_at desc nulls last
      limit 1
   `;
   return row ?? null;
@@ -114,6 +124,28 @@ async function processMailbox(mailbox: Mailbox): Promise<ReplyPollSummary["mailb
         returning id
       `;
       if (inserted.length === 0) continue; // already seen
+
+      // Persist into the unified inbox. Only possible when we know who wrote:
+      // a conversation is keyed on (mailbox, contact).
+      if (contactId) {
+        await recordInboundMessage({
+          mailboxId: mailbox.id,
+          contactId,
+          campaignId: target?.campaign_id ?? null,
+          campaignContactId: target?.campaign_contact_id ?? null,
+          fromEmail: message.from ?? "unknown",
+          toEmail: message.to ?? mailbox.from_email,
+          subject: message.subject,
+          bodyText: message.bodyText,
+          bodyHtml: message.bodyHtml,
+          messageId: message.messageId,
+          inReplyTo: message.inReplyTo,
+          references: message.references,
+          replyId: inserted[0].id,
+          receivedAt: message.receivedAt,
+        });
+      }
+
       if (!target) continue; // a reply from someone who is not in a campaign
 
       // Immediate removal from the sequence: next_send_at is cleared, so the

@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { sql } from "@/lib/db";
-import { listMailboxes } from "@/lib/queries/mailboxes";
+import { getCampaignMailboxIds } from "@/lib/queries/campaigns";
+import { listSenderOptions } from "@/lib/queries/senders";
 import { minutesToHHMM } from "@/lib/schedule";
 import { PageHeader } from "@/components/ui";
 import { CampaignForm } from "@/components/campaign-form";
@@ -12,7 +13,10 @@ export default async function EditCampaignPage({ params }: { params: Promise<{ i
   const { id } = await params;
   const [campaign] = await sql<Campaign[]>`select * from campaigns where id = ${id}`;
   if (!campaign) notFound();
-  const mailboxes = await listMailboxes();
+  const [mailboxes, selected] = await Promise.all([
+    listSenderOptions(id),
+    getCampaignMailboxIds(id),
+  ]);
 
   return (
     <>
@@ -23,7 +27,7 @@ export default async function EditCampaignPage({ params }: { params: Promise<{ i
           values={{
             id: campaign.id,
             name: campaign.name,
-            mailbox_id: campaign.mailbox_id,
+            mailbox_ids: selected,
             daily_limit: campaign.daily_limit,
             send_days: campaign.send_days,
             send_start: minutesToHHMM(campaign.send_start_minute),

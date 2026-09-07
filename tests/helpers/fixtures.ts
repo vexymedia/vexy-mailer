@@ -6,6 +6,8 @@ export interface SeedOptions {
   steps?: { delay_days: number; subject: string; body: string }[];
   contacts?: { email: string; first_name?: string; company?: string }[];
   dailyLimit?: number;
+  /** The mailbox's own global cap. Defaults high so it never masks other tests. */
+  mailboxDailyLimit?: number;
   /** Weekdays only, instead of the always-open default. */
   weekdaysOnly?: boolean;
 }
@@ -33,9 +35,9 @@ export async function seedCampaign(options: SeedOptions = {}): Promise<Seed> {
 
   const [mailbox] = await sql<{ id: string }[]>`
     insert into mailboxes (name, from_name, from_email, smtp_host, smtp_port, smtp_username,
-                           smtp_password_enc, smtp_secure, last_test_ok)
+                           smtp_password_enc, smtp_secure, last_test_ok, daily_limit)
     values ('Test', 'Tester', 'sender@example.com', 'smtp.example.com', 465, 'sender@example.com',
-            ${encryptSecret("secret")}, true, true)
+            ${encryptSecret("secret")}, true, true, ${options.mailboxDailyLimit ?? 1000})
     returning id
   `;
 
@@ -46,6 +48,8 @@ export async function seedCampaign(options: SeedOptions = {}): Promise<Seed> {
             ${days as unknown as number[]}, 0, 1440, 'Europe/Prague')
     returning id
   `;
+  // The sender pool is what the engine reads; mailbox_id is legacy history.
+  await sql`insert into campaign_mailboxes (campaign_id, mailbox_id) values (${campaign.id}, ${mailbox.id})`;
 
   const stepIds: string[] = [];
   for (const [index, step] of steps.entries()) {

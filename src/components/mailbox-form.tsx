@@ -17,6 +17,9 @@ export interface MailboxFormValues {
   imap_port: number | "";
   imap_username: string;
   imap_secure: boolean;
+  daily_limit: number;
+  mailbox_timezone: string;
+  enabled: boolean;
 }
 
 export function MailboxForm({ values }: { values: MailboxFormValues }) {
@@ -44,6 +47,51 @@ export function MailboxForm({ values }: { values: MailboxFormValues }) {
               <input id="from_email" name="from_email" type="email" defaultValue={values.from_email} required className="input" />
             </div>
           </div>
+        </section>
+
+        <section className="mt-8 border-t border-zinc-200 pt-6">
+          <h2 className="mb-1 text-sm font-semibold text-zinc-900">Sending policy</h2>
+          <p className="mb-4 text-xs text-zinc-500">
+            The daily limit is global: it applies across every campaign this mailbox is used by, so
+            two campaigns cannot each spend it separately.
+          </p>
+          <div className="grid gap-5 sm:grid-cols-2">
+            <div>
+              <label className="label" htmlFor="daily_limit">Daily automated send limit</label>
+              <input
+                id="daily_limit"
+                name="daily_limit"
+                type="number"
+                min={1}
+                max={2000}
+                defaultValue={values.daily_limit}
+                required
+                className="input"
+              />
+              <p className="hint">Manual replies from the Inbox do not count against this.</p>
+            </div>
+            <div>
+              <label className="label" htmlFor="mailbox_timezone">Timezone for the daily reset</label>
+              <input
+                id="mailbox_timezone"
+                name="mailbox_timezone"
+                defaultValue={values.mailbox_timezone}
+                required
+                list="mailbox-timezones"
+                className="input"
+              />
+              <datalist id="mailbox-timezones">
+                {["Europe/Prague", "Europe/Bratislava", "Europe/London", "Europe/Berlin", "UTC"].map((tz) => (
+                  <option key={tz} value={tz} />
+                ))}
+              </datalist>
+              <p className="hint">Defines when &quot;today&quot; restarts for this mailbox.</p>
+            </div>
+          </div>
+          <label className="mt-4 flex items-center gap-2 text-sm text-zinc-700">
+            <input type="checkbox" name="enabled" defaultChecked={values.enabled} className="size-4 rounded border-zinc-300" />
+            Enabled — available for automated sending
+          </label>
         </section>
 
         <section className="mt-8 border-t border-zinc-200 pt-6">

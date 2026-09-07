@@ -1,0 +1,73 @@
+"use client";
+
+import { classifyConversationAction, sendReplyAction } from "@/lib/actions";
+import { ActionForm, SubmitButton } from "./action-form";
+import { CLASSIFICATIONS, type Classification } from "@/lib/types";
+
+/**
+ * Reply composer. The sending mailbox is fixed to the one that opened the
+ * conversation and is shown, not chosen - replying from a different address
+ * would break the thread for the prospect.
+ */
+export function ReplyComposer({
+  conversationId,
+  fromEmail,
+  toEmail,
+  disabled,
+}: {
+  conversationId: string;
+  fromEmail: string;
+  toEmail: string;
+  disabled: boolean;
+}) {
+  return (
+    <ActionForm action={sendReplyAction} className="card p-5">
+      <input type="hidden" name="conversation_id" value={conversationId} />
+      <div className="mb-3 text-xs text-zinc-500">
+        Replying as <span className="font-medium text-zinc-900">{fromEmail}</span> to{" "}
+        <span className="font-medium text-zinc-900">{toEmail}</span>
+      </div>
+      <textarea
+        name="body"
+        rows={7}
+        required
+        disabled={disabled}
+        placeholder="Write your reply…"
+        className="input font-sans text-sm leading-relaxed"
+      />
+      <div className="mt-3 flex items-center gap-3">
+        <SubmitButton pendingLabel="Sending…" disabled={disabled}>Send reply</SubmitButton>
+        {disabled ? (
+          <span className="text-xs text-amber-700">
+            This mailbox is disabled, so nothing can be sent from it.
+          </span>
+        ) : (
+          <span className="text-xs text-zinc-500">
+            Threading headers are added automatically. Manual replies do not count against the
+            mailbox&apos;s campaign quota.
+          </span>
+        )}
+      </div>
+    </ActionForm>
+  );
+}
+
+export function ClassificationPicker({
+  conversationId,
+  value,
+}: {
+  conversationId: string;
+  value: Classification;
+}) {
+  return (
+    <ActionForm action={classifyConversationAction} hideMessages>
+      <input type="hidden" name="conversation_id" value={conversationId} />
+      <select name="classification" defaultValue={value} className="input text-sm">
+        {CLASSIFICATIONS.map((c) => (
+          <option key={c.value} value={c.value}>{c.label}</option>
+        ))}
+      </select>
+      <SubmitButton className="btn-secondary mt-2 w-full" pendingLabel="Saving…">Update status</SubmitButton>
+    </ActionForm>
+  );
+}

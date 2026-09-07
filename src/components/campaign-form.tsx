@@ -8,7 +8,7 @@ import { WEEKDAY_LABELS } from "@/lib/schedule";
 export interface CampaignFormValues {
   id?: string;
   name: string;
-  mailbox_id: string;
+  mailbox_ids: string[];
   daily_limit: number;
   send_days: number[];
   send_start: string;
@@ -26,12 +26,23 @@ const COMMON_TIMEZONES = [
   "UTC",
 ];
 
+export interface SenderOption {
+  id: string;
+  name: string;
+  from_email: string;
+  enabled: boolean;
+  daily_limit: number;
+  used_today: number;
+  /** True when a contact is already pinned to it and it cannot be removed. */
+  pinned: boolean;
+}
+
 export function CampaignForm({
   values,
   mailboxes,
 }: {
   values: CampaignFormValues;
-  mailboxes: { id: string; name: string; from_email: string }[];
+  mailboxes: SenderOption[];
 }) {
   return (
     <ActionForm action={saveCampaignAction} className="card p-6">
@@ -43,22 +54,50 @@ export function CampaignForm({
           <input id="name" name="name" defaultValue={values.name} required className="input" placeholder="Q3 agencies — Prague" />
         </div>
 
-        <div>
-          <label className="label" htmlFor="mailbox_id">Sender mailbox</label>
-          <select id="mailbox_id" name="mailbox_id" defaultValue={values.mailbox_id} required className="input">
-            <option value="">Choose a mailbox…</option>
+        <fieldset>
+          <legend className="label">Sender mailboxes</legend>
+          <p className="mb-2 text-xs text-zinc-500">
+            Emails are spread across the mailboxes you tick, always choosing the least-used one for a
+            new contact. Once a prospect has heard from one address, every follow-up keeps coming
+            from that same address.
+          </p>
+          <div className="space-y-1.5">
             {mailboxes.map((mailbox) => (
-              <option key={mailbox.id} value={mailbox.id}>
-                {mailbox.name} — {mailbox.from_email}
-              </option>
+              <label
+                key={mailbox.id}
+                className="flex cursor-pointer items-center gap-3 rounded-md border border-zinc-200 px-3 py-2 text-sm has-checked:border-zinc-900 has-checked:bg-zinc-50"
+              >
+                <input
+                  type="checkbox"
+                  name="mailbox_ids"
+                  value={mailbox.id}
+                  defaultChecked={values.mailbox_ids.includes(mailbox.id)}
+                  className="size-4 rounded border-zinc-300"
+                />
+                <span className="flex-1">
+                  <span className="font-medium text-zinc-900">{mailbox.from_email}</span>
+                  <span className="ml-2 text-xs text-zinc-500">{mailbox.name}</span>
+                  {!mailbox.enabled ? (
+                    <span className="badge ml-2 bg-orange-50 text-orange-700 ring-orange-200">disabled</span>
+                  ) : null}
+                  {mailbox.pinned ? (
+                    <span className="badge ml-2 bg-blue-50 text-blue-700 ring-blue-200">
+                      contacts pinned
+                    </span>
+                  ) : null}
+                </span>
+                <span className="tabular-nums text-xs text-zinc-500">
+                  {mailbox.used_today} / {mailbox.daily_limit} today
+                </span>
+              </label>
             ))}
-          </select>
+          </div>
           {mailboxes.length === 0 ? (
             <p className="hint text-amber-700">
               No mailboxes yet. <Link href="/mailboxes/new" className="underline">Add one first.</Link>
             </p>
           ) : null}
-        </div>
+        </fieldset>
 
         <div>
           <label className="label" htmlFor="daily_limit">Daily send limit</label>
@@ -73,7 +112,8 @@ export function CampaignForm({
             className="input"
           />
           <p className="hint">
-            Emails are spread evenly across the sending window with random gaps, never in bursts.
+            An upper bound for this campaign alone. Each mailbox also has its own global limit
+            across every campaign, and the lower of the two always wins.
           </p>
         </div>
 

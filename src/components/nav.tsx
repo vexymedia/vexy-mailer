@@ -6,6 +6,7 @@ import { logoutAction } from "@/lib/actions";
 
 const LINKS = [
   { href: "/", label: "Dashboard" },
+  { href: "/inbox", label: "Inbox" },
   { href: "/campaigns", label: "Campaigns" },
   { href: "/contacts", label: "Contacts" },
   { href: "/mailboxes", label: "Mailboxes" },
