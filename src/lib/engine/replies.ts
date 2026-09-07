@@ -67,16 +67,31 @@ async function matchByThread(message: InboxMessage): Promise<MatchTarget | null>
   return row ?? null;
 }
 
-/** Pass 2: the sender is a contact with at least one email already sent. */
+/**
+ * Pass 2: the sender is a contact we have already written to from this mailbox.
+ *
+ * The link is the contact's sticky sender - the mailbox that actually sent
+ * their emails - rather than anything on the campaign, because a campaign now
+ * has a pool and its legacy single-mailbox column is no longer authoritative.
+ * A send from this mailbox is accepted as evidence too, which covers rows that
+ * predate sticky assignment.
+ */
 async function matchBySender(message: InboxMessage, mailboxId: string): Promise<MatchTarget | null> {
   if (!message.from) return null;
   const [row] = await sql<MatchTarget[]>`
     select cc.id as campaign_contact_id, cc.contact_id, cc.campaign_id, null::uuid as send_id
       from campaign_contacts cc
-      join contacts c   on c.id = cc.contact_id
-      join campaigns cp on cp.id = cc.campaign_id
+      join contacts c on c.id = cc.contact_id
      where c.email = ${message.from}
-       and cp.mailbox_id = ${mailboxId}
+       and (
+         cc.sender_mailbox_id = ${mailboxId}
+         or exists (
+           select 1 from email_sends es
+            where es.campaign_contact_id = cc.id
+              and es.mailbox_id = ${mailboxId}
+              and es.status in ('sent', 'unknown')
+         )
+       )
        and exists (
          select 1 from email_sends es
           where es.campaign_contact_id = cc.id and es.status in ('sent', 'unknown')

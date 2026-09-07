@@ -28,14 +28,19 @@ export async function checkCampaignReadiness(campaignId: string): Promise<Campai
   if (pool.length === 0) {
     problems.push("The campaign has no sender mailboxes.");
   } else {
+    // One unusable mailbox in a pool of five is not a reason to block the
+    // campaign - the others can carry it, and allocation skips the bad one.
+    // Only a pool with nothing usable at all is a blocker.
     const usable = pool.filter((m) => m.enabled && m.last_test_ok === true);
     if (usable.length === 0) {
-      problems.push(
-        "No sender mailbox is usable: each is either disabled or has no successful connection test.",
-      );
-    }
-    for (const mailbox of pool.filter((m) => m.last_test_ok !== true)) {
-      problems.push(`${mailbox.from_email} has not passed a connection test yet.`);
+      const reasons = pool
+        .map((m) =>
+          !m.enabled
+            ? `${m.from_email} is disabled`
+            : `${m.from_email} has not passed a connection test`,
+        )
+        .join("; ");
+      problems.push(`No sender mailbox is usable: ${reasons}.`);
     }
   }
 
