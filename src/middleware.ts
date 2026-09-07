@@ -7,7 +7,19 @@ import { SESSION_COOKIE } from "@/lib/session-cookie";
  * leaves signature verification to the pages and actions themselves
  * (`requireAuth`), which run on Node.
  */
-const PUBLIC_PREFIXES = ["/login", "/api/cron", "/u/", "/_next", "/favicon"];
+const PUBLIC_PREFIXES = [
+  "/login",
+  "/api/cron",
+  "/u/", // public one-click unsubscribe
+  "/_next",
+  // Next's generated metadata routes. Without these the icon request is
+  // redirected to /login, which the browser then fails to parse as an image.
+  "/favicon",
+  "/icon",
+  "/apple-icon",
+  "/robots.txt",
+  "/sitemap.xml",
+];
 
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
@@ -24,5 +36,5 @@ export function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
+  matcher: ["/((?!_next/static|_next/image|favicon.ico|icon|apple-icon).*)"],
 };
