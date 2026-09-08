@@ -421,3 +421,69 @@ describe("daily quota boundary", () => {
     expect(await sentToday(mailbox)).toBe(2);
   });
 });
+
+/**
+ * Documents the behaviour reported during QA: a campaign with daily_limit 3 and
+ * three contacts sends ONE email at start, not three.
+ *
+ * This is the pacing design, not a defect. The dispatcher sends at most one
+ * email per campaign per tick and then parks the campaign until next_slot_at,
+ * which sits window_length / daily_limit ahead, jittered 0.6-1.4x. For an
+ * 08:00-16:00 window at 3/day that is a ~2h40m average gap, so the three emails
+ * spread across the working day instead of leaving as a burst.
+ */
+describe("pacing: three contacts, daily limit three", () => {
+  it("sends one immediately and reports the rest as paced, not as nothing to do", async () => {
+    const mailbox = await createMailbox({ email: "paced@vexy.cz", dailyLimit: 40 });
+    const { campaignId } = await createCampaign({
+      name: "Paced", mailboxIds: [mailbox], dailyLimit: 3,
+      contacts: ["a@prospect.test", "b@prospect.test", "c@prospect.test"],
+    });
+    // A realistic working-hours window rather than the always-open test default.
+    await sql`
+      update campaigns set send_start_minute = 0, send_end_minute = 1440 where id = ${campaignId}
+    `;
+    await startCampaign(campaignId);
+    await makeAllDue(campaignId);
+
+    const first = await dispatchTick();
+    expect(first.outcomes[0].action).toBe("simulated");
+    expect(await sentToday(mailbox)).toBe(1);
+
+    // Pressing "Run worker now" again does NOT send: the campaign is parked.
+    const second = await dispatchTick();
+    expect(second.outcomes[0].action).toBe("paced");
+    expect(await sentToday(mailbox)).toBe(1);
+
+    // The other two are still queued, not dropped or failed.
+    const [pending] = await sql<{ count: number }[]>`
+      select count(*)::int as count from campaign_contacts
+       where campaign_id = ${campaignId} and status in ('scheduled', 'sent')
+    `;
+    expect(pending.count).toBe(2);
+
+    // The cursor is a real future instant: 24h/3 = 8h base, jittered 0.6-1.4x.
+    const [campaign] = await sql<{ next_slot_at: Date }[]>`
+      select next_slot_at from campaigns where id = ${campaignId}
+    `;
+    const aheadHours = (campaign.next_slot_at.getTime() - Date.now()) / 3_600_000;
+    expect(aheadHours).toBeGreaterThan(4);
+    expect(aheadHours).toBeLessThan(12);
+
+    // Once that instant passes, the next contact goes - and only that one.
+    await sql`update campaigns set next_slot_at = now() - interval '1 second' where id = ${campaignId}`;
+    expect((await dispatchTick()).outcomes[0].action).toBe("simulated");
+    expect(await sentToday(mailbox)).toBe(2);
+  });
+
+  it("stops at the campaign limit even after every gap has elapsed", async () => {
+    const mailbox = await createMailbox({ email: "capped@vexy.cz", dailyLimit: 40 });
+    const { campaignId } = await createCampaign({
+      name: "Capped at three", mailboxIds: [mailbox], dailyLimit: 3,
+      contacts: ["a@x.test", "b@x.test", "c@x.test", "d@x.test", "e@x.test"],
+    });
+    await startCampaign(campaignId);
+    await drain([campaignId]);
+    expect(await sentToday(mailbox)).toBe(3);
+  });
+});

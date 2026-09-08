@@ -168,7 +168,14 @@ export async function listConversations(filters: InboxFilters = {}): Promise<Con
       join contacts c on c.id = cv.contact_id
       join mailboxes mb on mb.id = cv.mailbox_id
       left join campaigns cp on cp.id = cv.campaign_id
-     where cv.last_inbound_at is not null
+     -- Visibility is derived from the messages that actually exist, not from
+     -- last_inbound_at. Nothing recomputes that column when messages or the
+     -- replies behind them are deleted, so trusting it left conversations with
+     -- no inbound message at all sitting in the inbox.
+     where exists (
+             select 1 from messages m
+              where m.conversation_id = cv.id and m.direction = 'inbound'
+           )
        and (${filter} <> 'unread' or cv.unread_count > 0)
        and (${filter} <> 'positive' or cv.classification = 'positive')
        and (${filter} <> 'needs_action'
@@ -220,6 +227,41 @@ export async function markConversationRead(id: string): Promise<void> {
     await tx`update messages set is_read = true where conversation_id = ${id} and is_read = false`;
     await tx`update conversations set unread_count = 0, updated_at = now() where id = ${id}`;
   });
+}
+
+/**
+ * Removes a conversation from the inbox, deliberately.
+ *
+ * Deletes the conversation and its messages and nothing else. Contacts,
+ * campaign contacts, email_sends and replies are all left intact: email_sends
+ * in particular is the ledger that stops a contact being emailed the same step
+ * twice, so tidying the inbox must never touch it.
+ *
+ * This exists because no other deletion reaches a conversation. Removing a
+ * reply detaches the ledger link but keeps the history (by design), and
+ * removing a campaign only nulls the campaign columns - so without an explicit
+ * action an operator has no safe way to clear a stale thread.
+ */
+export async function deleteConversation(id: string): Promise<void> {
+  const [conversation] = await sql<{ contact_email: string; mailbox_email: string }[]>`
+    select c.email as contact_email, m.from_email as mailbox_email
+      from conversations cv
+      join contacts c on c.id = cv.contact_id
+      join mailboxes m on m.id = cv.mailbox_id
+     where cv.id = ${id}
+  `;
+  // messages cascade from conversations.
+  await sql`delete from conversations where id = ${id}`;
+  if (conversation) {
+    const { logActivity } = await import("../activity");
+    await logActivity({
+      level: "warn",
+      action: "Conversation deleted",
+      detail:
+        `Removed the inbox thread between ${conversation.mailbox_email} and ` +
+        `${conversation.contact_email}. Send history and contact records were not affected.`,
+    });
+  }
 }
 
 export async function setClassification(id: string, classification: Classification): Promise<void> {
@@ -281,7 +323,11 @@ export async function getInboxCounts(): Promise<InboxCounts> {
            count(*) filter (where unread_count > 0)::int as unread,
            count(*) filter (where classification = 'positive')::int as positive,
            count(*) filter (where classification in ('unclassified','positive','later'))::int as needs_action
-      from conversations where last_inbound_at is not null
+      from conversations cv
+     where exists (
+             select 1 from messages m
+              where m.conversation_id = cv.id and m.direction = 'inbound'
+           )
   `;
   return row;
 }

@@ -2,7 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { sql } from "@/lib/db";
 import { checkCampaignReadiness } from "@/lib/queries/campaigns";
-import { listActivity, listCampaignContacts, listCampaignStats } from "@/lib/queries/dashboard";
+import { describeSenderPool, listActivity, listCampaignContacts, listCampaignStats } from "@/lib/queries/dashboard";
 import { formatSendDays, minutesToHHMM } from "@/lib/schedule";
 import { PageHeader, Stat, StatusBadge, Table, DateTime } from "@/components/ui";
 import { CampaignControls } from "@/components/campaign-controls";
@@ -42,7 +42,7 @@ export default async function CampaignDetailPage({
           <>
             <StatusBadge status={campaign.status} />{" "}
             <span className="ml-2">
-              {stats?.mailbox_name} · {formatSendDays(campaign.send_days)}{" "}
+              {describeSenderPool(stats?.mailbox_names ?? [])} · {formatSendDays(campaign.send_days)}{" "}
               {minutesToHHMM(campaign.send_start_minute)}–{minutesToHHMM(campaign.send_end_minute)}{" "}
               {campaign.timezone} · limit {campaign.daily_limit}/day
             </span>

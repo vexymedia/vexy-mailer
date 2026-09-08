@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { listCampaignStats } from "@/lib/queries/dashboard";
+import { describeSenderPool, listCampaignStats } from "@/lib/queries/dashboard";
 import { formatSendDays, minutesToHHMM } from "@/lib/schedule";
 import { PageHeader, StatusBadge, Table, EmptyState } from "@/components/ui";
 
@@ -45,7 +45,12 @@ export default async function CampaignsPage() {
                 <Link href={`/campaigns/${campaign.id}`} className="font-medium text-zinc-900 hover:underline">
                   {campaign.name}
                 </Link>
-                <div className="text-xs text-zinc-500">{campaign.mailbox_name}</div>
+                <div className="text-xs text-zinc-500">
+                  {describeSenderPool(campaign.mailbox_names)}
+                  {campaign.mailbox_names.length > 1 ? (
+                    <span className="ml-1 text-zinc-400">({campaign.mailbox_names.length} senders)</span>
+                  ) : null}
+                </div>
               </td>
               <td className="td"><StatusBadge status={campaign.status} /></td>
               <td className="td text-xs text-zinc-600">

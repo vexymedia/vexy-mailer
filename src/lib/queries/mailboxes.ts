@@ -120,11 +120,27 @@ export async function testMailbox(id: string): Promise<MailboxTestResult> {
 }
 
 export async function deleteMailbox(id: string): Promise<{ ok: boolean; error?: string }> {
-  const [{ count }] = await sql<{ count: number }[]>`
-    select count(*)::int as count from campaigns where mailbox_id = ${id}
+  // Counted through the sender pool and the sticky assignments, not through
+  // the deprecated campaigns.mailbox_id: that column is NULL for every campaign
+  // created since the multi-mailbox migration, so the old guard saw nothing and
+  // let the delete through to a raw foreign-key error.
+  const [usage] = await sql<{ campaigns: number; pinned_contacts: number }[]>`
+    select (select count(*)::int from campaign_mailboxes where mailbox_id = ${id}) as campaigns,
+           (select count(*)::int from campaign_contacts where sender_mailbox_id = ${id}) as pinned_contacts
   `;
-  if (count > 0) {
-    return { ok: false, error: `This mailbox is used by ${count} campaign(s) and cannot be deleted.` };
+  if (usage.campaigns > 0) {
+    return {
+      ok: false,
+      error: `This mailbox is in the sender pool of ${usage.campaigns} campaign(s) and cannot be deleted.`,
+    };
+  }
+  if (usage.pinned_contacts > 0) {
+    return {
+      ok: false,
+      error:
+        `${usage.pinned_contacts} contact(s) are pinned to this mailbox as their sender and cannot be ` +
+        "moved to another one, so it cannot be deleted.",
+    };
   }
   await sql`delete from mailboxes where id = ${id}`;
   await logActivity({ action: "Mailbox deleted", level: "warn" });

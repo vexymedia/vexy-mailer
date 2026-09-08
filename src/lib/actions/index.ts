@@ -21,6 +21,7 @@ import {
   setCampaignMailboxes,
 } from "@/lib/queries/campaigns";
 import {
+  deleteConversation,
   markConversationRead,
   sendManualReply,
   setClassification,
@@ -506,4 +507,14 @@ export async function markReadAction(_prev: ActionState, formData: FormData): Pr
   await markConversationRead(conversationId);
   revalidatePath("/inbox");
   return {};
+}
+
+export async function deleteConversationAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  await requireAuth();
+  await deleteConversation(String(formData.get("conversation_id") ?? ""));
+  revalidatePath("/inbox");
+  redirect("/inbox");
 }

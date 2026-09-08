@@ -119,7 +119,9 @@ export default async function InboxPage({
                 ) : null}
               </td>
               <td className="td">{c.company ?? "—"}</td>
-              <td className="td text-xs">{c.campaign_name ?? "—"}</td>
+              <td className="td text-xs">
+                {c.campaign_name ?? <span className="text-zinc-400">no campaign</span>}
+              </td>
               <td className="td text-xs">
                 <div className="text-zinc-900">{c.mailbox_email}</div>
                 {c.replied_to_email && c.replied_to_email !== c.mailbox_email ? (
