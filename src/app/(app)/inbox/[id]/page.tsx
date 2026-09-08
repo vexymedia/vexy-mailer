@@ -3,7 +3,7 @@ import { notFound } from "next/navigation";
 import { getConversation, listMessages, markConversationRead } from "@/lib/queries/inbox";
 import { PageHeader, DateTime, StatusBadge } from "@/components/ui";
 import { ClassificationBadge } from "@/components/inbox-bits";
-import { ClassificationPicker, ReplyComposer } from "@/components/conversation-actions";
+import { ClassificationPicker, DeleteConversationButton, ReplyComposer } from "@/components/conversation-actions";
 
 export const dynamic = "force-dynamic";
 
@@ -24,7 +24,7 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
           <>
             {conversation.contact_email}
             {conversation.company ? ` · ${conversation.company}` : ""}
-            {conversation.campaign_name ? ` · ${conversation.campaign_name}` : ""}
+            {conversation.campaign_name ? ` · ${conversation.campaign_name}` : " · no campaign"}
             {" · "}
             <span className="text-zinc-500">sent from {conversation.mailbox_email}</span>
           </>
@@ -120,6 +120,14 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
             This prospect has replied, so automated follow-ups have stopped. Answering here does not
             put them back into the sequence.
           </p>
+
+          <div className="card p-4">
+            <h2 className="mb-1 text-sm font-semibold text-zinc-900">Remove</h2>
+            <p className="mb-3 text-xs text-zinc-500">
+              Clears this thread from the Inbox. Send history and contact records are kept.
+            </p>
+            <DeleteConversationButton conversationId={id} />
+          </div>
         </aside>
       </div>
     </>

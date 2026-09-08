@@ -102,7 +102,10 @@ you want to type at the login screen.
    do about app passwords.
 3. **[docs/DEPLOY.md](docs/DEPLOY.md)** — deploy to Vercel and wire up the
    worker.
-4. **[docs/PRE_FLIGHT.md](docs/PRE_FLIGHT.md)** — the checklist to work through
+4. **[docs/INBOX_DELETION_SEMANTICS.md](docs/INBOX_DELETION_SEMANTICS.md)** — what
+   deleting a reply, a campaign or a contact does to the Inbox, and how to
+   remove a stale conversation safely.
+5. **[docs/PRE_FLIGHT.md](docs/PRE_FLIGHT.md)** — the checklist to work through
    before your first real campaign. Do not skip this one.
 
 ## How sending actually works

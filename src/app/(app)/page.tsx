@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { getGlobalStats, listCampaignStats } from "@/lib/queries/dashboard";
+import { describeSenderPool, getGlobalStats, listCampaignStats } from "@/lib/queries/dashboard";
 import { formatSendDays, minutesToHHMM } from "@/lib/schedule";
 import { PageHeader, Stat, StatusBadge, EmptyState, DateTime } from "@/components/ui";
 import { RunWorkerButton } from "@/components/run-worker-button";
@@ -63,7 +63,7 @@ export default async function DashboardPage() {
                     {campaign.name}
                   </Link>
                   <p className="mt-0.5 text-xs text-zinc-500">
-                    {campaign.mailbox_name} · {formatSendDays(campaign.send_days)}{" "}
+                    {describeSenderPool(campaign.mailbox_names)} · {formatSendDays(campaign.send_days)}{" "}
                     {minutesToHHMM(campaign.send_start_minute)}–{minutesToHHMM(campaign.send_end_minute)}{" "}
                     {campaign.timezone} · {campaign.sent_today}/{campaign.daily_limit} of today&apos;s
                     limit used

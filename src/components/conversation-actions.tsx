@@ -1,6 +1,6 @@
 "use client";
 
-import { classifyConversationAction, sendReplyAction } from "@/lib/actions";
+import { classifyConversationAction, deleteConversationAction, sendReplyAction } from "@/lib/actions";
 import { ActionForm, SubmitButton } from "./action-form";
 import { CLASSIFICATIONS, type Classification } from "@/lib/types";
 
@@ -68,6 +68,30 @@ export function ClassificationPicker({
         ))}
       </select>
       <SubmitButton className="btn-secondary mt-2 w-full" pendingLabel="Saving…">Update status</SubmitButton>
+    </ActionForm>
+  );
+}
+
+/**
+ * Removes the thread from the inbox. Deliberately worded so the operator knows
+ * what survives: this clears the conversation view only, never the send
+ * history that keeps a contact from being emailed twice.
+ */
+export function DeleteConversationButton({ conversationId }: { conversationId: string }) {
+  return (
+    <ActionForm action={deleteConversationAction} hideMessages>
+      <input type="hidden" name="conversation_id" value={conversationId} />
+      <SubmitButton
+        className="btn-danger w-full"
+        pendingLabel="Deleting…"
+        confirm={
+          "Remove this conversation from the Inbox?\n\n" +
+          "The messages shown here are deleted. The contact, the campaign and the record of " +
+          "which emails were already sent are all kept, so this cannot cause anyone to be emailed twice."
+        }
+      >
+        Delete conversation
+      </SubmitButton>
     </ActionForm>
   );
 }

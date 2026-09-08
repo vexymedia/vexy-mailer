@@ -5,7 +5,11 @@ export interface CampaignStats {
   id: string;
   name: string;
   status: CampaignStatus;
-  mailbox_name: string;
+  /**
+   * Every mailbox in the campaign's sender pool, by address. Empty when the
+   * pool is empty - which is surfaced, never used to hide the campaign.
+   */
+  mailbox_names: string[];
   daily_limit: number;
   timezone: string;
   send_days: number[];
@@ -26,7 +30,7 @@ export async function listCampaignStats(): Promise<CampaignStats[]> {
   return sql<CampaignStats[]>`
     select cp.id, cp.name, cp.status, cp.daily_limit, cp.timezone, cp.send_days,
            cp.send_start_minute, cp.send_end_minute, cp.next_slot_at,
-           mb.name as mailbox_name,
+           coalesce(mb.mailbox_names, '{}') as mailbox_names,
            coalesce(cc.contacts, 0)  as contacts,
            coalesce(es.sent, 0)      as sent,
            coalesce(cc.replies, 0)   as replies,
@@ -35,7 +39,16 @@ export async function listCampaignStats(): Promise<CampaignStats[]> {
            coalesce(es.needs_review, 0) as needs_review,
            coalesce(es.sent_today, 0)   as sent_today
       from campaigns cp
-      join mailboxes mb on mb.id = cp.mailbox_id
+      -- LEFT JOIN LATERAL over the sender pool, never an inner join through
+      -- campaigns.mailbox_id. That column is deprecated and NULL for every
+      -- campaign created since the multi-mailbox migration, so joining through
+      -- it silently dropped live campaigns from this list entirely.
+      left join lateral (
+        select coalesce(array_agg(m.from_email order by m.from_email), '{}') as mailbox_names
+          from campaign_mailboxes cm
+          join mailboxes m on m.id = cm.mailbox_id
+         where cm.campaign_id = cp.id
+      ) mb on true
       left join lateral (
         select count(*)::int as contacts,
                count(*) filter (where status = 'replied')::int as replies,
@@ -56,6 +69,17 @@ export async function listCampaignStats(): Promise<CampaignStats[]> {
        case cp.status when 'active' then 0 when 'paused' then 1 when 'draft' then 2 else 3 end,
        cp.created_at desc
   `;
+}
+
+/**
+ * How a sender pool reads on a campaign card. One mailbox reads as itself;
+ * several are listed; none is called out rather than left blank, because an
+ * empty pool is the reason a campaign cannot send.
+ */
+export function describeSenderPool(mailboxNames: string[]): string {
+  if (mailboxNames.length === 0) return "No sender mailbox";
+  if (mailboxNames.length <= 2) return mailboxNames.join(", ");
+  return `${mailboxNames[0]} +${mailboxNames.length - 1} more`;
 }
 
 export interface ActivityRow {
