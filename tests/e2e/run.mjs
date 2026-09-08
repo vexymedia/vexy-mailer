@@ -73,20 +73,22 @@ try {
   await page.fill('input[name="smtp_port"]', String(process.env.SMTP_PORT));
   await page.fill('input[name="smtp_username"]', "sender@example.com");
   await page.fill('input[name="smtp_password"]', "secret");
+  await page.fill('input[name="daily_limit"]', "40");
   await page.uncheck('input[name="smtp_secure"]');
   await page.uncheck('input[name="imap_secure"]');
   await shot(page, "mailbox-form");
   await page.click('button:has-text("Add mailbox")');
   await page.waitForURL(`${BASE}/mailboxes`);
   await expectVisible(page, "text=Local test", "mailbox is created");
-  await expectVisible(page, "text=never tested", "a new mailbox starts untested");
+  await expectVisible(page, "text=untested", "a new mailbox starts untested");
+  await expectVisible(page, "text=0 / 40", "the mailbox shows its daily limit and usage");
 
   // password must not be echoed back to the browser
   const html = await page.content();
   if (html.includes("secret")) fail("password is not sent to the client", "plaintext found in HTML");
   else ok("password is not sent to the client");
 
-  await page.click('a:has-text("Local test")');
+  await page.click('a:has-text("sender@example.com")');
   await page.click('button:has-text("Test connection")');
   await expectVisible(page, "text=SMTP connected", "test connection succeeds against the local server");
   await shot(page, "mailbox-tested");
@@ -112,6 +114,7 @@ try {
   // ---- campaign ---------------------------------------------------------
   await page.goto(`${BASE}/campaigns/new`);
   await page.fill('input[name="name"]', "E2E campaign");
+  await page.check('input[name="mailbox_ids"]');
   await page.fill('input[name="daily_limit"]', "50");
   await page.fill('input[name="send_start"]', "00:00");
   await page.fill('input[name="send_end"]', "23:59");
@@ -207,8 +210,24 @@ try {
   else fail("redirect mode without an address is refused", "the form submitted anyway");
   await shot(page, "settings");
 
+  // ---- inbox ------------------------------------------------------------
+  await page.goto(`${BASE}/inbox`);
+  await expectVisible(page, "h1:has-text('Inbox')", "the Inbox page renders");
+  await expectVisible(page, "text=No replies yet", "an empty inbox says so");
+  for (const label of ["All", "Unread", "Positive", "Needs action"]) {
+    await expectVisible(page, `a:has-text("${label}")`, `inbox filter "${label}" is present`);
+  }
+  await expectVisible(page, 'select[name="campaign"]', "inbox can filter by campaign");
+  await expectVisible(page, 'select[name="mailbox"]', "inbox can filter by mailbox");
+  await expectVisible(page, 'input[name="q"]', "inbox has a search box");
+  await shot(page, "inbox");
+
+  await page.goto(`${BASE}/mailboxes`);
+  await expectVisible(page, "text=Sent today", "mailboxes list shows today's usage");
+  await shot(page, "mailboxes");
+
   // ---- other pages render ----------------------------------------------
-  for (const [path, heading] of [["/activity", "Activity"], ["/campaigns", "Campaigns"], ["/contacts", "Contacts"]]) {
+  for (const [path, heading] of [["/activity", "Activity"], ["/campaigns", "Campaigns"], ["/contacts", "Contacts"], ["/inbox", "Inbox"]]) {
     await page.goto(BASE + path);
     await expectVisible(page, `h1:has-text("${heading}")`, `${path} renders`);
   }

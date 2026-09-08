@@ -21,6 +21,9 @@ export default function NewMailboxPage() {
             imap_port: 993,
             imap_username: "",
             imap_secure: true,
+            daily_limit: 40,
+            mailbox_timezone: "Europe/Prague",
+            enabled: true,
           }}
         />
       </div>

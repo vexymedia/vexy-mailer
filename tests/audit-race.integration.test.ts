@@ -131,3 +131,21 @@ describe("guards are re-checked immediately before the SMTP call", () => {
     expect(row.status).toBe("sent");
   });
 });
+
+describe("the sender mailbox is re-checked too", () => {
+  it("does not send when the sender mailbox is disabled inside the race window", async () => {
+    const seed = await activeCampaignWithOneDueContact();
+    raceAction.run = async () => {
+      await sql`update mailboxes set enabled = false`;
+    };
+
+    await dispatchTick();
+
+    expect(sendMailSpy).not.toHaveBeenCalled();
+    const [row] = await sql<{ status: string; error: string }[]>`
+      select status, error from email_sends where campaign_id = ${seed.campaignId}
+    `;
+    expect(row.status).toBe("skipped");
+    expect(row.error).toContain("disabled");
+  });
+});

@@ -1,4 +1,5 @@
 import { ImapFlow } from "imapflow";
+import { simpleParser } from "mailparser";
 import { decryptSecret } from "./crypto";
 import type { Mailbox } from "./types";
 
@@ -6,10 +7,22 @@ export interface InboxMessage {
   uid: number;
   messageId: string | null;
   inReplyTo: string | null;
+  /** The full References chain, space separated, as it arrived. */
+  references: string | null;
   from: string | null;
+  /** The address the prospect actually wrote to - which of our aliases they used. */
+  to: string | null;
   subject: string | null;
   receivedAt: Date;
+  /** Plain-text body. The UI renders this and never the HTML. */
+  bodyText: string | null;
+  /** Kept for completeness; deliberately never rendered without sanitisation. */
+  bodyHtml: string | null;
 }
+
+/** Bodies are capped so one enormous message cannot blow up a worker tick. */
+const MAX_BODY_BYTES = 256 * 1024;
+const MAX_STORED_CHARS = 64 * 1024;
 
 /** Envelope dates arrive as either a Date or an RFC 2822 string. */
 function toDate(value: Date | string | null | undefined): Date | null {
@@ -82,20 +95,45 @@ export async function fetchNewMessages(
     if (startUid < uidNext) {
       for await (const message of client.fetch(
         `${startUid}:*`,
-        { uid: true, envelope: true, internalDate: true },
+        { uid: true, envelope: true, internalDate: true, source: { maxLength: MAX_BODY_BYTES } },
         { uid: true },
       )) {
         // IMAP's "N:*" always returns at least the final message even when N
         // is past the end, so the range has to be re-checked here.
         if (message.uid < startUid) continue;
         const envelope = message.envelope;
+
+        // MIME is genuinely hard - multipart, transfer encodings, charsets -
+        // so the parsing is delegated rather than hand-rolled. A parse failure
+        // must not lose the message: the envelope alone is still useful.
+        let bodyText: string | null = null;
+        let bodyHtml: string | null = null;
+        let references: string | null = null;
+        if (message.source) {
+          try {
+            const parsed = await simpleParser(message.source);
+            bodyText = parsed.text ? parsed.text.slice(0, MAX_STORED_CHARS) : null;
+            bodyHtml = typeof parsed.html === "string" ? parsed.html.slice(0, MAX_STORED_CHARS) : null;
+            references = Array.isArray(parsed.references)
+              ? parsed.references.join(" ")
+              : (parsed.references ?? null);
+          } catch (error) {
+            bodyText = null;
+            console.error("[imap] could not parse message body", message.uid, error);
+          }
+        }
+
         messages.push({
           uid: Number(message.uid),
           messageId: envelope?.messageId ?? null,
           inReplyTo: envelope?.inReplyTo ?? null,
+          references,
           from: envelope?.from?.[0]?.address?.toLowerCase() ?? null,
+          to: envelope?.to?.[0]?.address?.toLowerCase() ?? null,
           subject: envelope?.subject ?? null,
           receivedAt: toDate(message.internalDate) ?? toDate(envelope?.date) ?? new Date(),
+          bodyText,
+          bodyHtml,
         });
       }
     }

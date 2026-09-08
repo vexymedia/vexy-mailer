@@ -18,7 +18,14 @@ import {
   skipStepAndResume,
   startCampaign,
   checkCampaignReadiness,
+  setCampaignMailboxes,
 } from "@/lib/queries/campaigns";
+import {
+  markConversationRead,
+  sendManualReply,
+  setClassification,
+} from "@/lib/queries/inbox";
+import type { Classification } from "@/lib/types";
 
 export interface ActionState {
   error?: string;
@@ -101,6 +108,9 @@ const mailboxSchema = z.object({
   imap_username: z.string().nullable(),
   imap_password: z.string().nullable(),
   imap_secure: z.boolean(),
+  daily_limit: z.coerce.number().int().min(1).max(2000),
+  timezone: z.string().min(1),
+  enabled: z.boolean(),
 });
 
 function mailboxFromForm(formData: FormData) {
@@ -122,6 +132,9 @@ function mailboxFromForm(formData: FormData) {
     imap_username: text("imap_username"),
     imap_password: text("imap_password"),
     imap_secure: formData.get("imap_secure") === "on",
+    daily_limit: formData.get("daily_limit"),
+    timezone: String(formData.get("mailbox_timezone") ?? "Europe/Prague"),
+    enabled: formData.get("enabled") === "on",
   });
 }
 
@@ -131,6 +144,11 @@ export async function saveMailboxAction(_prev: ActionState, formData: FormData):
   const parsed = mailboxFromForm(formData);
   if (!parsed.success) {
     return fail(parsed.error.issues.map((issue) => issue.message).join(" "));
+  }
+  try {
+    assertValidTimezone(parsed.data.timezone);
+  } catch {
+    return fail(`"${parsed.data.timezone}" is not a valid IANA timezone (for example Europe/Prague).`);
   }
   try {
     if (id) await updateMailbox(id, parsed.data);
@@ -176,7 +194,7 @@ export async function deleteMailboxAction(_prev: ActionState, formData: FormData
 
 const campaignSchema = z.object({
   name: z.string().min(1, "Give the campaign a name."),
-  mailbox_id: z.string().uuid("Choose a sender mailbox."),
+  mailbox_ids: z.array(z.string().uuid()).min(1, "Choose at least one sender mailbox."),
   daily_limit: z.coerce.number().int().min(1).max(2000),
   timezone: z.string().min(1),
   send_days: z.array(z.number().int().min(1).max(7)).min(1, "Pick at least one sending day."),
@@ -207,7 +225,7 @@ export async function saveCampaignAction(_prev: ActionState, formData: FormData)
 
   const parsed = campaignSchema.safeParse({
     name: String(formData.get("name") ?? "").trim(),
-    mailbox_id: String(formData.get("mailbox_id") ?? ""),
+    mailbox_ids: formData.getAll("mailbox_ids").map(String).filter(Boolean),
     daily_limit: formData.get("daily_limit"),
     timezone,
     send_days: formData.getAll("send_days").map(Number),
@@ -222,7 +240,7 @@ export async function saveCampaignAction(_prev: ActionState, formData: FormData)
   if (id) {
     await sql`
       update campaigns
-         set name = ${data.name}, mailbox_id = ${data.mailbox_id}, daily_limit = ${data.daily_limit},
+         set name = ${data.name}, daily_limit = ${data.daily_limit},
              send_days = ${data.send_days}, send_start_minute = ${data.send_start_minute},
              send_end_minute = ${data.send_end_minute}, timezone = ${data.timezone}, updated_at = now()
        where id = ${id}
@@ -230,14 +248,25 @@ export async function saveCampaignAction(_prev: ActionState, formData: FormData)
   } else {
     // Always draft. A new campaign never starts on its own.
     const [row] = await sql<{ id: string }[]>`
-      insert into campaigns (name, mailbox_id, daily_limit, send_days,
+      insert into campaigns (name, daily_limit, send_days,
                              send_start_minute, send_end_minute, timezone, status)
-      values (${data.name}, ${data.mailbox_id}, ${data.daily_limit}, ${data.send_days},
+      values (${data.name}, ${data.daily_limit}, ${data.send_days},
               ${data.send_start_minute}, ${data.send_end_minute}, ${data.timezone}, 'draft')
       returning id
     `;
     campaignId = row.id;
     await logActivity({ action: "Campaign created", detail: data.name, campaignId });
+  }
+
+  const { kept } = await setCampaignMailboxes(campaignId, data.mailbox_ids);
+  if (kept.length > 0) {
+    revalidatePath(`/campaigns/${campaignId}`);
+    return {
+      success: "Campaign saved.",
+      problems: [
+        `Kept ${kept.join(", ")} in the pool: contacts are already pinned to ${kept.length > 1 ? "them" : "it"} and a thread is never moved to another sender.`,
+      ],
+    };
   }
 
   revalidatePath("/campaigns");
@@ -441,4 +470,40 @@ export async function runWorkerNowAction(_prev: ActionState): Promise<ActionStat
   return {
     success: `Worker ran. ${actions.length ? actions.join("; ") : "No active campaigns."}${matched ? ` ${matched} reply/replies detected.` : ""}`,
   };
+}
+
+// --------------------------------------------------------------- inbox
+
+export async function sendReplyAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  await requireAuth();
+  const conversationId = String(formData.get("conversation_id") ?? "");
+  const body = String(formData.get("body") ?? "").trim();
+  if (!body) return fail("Write something before sending.");
+
+  const result = await sendManualReply(conversationId, body);
+  revalidatePath(`/inbox/${conversationId}`);
+  revalidatePath("/inbox");
+  if (!result.ok) return fail(result.error ?? "The reply could not be sent.");
+  return { success: "Reply sent." };
+}
+
+export async function classifyConversationAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  await requireAuth();
+  const conversationId = String(formData.get("conversation_id") ?? "");
+  const classification = String(formData.get("classification") ?? "unclassified") as Classification;
+  await setClassification(conversationId, classification);
+  revalidatePath(`/inbox/${conversationId}`);
+  revalidatePath("/inbox");
+  return { success: "Status updated." };
+}
+
+export async function markReadAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  await requireAuth();
+  const conversationId = String(formData.get("conversation_id") ?? "");
+  await markConversationRead(conversationId);
+  revalidatePath("/inbox");
+  return {};
 }

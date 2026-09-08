@@ -215,3 +215,57 @@ describe("time helpers", () => {
     expect(formatSendDays([5, 1, 3])).toBe("Mon, Wed, Fri");
   });
 });
+
+/**
+ * Regression guard for the follow-up scheduling semantics, pinned to the exact
+ * cases that were reviewed by hand. This behaviour was NOT changed by the
+ * multi-mailbox work and must not drift as a side effect of it.
+ */
+describe("follow-up scheduling regressions (Mon-Fri 08:00-16:00 Europe/Prague)", () => {
+  const DAY = ["", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  const weekday = (d: Date) => DAY[getZonedParts(d, "Europe/Prague").weekday];
+  const localTime = (d: Date) => {
+    const p = getZonedParts(d, "Europe/Prague");
+    return `${String(p.hour).padStart(2, "0")}:${String(p.minute).padStart(2, "0")}`;
+  };
+  // Thursday 2025-07-17 14:00 and Friday 2025-07-18 14:00, Prague local.
+  const thursday = zonedTimeToUtc(2025, 7, 17, 14 * 60, "Europe/Prague");
+  const friday = zonedTimeToUtc(2025, 7, 18, 14 * 60, "Europe/Prague");
+
+  it("Thursday + 2 days lands on Saturday, so it moves to Monday at window open", () => {
+    const due = followUpDueAt(WINDOW, thursday, 2);
+    expect(weekday(due)).toBe("Mon");
+    expect(localTime(due)).toBe("08:00");
+    expect(due.toISOString()).toBe("2025-07-21T06:00:00.000Z");
+  });
+
+  it("Friday + 1 day lands on Saturday, so it moves to Monday at window open", () => {
+    const due = followUpDueAt(WINDOW, friday, 1);
+    expect(weekday(due)).toBe("Mon");
+    expect(localTime(due)).toBe("08:00");
+    expect(due.toISOString()).toBe("2025-07-21T06:00:00.000Z");
+  });
+
+  it("Thursday + 4 days already lands inside Monday's window, so the time is kept", () => {
+    // Contrast with the two above: no snapping happens when the target is
+    // already valid, so the follow-up keeps its 14:00 slot rather than 08:00.
+    const due = followUpDueAt(WINDOW, thursday, 4);
+    expect(weekday(due)).toBe("Mon");
+    expect(localTime(due)).toBe("14:00");
+  });
+
+  it("Thursday + 1 day stays on Friday and keeps its time", () => {
+    const due = followUpDueAt(WINDOW, thursday, 1);
+    expect(weekday(due)).toBe("Fri");
+    expect(localTime(due)).toBe("14:00");
+  });
+
+  it("keeps the local opening hour when the weekend crosses a DST change", () => {
+    // Prague switches to CET on 2025-10-26; Monday must still open at 08:00.
+    const octThursday = zonedTimeToUtc(2025, 10, 23, 14 * 60, "Europe/Prague");
+    const due = followUpDueAt(WINDOW, octThursday, 2);
+    expect(weekday(due)).toBe("Mon");
+    expect(localTime(due)).toBe("08:00");
+    expect(due.toISOString()).toBe("2025-10-27T07:00:00.000Z"); // now UTC+1
+  });
+});

@@ -19,6 +19,11 @@ export interface MailboxInput {
   imap_username?: string | null;
   imap_password?: string | null;
   imap_secure: boolean;
+  /** Global cap across every campaign this mailbox is in. */
+  daily_limit: number;
+  /** Day boundary for that cap. Per mailbox, so "today" is unambiguous. */
+  timezone: string;
+  enabled: boolean;
 }
 
 export async function listMailboxes(): Promise<Mailbox[]> {
@@ -35,12 +40,13 @@ export async function createMailbox(input: MailboxInput): Promise<string> {
   const [row] = await sql<{ id: string }[]>`
     insert into mailboxes (name, from_name, from_email, smtp_host, smtp_port, smtp_username,
                            smtp_password_enc, smtp_secure, imap_host, imap_port, imap_username,
-                           imap_password_enc, imap_secure)
+                           imap_password_enc, imap_secure, daily_limit, timezone, enabled)
     values (${input.name}, ${input.from_name}, ${input.from_email.toLowerCase()},
             ${input.smtp_host}, ${input.smtp_port}, ${input.smtp_username},
             ${encryptSecret(input.smtp_password)}, ${input.smtp_secure},
             ${input.imap_host || null}, ${input.imap_port || null}, ${input.imap_username || null},
-            ${input.imap_password ? encryptSecret(input.imap_password) : null}, ${input.imap_secure})
+            ${input.imap_password ? encryptSecret(input.imap_password) : null}, ${input.imap_secure},
+            ${input.daily_limit}, ${input.timezone}, ${input.enabled})
     returning id
   `;
   await logActivity({ action: "Mailbox created", detail: input.from_email });
@@ -67,6 +73,9 @@ export async function updateMailbox(id: string, input: MailboxInput): Promise<vo
            imap_username = ${input.imap_username || null},
            imap_password_enc = ${input.imap_password ? encryptSecret(input.imap_password) : sql`imap_password_enc`},
            imap_secure = ${input.imap_secure},
+           daily_limit = ${input.daily_limit},
+           timezone = ${input.timezone},
+           enabled = ${input.enabled},
            updated_at = now()
      where id = ${id}
   `;

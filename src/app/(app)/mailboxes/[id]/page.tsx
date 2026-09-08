@@ -28,6 +28,9 @@ export default async function MailboxPage({ params }: { params: Promise<{ id: st
             imap_port: mailbox.imap_port ?? "",
             imap_username: mailbox.imap_username ?? "",
             imap_secure: mailbox.imap_secure,
+            daily_limit: mailbox.daily_limit,
+            mailbox_timezone: mailbox.timezone,
+            enabled: mailbox.enabled,
           }}
         />
       </div>

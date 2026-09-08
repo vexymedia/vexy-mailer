@@ -18,12 +18,30 @@ export async function checkCampaignReadiness(campaignId: string): Promise<Campai
   const [campaign] = await sql<Campaign[]>`select * from campaigns where id = ${campaignId}`;
   if (!campaign) return { ok: false, problems: ["Campaign not found."] };
 
-  const [mailbox] = await sql<{ id: string; last_test_ok: boolean | null }[]>`
-    select id, last_test_ok from mailboxes where id = ${campaign.mailbox_id}
+  const pool = await sql<{ id: string; from_email: string; last_test_ok: boolean | null; enabled: boolean }[]>`
+    select m.id, m.from_email, m.last_test_ok, m.enabled
+      from campaign_mailboxes cm
+      join mailboxes m on m.id = cm.mailbox_id
+     where cm.campaign_id = ${campaignId}
+     order by m.from_email
   `;
-  if (!mailbox) problems.push("The campaign has no sender mailbox.");
-  else if (mailbox.last_test_ok !== true) {
-    problems.push("The sender mailbox connection has not been tested successfully yet.");
+  if (pool.length === 0) {
+    problems.push("The campaign has no sender mailboxes.");
+  } else {
+    // One unusable mailbox in a pool of five is not a reason to block the
+    // campaign - the others can carry it, and allocation skips the bad one.
+    // Only a pool with nothing usable at all is a blocker.
+    const usable = pool.filter((m) => m.enabled && m.last_test_ok === true);
+    if (usable.length === 0) {
+      const reasons = pool
+        .map((m) =>
+          !m.enabled
+            ? `${m.from_email} is disabled`
+            : `${m.from_email} has not passed a connection test`,
+        )
+        .join("; ");
+      problems.push(`No sender mailbox is usable: ${reasons}.`);
+    }
   }
 
   const steps = await sql<SequenceStep[]>`
@@ -163,4 +181,60 @@ export async function skipStepAndResume(campaignContactId: string): Promise<void
     contactId: row.contact_id,
     campaignContactId,
   });
+}
+
+/** The mailboxes a campaign may send from. */
+export async function getCampaignMailboxIds(campaignId: string): Promise<string[]> {
+  const rows = await sql<{ mailbox_id: string }[]>`
+    select mailbox_id from campaign_mailboxes where campaign_id = ${campaignId}
+  `;
+  return rows.map((r) => r.mailbox_id);
+}
+
+/**
+ * Replaces a campaign's sender pool.
+ *
+ * A mailbox that some contact is already pinned to is never removed: doing so
+ * would strand that thread with a sender the campaign no longer owns. Those
+ * are reported back so the UI can explain why.
+ */
+export async function setCampaignMailboxes(
+  campaignId: string,
+  mailboxIds: string[],
+): Promise<{ kept: string[] }> {
+  const kept: string[] = [];
+  await sql.begin(async (tx) => {
+    const inUse = await tx<{ mailbox_id: string; from_email: string }[]>`
+      select distinct cc.sender_mailbox_id as mailbox_id, m.from_email
+        from campaign_contacts cc
+        join mailboxes m on m.id = cc.sender_mailbox_id
+       where cc.campaign_id = ${campaignId}
+         and cc.sender_mailbox_id is not null
+         and not (cc.sender_mailbox_id = any(${mailboxIds}::uuid[]))
+    `;
+    for (const row of inUse) kept.push(row.from_email);
+
+    const finalIds = [...new Set([...mailboxIds, ...inUse.map((r) => r.mailbox_id)])];
+
+    await tx`
+      delete from campaign_mailboxes
+       where campaign_id = ${campaignId}
+         and not (mailbox_id = any(${finalIds}::uuid[]))
+    `;
+    for (const mailboxId of finalIds) {
+      await tx`
+        insert into campaign_mailboxes (campaign_id, mailbox_id)
+        values (${campaignId}, ${mailboxId})
+        on conflict do nothing
+      `;
+    }
+  });
+
+  await logActivity({
+    action: "Sender pool updated",
+    detail: `${mailboxIds.length} mailbox(es) selected` +
+      (kept.length ? `; kept ${kept.join(", ")} because contacts are pinned to them` : ""),
+    campaignId,
+  });
+  return { kept };
 }

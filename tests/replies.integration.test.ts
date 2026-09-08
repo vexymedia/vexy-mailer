@@ -28,9 +28,13 @@ function message(overrides: Partial<InboxMessage> = {}): InboxMessage {
     uid: 10,
     messageId: `<incoming-${Math.random()}@mail.example.com>`,
     inReplyTo: null,
+    references: null,
     from: "a@example.com",
+    to: "sender@example.com",
     subject: "Re: Hi Ann",
     receivedAt: new Date(),
+    bodyText: "Thanks, sounds interesting.",
+    bodyHtml: null,
     ...overrides,
   };
 }
