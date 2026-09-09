@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { sql } from "../db";
 import { env } from "../env";
 import { logActivity } from "../activity";
-import { fetchNewMessages, hasImapConfigured, type InboxMessage } from "../imap";
+import { classifyImapError, fetchNewMessages, hasImapConfigured, type InboxMessage } from "../imap";
 import { withLock } from "./locks";
 import type { Mailbox } from "../types";
 import { recordInboundMessage } from "../queries/inbox";
@@ -201,7 +201,9 @@ async function processMailbox(mailbox: Mailbox): Promise<ReplyPollSummary["mailb
 
     return { ...base, scanned: messages.length, matched };
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
+    // Same classifier as the manual test, so a scheduled failure is as
+    // readable as a hand-run one instead of a bare "Command failed".
+    const detail = classifyImapError(error).message;
     await sql`
       update mailboxes
          set imap_last_checked_at = now(), imap_last_error = ${detail.slice(0, 1000)}, updated_at = now()

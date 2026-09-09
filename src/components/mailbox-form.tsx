@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { saveMailboxAction, testMailboxAction, deleteMailboxAction } from "@/lib/actions";
+import { saveMailboxAction, testMailboxAction, testMailboxImapAction, deleteMailboxAction } from "@/lib/actions";
 import { ActionForm, SubmitButton } from "./action-form";
 
 export interface MailboxFormValues {
@@ -182,6 +182,17 @@ export function MailboxForm({ values }: { values: MailboxFormValues }) {
               start until this has passed at least once.
             </p>
             <SubmitButton className="btn-secondary" pendingLabel="Testing…">Test connection</SubmitButton>
+          </ActionForm>
+
+          <ActionForm action={testMailboxImapAction} className="card p-6">
+            <input type="hidden" name="id" value={values.id} />
+            <h2 className="mb-1 text-sm font-semibold text-zinc-900">Test IMAP only</h2>
+            <p className="mb-4 text-xs text-zinc-500">
+              Signs in over IMAP and opens INBOX, without touching SMTP. Use this when sending
+              already works and only reply detection is failing. No campaign email is sent and no
+              message is read.
+            </p>
+            <SubmitButton className="btn-secondary" pendingLabel="Testing IMAP…">Test IMAP</SubmitButton>
           </ActionForm>
 
           <ActionForm action={deleteMailboxAction} className="card p-6">

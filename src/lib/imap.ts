@@ -35,6 +35,136 @@ export function hasImapConfigured(mailbox: Mailbox): boolean {
   return Boolean(mailbox.imap_host && mailbox.imap_port && mailbox.imap_username && mailbox.imap_password_enc);
 }
 
+
+/**
+ * Turns an IMAP failure into a specific, safe, human reason.
+ *
+ * imapflow reports EVERY rejected IMAP command as the message "Command failed"
+ * - a wrong password and a missing INBOX are indistinguishable by `.message`
+ * alone. The diagnosis lives on other properties of the error:
+ *
+ *   authenticationFailed  true when the server refused the credentials
+ *   serverResponseCode    the bracketed code, e.g. AUTHENTICATIONFAILED
+ *   responseText          the server's own words
+ *   executedCommand       which command was rejected
+ *
+ * Reading only `.message` is what left "Command failed" on screen with no way
+ * to tell an expired password from a TLS mismatch.
+ *
+ * The returned text is shown in the UI and stored on the mailbox row, so it
+ * must never contain a credential. Only server-provided text and our own
+ * wording are used, and the result is scrubbed of anything password-shaped
+ * before it is returned.
+ */
+export interface ImapFailure {
+  /** Short machine-ish category, useful for grouping and for tests. */
+  kind:
+    | "auth_failed"
+    | "tls_failed"
+    | "connection_failed"
+    | "timeout"
+    | "select_inbox_failed"
+    | "command_rejected"
+    | "unknown";
+  /** Sanitised, specific, human-readable reason. Safe to display and store. */
+  message: string;
+}
+
+interface RawImapError {
+  message?: string;
+  code?: string;
+  errno?: number;
+  syscall?: string;
+  authenticationFailed?: boolean;
+  serverResponseCode?: string;
+  responseText?: string;
+  executedCommand?: string;
+  mailboxMissing?: boolean;
+}
+
+/** Belt and braces: never let a secret reach a log or the UI. */
+function redact(text: string, secrets: (string | null | undefined)[]): string {
+  let safe = text;
+  for (const secret of secrets) {
+    if (secret && secret.length >= 4) safe = safe.split(secret).join("***");
+  }
+  return safe;
+}
+
+const TLS_HINTS = [
+  "wrong version number",
+  "ssl routines",
+  "packet length too long",
+  "self-signed certificate",
+  "self signed certificate",
+  "unable to verify",
+  "certificate has expired",
+  "altnames",
+];
+
+export function classifyImapError(error: unknown, secrets: (string | null | undefined)[] = []): ImapFailure {
+  const err = (error ?? {}) as RawImapError;
+  const raw = `${err.message ?? ""} ${err.responseText ?? ""}`.toLowerCase();
+  const detail = err.responseText ? `: ${err.responseText}` : "";
+
+  // The server explicitly refused the credentials.
+  if (err.authenticationFailed || err.serverResponseCode === "AUTHENTICATIONFAILED") {
+    return {
+      kind: "auth_failed",
+      message: redact(
+        `Authentication failed - the IMAP username or password was rejected by the server${detail}`,
+        secrets,
+      ),
+    };
+  }
+
+  if (err.code === "ETIMEDOUT" || raw.includes("timeout")) {
+    return { kind: "timeout", message: "Connection timed out while talking to the IMAP server" };
+  }
+
+  if (err.code?.startsWith("ERR_TLS") || err.code === "ERR_SSL_WRONG_VERSION_NUMBER" ||
+      TLS_HINTS.some((hint) => raw.includes(hint))) {
+    return {
+      kind: "tls_failed",
+      message: redact(
+        `TLS connection failed - check the port and the Require TLS setting (993 uses TLS, 143 does not)${detail}`,
+        secrets,
+      ),
+    };
+  }
+
+  if (["ECONNREFUSED", "ENOTFOUND", "EHOSTUNREACH", "ENETUNREACH", "EAI_AGAIN", "ECONNRESET"].includes(err.code ?? "")) {
+    return {
+      kind: "connection_failed",
+      message: `Could not reach the IMAP server (${err.code}) - check the host and port`,
+    };
+  }
+
+  // Authentication succeeded but the mailbox could not be opened.
+  if (err.mailboxMissing || err.executedCommand?.toUpperCase().startsWith("SELECT") ||
+      err.executedCommand?.toUpperCase().startsWith("EXAMINE")) {
+    return {
+      kind: "select_inbox_failed",
+      message: redact(`Signed in, but INBOX could not be opened${detail}`, secrets),
+    };
+  }
+
+  // Some other command was rejected: name it, and quote the server.
+  if (err.serverResponseCode || err.responseText) {
+    const command = err.executedCommand ? ` (${err.executedCommand.split(" ")[0]})` : "";
+    const code = err.serverResponseCode ? ` [${err.serverResponseCode}]` : "";
+    return {
+      kind: "command_rejected",
+      message: redact(`IMAP command rejected${command}${code}${detail}`, secrets),
+    };
+  }
+
+  return {
+    kind: "unknown",
+    message: redact(err.message || String(error) || "Unknown IMAP error", secrets),
+  };
+}
+
 export function buildImapClient(mailbox: Mailbox): ImapFlow {
   if (!hasImapConfigured(mailbox)) {
     throw new Error(`Mailbox "${mailbox.name}" has no IMAP configuration.`);
@@ -146,8 +276,21 @@ export async function fetchNewMessages(
 }
 
 /** Opens INBOX and closes again, to validate credentials from the UI. */
-export async function testImapConnection(mailbox: Mailbox): Promise<{ ok: boolean; error?: string }> {
+export async function testImapConnection(
+  mailbox: Mailbox,
+): Promise<{ ok: boolean; error?: string; kind?: ImapFailure["kind"] }> {
   let client: ImapFlow | null = null;
+  // Decrypted only to be redacted out of any error text; never logged.
+  let password: string | null = null;
+  try {
+    password = mailbox.imap_password_enc ? decryptSecret(mailbox.imap_password_enc) : null;
+  } catch {
+    return {
+      ok: false,
+      kind: "unknown",
+      error: "The stored IMAP password could not be decrypted - re-enter it and save the mailbox",
+    };
+  }
   try {
     client = buildImapClient(mailbox);
     await client.connect();
@@ -155,7 +298,8 @@ export async function testImapConnection(mailbox: Mailbox): Promise<{ ok: boolea
     lock.release();
     return { ok: true };
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    const failure = classifyImapError(error, [password]);
+    return { ok: false, error: failure.message, kind: failure.kind };
   } finally {
     await client?.logout().catch(() => client?.close());
   }

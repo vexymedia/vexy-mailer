@@ -12,7 +12,7 @@ import { parseContactsCsv } from "@/lib/csv";
 import { hhmmToMinutes, assertValidTimezone } from "@/lib/schedule";
 import { findUnknownVariables } from "@/lib/template";
 import { importContacts, suppressEmail, unsuppressEmail } from "@/lib/queries/contacts";
-import { createMailbox, deleteMailbox, testMailbox, updateMailbox } from "@/lib/queries/mailboxes";
+import { createMailbox, deleteMailbox, testMailbox, testMailboxImap, updateMailbox } from "@/lib/queries/mailboxes";
 import {
   pauseCampaign,
   skipStepAndResume,
@@ -181,6 +181,25 @@ export async function testMailboxAction(_prev: ActionState, formData: FormData):
     return { success: "SMTP and IMAP both connected." };
   } catch (error) {
     return fail(error instanceof Error ? error.message : "Connection test failed.");
+  }
+}
+
+/**
+ * Tests IMAP on its own, so reply detection can be diagnosed without touching
+ * SMTP - which matters when sending already works and only the inbox does not.
+ */
+export async function testMailboxImapAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  await requireAuth();
+  const id = String(formData.get("id") ?? "");
+  if (!id) return fail("Save the mailbox before testing it.");
+  try {
+    const result = await testMailboxImap(id);
+    revalidatePath("/mailboxes");
+    revalidatePath(`/mailboxes/${id}`);
+    if (result.ok) return { success: "IMAP connected and INBOX opened. Reply detection can run." };
+    return fail(result.error ?? "IMAP test failed.");
+  } catch (error) {
+    return fail(error instanceof Error ? error.message : "IMAP test failed.");
   }
 }
 
