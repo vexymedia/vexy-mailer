@@ -391,6 +391,34 @@ async function processCampaign(campaign: Campaign, settings: AppSettings): Promi
     // Nothing due may mean nothing is left at all - for instance every contact
     // replied, so no send ever reached advanceContact to notice.
     await maybeCompleteCampaign(campaign.id);
+
+    // But the candidate query also filters out contacts whose sender has no
+    // capacity, so "no candidate" can equally mean "everyone is waiting on a
+    // full mailbox". Reporting that as nothing_due sends the operator hunting
+    // for a scheduling fault when the real limit is sender capacity, so the
+    // difference is spelled out instead.
+    const [blocked] = await sql<{ due: number; senders_full: number }[]>`
+      select count(*)::int as due,
+             count(*) filter (
+               where cc.sender_mailbox_id is not null
+             )::int as senders_full
+        from campaign_contacts cc
+        join contacts c on c.id = cc.contact_id
+       where cc.campaign_id = ${campaign.id}
+         and cc.status in ('scheduled', 'sent')
+         and cc.next_send_at is not null
+         and cc.next_send_at <= now()
+         and not exists (select 1 from suppression_list s where s.email = c.email)
+    `;
+    if (blocked.due > 0) {
+      return {
+        ...base,
+        action: "no_sender_available",
+        detail:
+          `${blocked.due} contact(s) are due, but no sender in the pool has capacity ` +
+          "right now (daily limit reached, disabled, or not connection-tested).",
+      };
+    }
     return { ...base, action: "nothing_due" };
   }
 
