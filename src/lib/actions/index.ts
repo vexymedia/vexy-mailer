@@ -19,6 +19,7 @@ import {
   startCampaign,
   checkCampaignReadiness,
   setCampaignMailboxes,
+  saveCampaignSchedule,
 } from "@/lib/queries/campaigns";
 import {
   deleteConversation,
@@ -257,14 +258,19 @@ export async function saveCampaignAction(_prev: ActionState, formData: FormData)
   const data = parsed.data;
   let campaignId = id;
 
+  let cursorCleared = false;
   if (id) {
-    await sql`
-      update campaigns
-         set name = ${data.name}, daily_limit = ${data.daily_limit},
-             send_days = ${data.send_days}, send_start_minute = ${data.send_start_minute},
-             send_end_minute = ${data.send_end_minute}, timezone = ${data.timezone}, updated_at = now()
-       where id = ${id}
-    `;
+    await sql`update campaigns set name = ${data.name}, updated_at = now() where id = ${id}`;
+    // Schedule changes go through saveCampaignSchedule, which also invalidates
+    // the pacing cursor - a cursor computed from the old window would otherwise
+    // keep the campaign parked under settings that no longer apply.
+    ({ cursorCleared } = await saveCampaignSchedule(id, {
+      daily_limit: data.daily_limit,
+      send_days: data.send_days,
+      send_start_minute: data.send_start_minute,
+      send_end_minute: data.send_end_minute,
+      timezone: data.timezone,
+    }));
   } else {
     // Always draft. A new campaign never starts on its own.
     const [row] = await sql<{ id: string }[]>`
@@ -279,6 +285,18 @@ export async function saveCampaignAction(_prev: ActionState, formData: FormData)
   }
 
   const { kept } = await setCampaignMailboxes(campaignId, data.mailbox_ids);
+  if (cursorCleared) {
+    revalidatePath(`/campaigns/${campaignId}`);
+    revalidatePath("/");
+    return {
+      success: "Campaign saved.",
+      problems: [
+        "The send pacing was reset because the schedule changed. The campaign can send again as " +
+          "soon as it is inside the new window.",
+        ...(kept.length ? [`Kept ${kept.join(", ")} in the pool: contacts are pinned to them.`] : []),
+      ],
+    };
+  }
   if (kept.length > 0) {
     revalidatePath(`/campaigns/${campaignId}`);
     return {

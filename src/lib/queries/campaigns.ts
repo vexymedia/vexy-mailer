@@ -238,3 +238,63 @@ export async function setCampaignMailboxes(
   });
   return { kept };
 }
+
+export interface CampaignScheduleInput {
+  daily_limit: number;
+  send_days: number[];
+  send_start_minute: number;
+  send_end_minute: number;
+  timezone: string;
+}
+
+/**
+ * Updates the settings that govern when a campaign may send.
+ *
+ * next_slot_at is a pacing cursor derived from the schedule at the moment of
+ * the last send: window length divided by the daily limit, snapped into the
+ * window. Nothing recomputed it when the schedule changed, so widening a
+ * window, moving a timezone or raising the limit left the campaign parked on a
+ * cursor computed from settings that no longer existed - inside its new window,
+ * with quota and contacts to spare, sending nothing.
+ *
+ * Any change to those inputs therefore invalidates the cursor. Clearing it
+ * makes the campaign eligible immediately, exactly as startCampaign does; the
+ * next send recomputes a cursor from the new settings.
+ */
+export async function saveCampaignSchedule(
+  campaignId: string,
+  input: CampaignScheduleInput,
+): Promise<{ cursorCleared: boolean }> {
+  const [current] = await sql<Campaign[]>`select * from campaigns where id = ${campaignId}`;
+  if (!current) throw new Error("Campaign not found");
+
+  const scheduleChanged =
+    current.daily_limit !== input.daily_limit ||
+    current.timezone !== input.timezone ||
+    current.send_start_minute !== input.send_start_minute ||
+    current.send_end_minute !== input.send_end_minute ||
+    [...current.send_days].sort().join(",") !== [...input.send_days].sort().join(",");
+
+  await sql`
+    update campaigns
+       set daily_limit = ${input.daily_limit},
+           send_days = ${input.send_days},
+           send_start_minute = ${input.send_start_minute},
+           send_end_minute = ${input.send_end_minute},
+           timezone = ${input.timezone},
+           next_slot_at = ${scheduleChanged ? null : sql`next_slot_at`},
+           updated_at = now()
+     where id = ${campaignId}
+  `;
+
+  if (scheduleChanged && current.next_slot_at) {
+    await logActivity({
+      action: "Sending schedule changed",
+      detail:
+        "The pacing cursor was cleared because it was computed from the previous schedule. " +
+        "The campaign can send again as soon as it is inside the new window.",
+      campaignId,
+    });
+  }
+  return { cursorCleared: scheduleChanged && current.next_slot_at !== null };
+}

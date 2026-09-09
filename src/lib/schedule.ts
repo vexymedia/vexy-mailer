@@ -226,3 +226,86 @@ export const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 export function formatSendDays(days: number[]): string {
   return [...days].sort((a, b) => a - b).map((d) => WEEKDAY_LABELS[d - 1]).join(", ");
 }
+
+/**
+ * Explains, in one line, what the sending engine will do next for a campaign.
+ *
+ * Deliberately built from the same primitives the dispatcher uses - the same
+ * window check, the same pacing cursor, the same daily counter - so the
+ * dashboard cannot claim one thing while the worker does another. It also
+ * renders times in the campaign's own timezone: the raw UTC instant is what
+ * made a stale cursor so hard to recognise.
+ */
+export interface NextSendExplanation {
+  state: "outside_window" | "paced" | "daily_limit_reached" | "ready" | "cursor_stale";
+  message: string;
+}
+
+export function explainNextSend(
+  window: SendingWindow,
+  dailyLimit: number,
+  sentToday: number,
+  nextSlotAt: Date | null,
+  now: Date = new Date(),
+): NextSendExplanation {
+  const local = (instant: Date) => {
+    const p = getZonedParts(instant, window.timezone);
+    const time = `${String(p.hour).padStart(2, "0")}:${String(p.minute).padStart(2, "0")}`;
+    const sameDay =
+      p.year === getZonedParts(now, window.timezone).year &&
+      p.month === getZonedParts(now, window.timezone).month &&
+      p.day === getZonedParts(now, window.timezone).day;
+    const date = sameDay
+      ? "today"
+      : `${WEEKDAY_LABELS[p.weekday - 1]} ${String(p.day).padStart(2, "0")}/${String(p.month).padStart(2, "0")}`;
+    return `${date} ${time} ${window.timezone}`;
+  };
+
+  if (!isWithinWindow(window, now)) {
+    return {
+      state: "outside_window",
+      message: `Outside the sending window. Opens ${local(nextWindowOpen(window, now))}.`,
+    };
+  }
+
+  if (sentToday >= dailyLimit) {
+    // The quota resets at local midnight, so the campaign resumes at the next
+    // window OPENING after that - not 24 hours from now, which would land at
+    // whatever time of day it happens to be.
+    const today = getZonedParts(now, window.timezone);
+    const tomorrow = getZonedParts(
+      new Date(Date.UTC(today.year, today.month - 1, today.day) + 86_400_000),
+      "UTC",
+    );
+    const resumesAt = nextWindowOpen(
+      window,
+      zonedTimeToUtc(tomorrow.year, tomorrow.month, tomorrow.day, 0, window.timezone),
+    );
+    return {
+      state: "daily_limit_reached",
+      message: `Daily limit reached (${sentToday}/${dailyLimit}). Resumes ${local(resumesAt)}.`,
+    };
+  }
+
+  if (nextSlotAt && nextSlotAt.getTime() > now.getTime()) {
+    // nextSlotAfter can only ever produce an instant that is inside a sending
+    // window, or exactly at a window opening. Anything else was computed from a
+    // schedule that no longer applies - which is precisely how a campaign ends
+    // up parked past its own window with quota and contacts to spare.
+    const legitimate = nextWindowOpen(window, nextSlotAt).getTime() === nextSlotAt.getTime();
+    if (!legitimate) {
+      return {
+        state: "cursor_stale",
+        message:
+          `Paced until ${local(nextSlotAt)}, which is not a valid time under the current schedule. ` +
+          "The pacing cursor predates the current settings - save the campaign settings to clear it.",
+      };
+    }
+    return { state: "paced", message: `Inside the window. Next send no earlier than ${local(nextSlotAt)}.` };
+  }
+
+  return {
+    state: "ready",
+    message: `Inside the window and ready to send (${sentToday}/${dailyLimit} used today).`,
+  };
+}

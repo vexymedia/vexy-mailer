@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { describeSenderPool, getGlobalStats, listCampaignStats } from "@/lib/queries/dashboard";
-import { formatSendDays, minutesToHHMM } from "@/lib/schedule";
-import { PageHeader, Stat, StatusBadge, EmptyState, DateTime } from "@/components/ui";
+import { explainNextSend, formatSendDays, minutesToHHMM } from "@/lib/schedule";
+import { PageHeader, Stat, StatusBadge, EmptyState } from "@/components/ui";
 import { RunWorkerButton } from "@/components/run-worker-button";
 
 export const dynamic = "force-dynamic";
@@ -81,11 +81,31 @@ export default async function DashboardPage() {
                 <Stat label="Remaining" value={campaign.remaining} />
               </dl>
 
-              {campaign.status === "active" && campaign.next_slot_at ? (
-                <p className="mt-4 text-xs text-zinc-500">
-                  Next send no earlier than <DateTime value={campaign.next_slot_at} /> UTC
-                </p>
-              ) : null}
+              {campaign.status === "active" ? (() => {
+                // Computed with the dispatcher's own primitives, and rendered in
+                // the campaign's timezone. Showing a bare UTC instant is what
+                // made a cursor left over from an old schedule unrecognisable.
+                const explanation = explainNextSend(
+                  {
+                    sendDays: campaign.send_days,
+                    sendStartMinute: campaign.send_start_minute,
+                    sendEndMinute: campaign.send_end_minute,
+                    timezone: campaign.timezone,
+                  },
+                  campaign.daily_limit,
+                  campaign.sent_today,
+                  campaign.next_slot_at,
+                );
+                return (
+                  <p
+                    className={`mt-4 text-xs ${
+                      explanation.state === "cursor_stale" ? "text-amber-700" : "text-zinc-500"
+                    }`}
+                  >
+                    {explanation.message}
+                  </p>
+                );
+              })() : null}
             </div>
           ))}
         </div>
