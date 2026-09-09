@@ -58,6 +58,29 @@ export async function createMailbox(input: MailboxInput): Promise<string> {
  * the plaintext never has to make a round trip to the browser.
  */
 export async function updateMailbox(id: string, input: MailboxInput): Promise<void> {
+  // Changing a username while leaving the password blank silently pairs the new
+  // account with the previous account's password, which the server then refuses
+  // with a bare "Command failed". The form's "leave blank to keep" placeholder
+  // actively invites this, so the combination is rejected rather than saved.
+  const current = await getMailbox(id);
+  if (current) {
+    if (input.imap_username && current.imap_username &&
+        input.imap_username !== current.imap_username && !input.imap_password) {
+      throw new Error(
+        `The IMAP username changed from ${current.imap_username} to ${input.imap_username}, but the ` +
+          "password field was left blank. The stored password belongs to the old username - enter the " +
+          "password for the new one.",
+      );
+    }
+    if (input.smtp_username !== current.smtp_username && !input.smtp_password) {
+      throw new Error(
+        `The SMTP username changed from ${current.smtp_username} to ${input.smtp_username}, but the ` +
+          "password field was left blank. The stored password belongs to the old username - enter the " +
+          "password for the new one.",
+      );
+    }
+  }
+
   await sql`
     update mailboxes
        set name = ${input.name},
@@ -91,6 +114,46 @@ export interface MailboxTestResult {
  * Verifies both protocols and records the outcome. A campaign cannot start
  * until this has succeeded at least once for its sender mailbox.
  */
+/**
+ * Tests IMAP alone, without touching SMTP state.
+ *
+ * The result is written to imap_last_error, which is the column the Mailboxes
+ * page reads for its IMAP badge. Before this, only the reply poller ever wrote
+ * that column, so a stale failure from an earlier misconfiguration stayed on
+ * screen no matter how many times the operator fixed the credentials and
+ * pressed Test - the badge could not go green until a scheduled poll happened
+ * to succeed.
+ */
+export async function testMailboxImap(id: string): Promise<{ ok: boolean; error?: string; skipped?: boolean }> {
+  const mailbox = await getMailbox(id);
+  if (!mailbox) throw new Error("Mailbox not found");
+
+  if (!hasImapConfigured(mailbox)) {
+    const missing = [
+      mailbox.imap_host ? null : "host",
+      mailbox.imap_port ? null : "port",
+      mailbox.imap_username ? null : "username",
+      mailbox.imap_password_enc ? null : "password",
+    ].filter(Boolean);
+    return { ok: false, skipped: true, error: `IMAP is not fully configured - missing ${missing.join(", ")}.` };
+  }
+
+  const result = await testImapConnection(mailbox);
+  await sql`
+    update mailboxes
+       set imap_last_error = ${result.ok ? null : (result.error ?? "IMAP test failed")},
+           imap_last_checked_at = now(),
+           updated_at = now()
+     where id = ${id}
+  `;
+  await logActivity({
+    level: result.ok ? "info" : "error",
+    action: "IMAP connection tested",
+    detail: `${mailbox.from_email}: ${result.ok ? "connected and opened INBOX" : result.error}`,
+  });
+  return result;
+}
+
 export async function testMailbox(id: string): Promise<MailboxTestResult> {
   const mailbox = await getMailbox(id);
   if (!mailbox) throw new Error("Mailbox not found");
@@ -107,7 +170,12 @@ export async function testMailbox(id: string): Promise<MailboxTestResult> {
 
   await sql`
     update mailboxes
-       set last_test_ok = ${ok}, last_test_at = now(), last_test_error = ${error || null}, updated_at = now()
+       set last_test_ok = ${ok}, last_test_at = now(), last_test_error = ${error || null},
+           -- The IMAP badge reads imap_last_error, so a test must own it too:
+           -- otherwise a stale poller failure outlives the fix that cured it.
+           imap_last_error = ${imap.skipped ? sql`imap_last_error` : imap.ok ? null : (imap.error ?? "IMAP test failed")},
+           imap_last_checked_at = ${imap.skipped ? sql`imap_last_checked_at` : sql`now()`},
+           updated_at = now()
      where id = ${id}
   `;
   await logActivity({
