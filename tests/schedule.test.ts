@@ -212,7 +212,7 @@ describe("time helpers", () => {
   });
 
   it("formats send days in weekday order", () => {
-    expect(formatSendDays([5, 1, 3])).toBe("Mon, Wed, Fri");
+    expect(formatSendDays([5, 1, 3])).toBe("Po, St, Pá");
   });
 });
 

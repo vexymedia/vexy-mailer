@@ -134,7 +134,7 @@ describe("deleting a mailbox accounts for the sender pool", () => {
     const { deleteMailbox } = await import("@/lib/queries/mailboxes");
     const result = await deleteMailbox(karolina);
     expect(result.ok).toBe(false);
-    expect(result.error).toContain("campaign");
+    expect(result.error).toContain("kampaní");
 
     const [{ count }] = await sql<{ count: number }[]>`select count(*)::int from mailboxes`;
     expect(count).toBe(1); // still there
@@ -155,7 +155,7 @@ describe("deleting a mailbox accounts for the sender pool", () => {
     const { deleteMailbox } = await import("@/lib/queries/mailboxes");
     const result = await deleteMailbox(nela);
     expect(result.ok).toBe(false);
-    expect(result.error).toMatch(/pinned|contact/i);
+    expect(result.error).toMatch(/připnutou|kontakt/i);
   });
 
   it("still deletes a mailbox nothing refers to", async () => {

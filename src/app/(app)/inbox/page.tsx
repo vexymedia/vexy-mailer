@@ -7,10 +7,10 @@ import { ClassificationBadge } from "@/components/inbox-bits";
 export const dynamic = "force-dynamic";
 
 const FILTERS = [
-  { key: "all", label: "All" },
-  { key: "unread", label: "Unread" },
-  { key: "positive", label: "Positive" },
-  { key: "needs_action", label: "Needs action" },
+  { key: "all", label: "Vše" },
+  { key: "unread", label: "Nepřečtené" },
+  { key: "positive", label: "Pozitivní" },
+  { key: "needs_action", label: "Vyžaduje akci" },
 ] as const;
 
 export default async function InboxPage({
@@ -44,8 +44,8 @@ export default async function InboxPage({
   return (
     <>
       <PageHeader
-        title="Inbox"
-        description="Replies from every mailbox, in one place."
+        title="Doručená pošta"
+        description="Odpovědi ze všech schránek na jednom místě."
       />
 
       <div className="mb-5 flex flex-wrap items-center gap-2">
@@ -69,39 +69,39 @@ export default async function InboxPage({
         <form className="ml-auto flex flex-wrap items-center gap-2">
           {params.filter ? <input type="hidden" name="filter" value={params.filter} /> : null}
           <select name="campaign" defaultValue={params.campaign ?? ""} className="input w-auto py-1.5 text-sm">
-            <option value="">All campaigns</option>
+            <option value="">Všechny kampaně</option>
             {campaigns.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
           </select>
           <select name="mailbox" defaultValue={params.mailbox ?? ""} className="input w-auto py-1.5 text-sm">
-            <option value="">All mailboxes</option>
+            <option value="">Všechny schránky</option>
             {mailboxes.map((m) => <option key={m.id} value={m.id}>{m.from_email}</option>)}
           </select>
           <input
             name="q"
             defaultValue={params.q ?? ""}
-            placeholder="Search contact or company…"
+            placeholder="Hledat kontakt nebo firmu…"
             className="input w-auto py-1.5 text-sm"
           />
-          <button type="submit" className="btn-secondary">Filter</button>
+          <button type="submit" className="btn-secondary">Filtrovat</button>
         </form>
       </div>
 
       {conversations.length === 0 ? (
         <EmptyState
-          title="No replies yet"
-          description="When a prospect answers, the conversation appears here — whichever mailbox they wrote to."
+          title="Zatím žádné odpovědi"
+          description="Jakmile prospekt odpoví, konverzace se objeví tady — bez ohledu na to, které schránce psal."
         />
       ) : (
         <Table
           head={
             <tr>
-              <th className="th">Contact</th>
-              <th className="th">Company</th>
-              <th className="th">Campaign</th>
-              <th className="th">Sent from → replied to</th>
-              <th className="th">Subject</th>
-              <th className="th">Status</th>
-              <th className="th">Last message</th>
+              <th className="th">Kontakt</th>
+              <th className="th">Firma</th>
+              <th className="th">Kampaň</th>
+              <th className="th">Odesláno z → odpověď na</th>
+              <th className="th">Předmět</th>
+              <th className="th">Stav</th>
+              <th className="th">Poslední zpráva</th>
             </tr>
           }
         >
@@ -114,13 +114,13 @@ export default async function InboxPage({
                 <div className="text-xs text-zinc-500">{c.contact_email}</div>
                 {c.unread_count > 0 ? (
                   <span className="badge mt-1 bg-blue-50 text-blue-700 ring-blue-200">
-                    {c.unread_count} unread
+                    {c.unread_count} nepřečtených
                   </span>
                 ) : null}
               </td>
               <td className="td">{c.company ?? "—"}</td>
               <td className="td text-xs">
-                {c.campaign_name ?? <span className="text-zinc-400">no campaign</span>}
+                {c.campaign_name ?? <span className="text-zinc-400">bez kampaně</span>}
               </td>
               <td className="td text-xs">
                 <div className="text-zinc-900">{c.mailbox_email}</div>

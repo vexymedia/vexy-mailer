@@ -50,7 +50,7 @@ export function SequenceEditor({
       <input type="hidden" name="step_count" value={steps.length} />
 
       <div className="mb-4 rounded-md border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-600">
-        Variables:{" "}
+        Proměnné:{" "}
         {TEMPLATE_VARIABLES.map((variable) => (
           <code key={variable} className="mx-1 rounded bg-white px-1.5 py-0.5 font-mono text-xs ring-1 ring-zinc-200">
             {`{{${variable}}}`}
@@ -58,15 +58,15 @@ export function SequenceEditor({
         ))}
         <br />
         <span className="text-xs">
-          A fallback after a pipe is used when the value is missing:{" "}
+          Hodnota za svislítkem se použije, když údaj chybí:{" "}
           <code className="font-mono">{"{{first_name|there}}"}</code>
         </span>
       </div>
 
       {unknownVariables.length > 0 ? (
         <div className="mb-4 rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-          Unknown variable(s): {unknownVariables.map((name) => `{{${name}}}`).join(", ")}. They would
-          render as empty text.
+          Neznámé proměnné: {unknownVariables.map((name) => `{{${name}}}`).join(", ")}. Vykreslily by
+          se jako prázdný text.
         </div>
       ) : null}
 
@@ -75,16 +75,16 @@ export function SequenceEditor({
           <div key={index} className="card p-5">
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <h3 className="text-sm font-semibold text-zinc-900">
-                {index === 0 ? "Email 1" : `Follow-up ${index}`}
+                {index === 0 ? "E-mail 1" : `Follow-up ${index}`}
                 {step.locked ? (
                   <span className="ml-2 text-xs font-normal text-zinc-500">
-                    (already sent — cannot be removed)
+                    (už odesláno — nelze smazat)
                   </span>
                 ) : null}
               </h3>
               <div className="flex items-center gap-2">
                 <label className="text-sm text-zinc-600" htmlFor={`step_${index}_delay`}>
-                  {index === 0 ? "Sent on day" : "Wait after previous"}
+                  {index === 0 ? "Odesláno v den" : "Čekat od předchozího"}
                 </label>
                 <input
                   id={`step_${index}_delay`}
@@ -97,7 +97,7 @@ export function SequenceEditor({
                   readOnly={index === 0 || readOnly}
                   className="input w-20 text-center"
                 />
-                <span className="text-sm text-zinc-500">days</span>
+                <span className="text-sm text-zinc-500">dnů</span>
                 {/* The first email cannot be removed: promoting a follow-up in its
                     place would leave step 1 with a non-zero delay, which is invalid. */}
                 {index > 0 && !step.locked && !readOnly ? (
@@ -106,7 +106,7 @@ export function SequenceEditor({
                     onClick={() => setSteps(steps.filter((_, i) => i !== index))}
                     className="btn-danger ml-2"
                   >
-                    Remove
+                    Smazat
                   </button>
                 ) : null}
               </div>
@@ -114,7 +114,7 @@ export function SequenceEditor({
 
             <div className="space-y-4">
               <div>
-                <label className="label" htmlFor={`step_${index}_subject`}>Subject</label>
+                <label className="label" htmlFor={`step_${index}_subject`}>Předmět</label>
                 <input
                   id={`step_${index}_subject`}
                   name={`step_${index}_subject`}
@@ -122,11 +122,11 @@ export function SequenceEditor({
                   onChange={(event) => update(index, { subject: event.target.value })}
                   disabled={readOnly}
                   className="input"
-                  placeholder="Quick question about {{company}}"
+                  placeholder="Krátký dotaz ohledně {{company}}"
                 />
               </div>
               <div>
-                <label className="label" htmlFor={`step_${index}_body`}>Body</label>
+                <label className="label" htmlFor={`step_${index}_body`}>Text</label>
                 <textarea
                   id={`step_${index}_body`}
                   name={`step_${index}_body`}
@@ -145,17 +145,17 @@ export function SequenceEditor({
 
       {!readOnly ? (
         <div className="mt-5 flex items-center gap-3">
-          <SubmitButton pendingLabel="Saving…">Save sequence</SubmitButton>
+          <SubmitButton pendingLabel="Ukládám…">Uložit sekvenci</SubmitButton>
           <button
             type="button"
             onClick={() => setSteps([...steps, { ...BLANK, step_number: steps.length + 1 }])}
             className="btn-secondary"
           >
-            Add follow-up
+            Přidat follow-up
           </button>
         </div>
       ) : (
-        <p className="mt-5 text-sm text-zinc-500">Pause the campaign to edit the sequence.</p>
+        <p className="mt-5 text-sm text-zinc-500">Pro úpravu sekvence kampaň pozastavte.</p>
       )}
     </ActionForm>
   );

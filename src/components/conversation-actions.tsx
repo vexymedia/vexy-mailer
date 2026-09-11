@@ -24,7 +24,7 @@ export function ReplyComposer({
     <ActionForm action={sendReplyAction} className="card p-5">
       <input type="hidden" name="conversation_id" value={conversationId} />
       <div className="mb-3 text-xs text-zinc-500">
-        Replying as <span className="font-medium text-zinc-900">{fromEmail}</span> to{" "}
+        Odpovídáte jako <span className="font-medium text-zinc-900">{fromEmail}</span> na{" "}
         <span className="font-medium text-zinc-900">{toEmail}</span>
       </div>
       <textarea
@@ -32,19 +32,19 @@ export function ReplyComposer({
         rows={7}
         required
         disabled={disabled}
-        placeholder="Write your reply…"
+        placeholder="Napište odpověď…"
         className="input font-sans text-sm leading-relaxed"
       />
       <div className="mt-3 flex items-center gap-3">
-        <SubmitButton pendingLabel="Sending…" disabled={disabled}>Send reply</SubmitButton>
+        <SubmitButton pendingLabel="Odesílám…" disabled={disabled}>Odeslat odpověď</SubmitButton>
         {disabled ? (
           <span className="text-xs text-amber-700">
-            This mailbox is disabled, so nothing can be sent from it.
+            Tato schránka je vypnutá, takže z ní nelze nic odeslat.
           </span>
         ) : (
           <span className="text-xs text-zinc-500">
-            Threading headers are added automatically. Manual replies do not count against the
-            mailbox&apos;s campaign quota.
+            Hlavičky vlákna se doplní automaticky. Ruční odpovědi se nepočítají do kampaňové kvóty
+            schránky.
           </span>
         )}
       </div>
@@ -67,7 +67,7 @@ export function ClassificationPicker({
           <option key={c.value} value={c.value}>{c.label}</option>
         ))}
       </select>
-      <SubmitButton className="btn-secondary mt-2 w-full" pendingLabel="Saving…">Update status</SubmitButton>
+      <SubmitButton className="btn-secondary mt-2 w-full" pendingLabel="Ukládám…">Uložit stav</SubmitButton>
     </ActionForm>
   );
 }
@@ -83,14 +83,14 @@ export function DeleteConversationButton({ conversationId }: { conversationId: s
       <input type="hidden" name="conversation_id" value={conversationId} />
       <SubmitButton
         className="btn-danger w-full"
-        pendingLabel="Deleting…"
+        pendingLabel="Mažu…"
         confirm={
-          "Remove this conversation from the Inbox?\n\n" +
-          "The messages shown here are deleted. The contact, the campaign and the record of " +
-          "which emails were already sent are all kept, so this cannot cause anyone to be emailed twice."
+          "Odebrat tuto konverzaci z doručené pošty?\n\n" +
+          "Smažou se zobrazené zprávy. Kontakt, kampaň i záznam o tom, které e-maily už byly " +
+          "odeslány, zůstávají — nikomu tedy nemůže přijít e-mail dvakrát."
         }
       >
-        Delete conversation
+        Smazat konverzaci
       </SubmitButton>
     </ActionForm>
   );

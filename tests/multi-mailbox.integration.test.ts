@@ -62,7 +62,7 @@ describe("a campaign can send from several mailboxes", () => {
     const { campaignId } = await createCampaign({ name: "Empty", mailboxIds: [], contacts: contacts(1) });
     const result = await startCampaign(campaignId);
     expect(result.ok).toBe(false);
-    expect(result.problems.join(" ")).toContain("no sender mailboxes");
+    expect(result.problems.join(" ")).toContain("nemá žádnou odesílací schránku");
   });
 });
 

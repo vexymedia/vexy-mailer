@@ -180,7 +180,7 @@ async function processMailbox(mailbox: Mailbox): Promise<ReplyPollSummary["mailb
       if (updated.length > 0) {
         matched++;
         await logActivity({
-          action: "Reply detected",
+          action: "Rozpoznána odpověď",
           detail: `${message.from} replied${message.subject ? `: "${message.subject}"` : ""}. Removed from the sequence.`,
           campaignId: target.campaign_id,
           contactId: target.contact_id,
@@ -211,7 +211,7 @@ async function processMailbox(mailbox: Mailbox): Promise<ReplyPollSummary["mailb
     `;
     await logActivity({
       level: "error",
-      action: "IMAP error",
+      action: "Chyba IMAP",
       detail: `${mailbox.name}: ${detail}`,
     });
     return { ...base, scanned: 0, matched: 0, error: detail };

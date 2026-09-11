@@ -12,9 +12,9 @@ export async function TestModeBanner() {
   if (!settings.test_mode) {
     return (
       <div className="border-b border-red-200 bg-red-600 px-4 py-2 text-center text-sm font-medium text-white">
-        LIVE SENDING — test mode is off. Emails go to real contacts.{" "}
+        OSTRÉ ODESÍLÁNÍ — testovací režim je vypnutý. E-maily jdou skutečným kontaktům.{" "}
         <Link href="/settings" className="underline underline-offset-2">
-          Settings
+          Nastavení
         </Link>
       </div>
     );
@@ -25,10 +25,10 @@ export async function TestModeBanner() {
   if (settings.test_behavior === "redirect" && !settings.test_email) {
     return (
       <div className="border-b border-red-200 bg-red-100 px-4 py-2 text-center text-sm text-red-900">
-        <span className="font-semibold">TEST MODE misconfigured</span> — redirect is selected but no
-        test address is set, so nothing can be sent at all.{" "}
+        <span className="font-semibold">TESTOVACÍ REŽIM je špatně nastavený</span> — je zvolené
+        přesměrování, ale chybí testovací adresa, takže nelze odeslat vůbec nic.{" "}
         <Link href="/settings" className="underline underline-offset-2">
-          Fix it in Settings
+          Opravit v nastavení
         </Link>
       </div>
     );
@@ -36,12 +36,12 @@ export async function TestModeBanner() {
 
   return (
     <div className="border-b border-amber-200 bg-amber-100 px-4 py-2 text-center text-sm text-amber-900">
-      <span className="font-semibold">TEST MODE</span>{" "}
+      <span className="font-semibold">TESTOVACÍ REŽIM</span>{" "}
       {settings.test_behavior === "simulate"
-        ? "— nothing is sent to any SMTP server; sends are only recorded in the activity log."
-        : `— every email is redirected to ${settings.test_email}.`}{" "}
+        ? "— na žádný SMTP server se nic neposílá; odeslání se jen zapíše do aktivity."
+        : `— každý e-mail se přesměruje na ${settings.test_email}.`}{" "}
       <Link href="/settings" className="underline underline-offset-2">
-        Settings
+        Nastavení
       </Link>
     </div>
   );

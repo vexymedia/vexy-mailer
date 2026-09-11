@@ -9,8 +9,8 @@ export default async function NewCampaignPage() {
   return (
     <>
       <PageHeader
-        title="New campaign"
-        description="Created as a draft — it will not send anything until you start it."
+        title="Nová kampaň"
+        description="Vytvoří se jako koncept — nic neodešle, dokud ji nespustíte."
       />
       <div className="max-w-2xl">
         <CampaignForm

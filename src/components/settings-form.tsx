@@ -24,9 +24,9 @@ export function SettingsForm({
 
   return (
     <ActionForm action={saveSettingsAction} className="card p-6">
-      <h2 className="mb-1 text-sm font-semibold text-zinc-900">Test mode</h2>
+      <h2 className="mb-1 text-sm font-semibold text-zinc-900">Testovací režim</h2>
       <p className="mb-5 text-sm text-zinc-600">
-        A global switch, applied to every campaign. It is on by default on a fresh install.
+        Globální přepínač platný pro všechny kampaně. V čerstvé instalaci je zapnutý.
       </p>
 
       <label className="flex items-start gap-3 rounded-md border border-zinc-200 p-4">
@@ -38,15 +38,15 @@ export function SettingsForm({
           className="mt-0.5 size-4 rounded border-zinc-300"
         />
         <span>
-          <span className="block text-sm font-medium text-zinc-900">Test mode enabled</span>
+          <span className="block text-sm font-medium text-zinc-900">Testovací režim zapnutý</span>
           <span className="block text-xs text-zinc-500">
-            No email can reach a real prospect while this is on.
+            Dokud je zapnutý, nemůže se k reálnému prospektovi dostat žádný e-mail.
           </span>
         </span>
       </label>
 
       <fieldset className="mt-5" disabled={!enabled}>
-        <legend className="label">Behaviour while test mode is on</legend>
+        <legend className="label">Chování v testovacím režimu</legend>
         <div className="space-y-2">
           <label className="flex items-start gap-3 rounded-md border border-zinc-200 p-4 has-checked:border-zinc-900">
             <input
@@ -58,10 +58,10 @@ export function SettingsForm({
               className="mt-0.5 size-4 border-zinc-300"
             />
             <span>
-              <span className="block text-sm font-medium text-zinc-900">Redirect to a test address</span>
+              <span className="block text-sm font-medium text-zinc-900">Přesměrovat na testovací adresu</span>
               <span className="block text-xs text-zinc-500">
-                Really sends over SMTP, but every message goes to your address instead, with the
-                intended recipient in the subject. The best rehearsal — it exercises the real mail path.
+                Opravdu odesílá přes SMTP, ale každá zpráva jde na vaši adresu a zamýšlený příjemce
+                je v předmětu. Nejlepší zkouška — projde se skutečná cesta e-mailu.
               </span>
             </span>
           </label>
@@ -75,17 +75,17 @@ export function SettingsForm({
               className="mt-0.5 size-4 border-zinc-300"
             />
             <span>
-              <span className="block text-sm font-medium text-zinc-900">Simulate only</span>
+              <span className="block text-sm font-medium text-zinc-900">Pouze simulovat</span>
               <span className="block text-xs text-zinc-500">
-                No SMTP connection at all. Sends are recorded in the activity log and the sequence
-                advances exactly as it would live, including pacing and the daily limit.
+                Žádné SMTP připojení. Odeslání se zapíše do aktivity a sekvence postupuje přesně
+                jako naostro, včetně rozložení v čase a denního limitu.
               </span>
             </span>
           </label>
         </div>
 
         <div className="mt-4">
-          <label className="label" htmlFor="test_email">Test email address</label>
+          <label className="label" htmlFor="test_email">Testovací e-mailová adresa</label>
           <input
             id="test_email"
             name="test_email"
@@ -95,23 +95,23 @@ export function SettingsForm({
             placeholder="you@yourdomain.com"
             required={enabled && behavior === "redirect"}
           />
-          <p className="hint">Required for redirect mode. Sending is refused outright if it is missing.</p>
+          <p className="hint">Povinná pro přesměrování. Bez ní se odeslání rovnou odmítne.</p>
         </div>
       </fieldset>
 
       {!enabled ? (
         <div className="mt-5 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
-          Turning test mode off means the next worker tick will send real emails to real people in
-          every active campaign. Make sure that is what you want.
+          Vypnutím testovacího režimu pošle nejbližší běh workeru skutečné e-maily skutečným lidem
+          ve všech běžících kampaních. Ujistěte se, že to opravdu chcete.
         </div>
       ) : null}
 
       <div className="mt-6 border-t border-zinc-200 pt-5">
         <SubmitButton
-          pendingLabel="Saving…"
-          confirm={!enabled ? "Disable test mode and send real emails to real contacts?" : undefined}
+          pendingLabel="Ukládám…"
+          confirm={!enabled ? "Vypnout testovací režim a posílat skutečné e-maily skutečným kontaktům?" : undefined}
         >
-          Save settings
+          Uložit nastavení
         </SubmitButton>
       </div>
     </ActionForm>

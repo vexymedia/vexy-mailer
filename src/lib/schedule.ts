@@ -221,7 +221,7 @@ export function hhmmToMinutes(value: string): number {
   return hours * 60 + mins;
 }
 
-export const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+export const WEEKDAY_LABELS = ["Po", "Út", "St", "Čt", "Pá", "So", "Ne"];
 
 export function formatSendDays(days: number[]): string {
   return [...days].sort((a, b) => a - b).map((d) => WEEKDAY_LABELS[d - 1]).join(", ");
@@ -256,7 +256,7 @@ export function explainNextSend(
       p.month === getZonedParts(now, window.timezone).month &&
       p.day === getZonedParts(now, window.timezone).day;
     const date = sameDay
-      ? "today"
+      ? "dnes"
       : `${WEEKDAY_LABELS[p.weekday - 1]} ${String(p.day).padStart(2, "0")}/${String(p.month).padStart(2, "0")}`;
     return `${date} ${time} ${window.timezone}`;
   };
@@ -264,7 +264,7 @@ export function explainNextSend(
   if (!isWithinWindow(window, now)) {
     return {
       state: "outside_window",
-      message: `Outside the sending window. Opens ${local(nextWindowOpen(window, now))}.`,
+      message: `Mimo odesílací okno. Otevře se ${local(nextWindowOpen(window, now))}.`,
     };
   }
 
@@ -283,7 +283,7 @@ export function explainNextSend(
     );
     return {
       state: "daily_limit_reached",
-      message: `Daily limit reached (${sentToday}/${dailyLimit}). Resumes ${local(resumesAt)}.`,
+      message: `Vyčerpán denní limit (${sentToday}/${dailyLimit}). Pokračuje ${local(resumesAt)}.`,
     };
   }
 
@@ -297,15 +297,18 @@ export function explainNextSend(
       return {
         state: "cursor_stale",
         message:
-          `Paced until ${local(nextSlotAt)}, which is not a valid time under the current schedule. ` +
-          "The pacing cursor predates the current settings - save the campaign settings to clear it.",
+          `Pozastaveno do ${local(nextSlotAt)}, což podle aktuálního rozvrhu není platný čas. ` +
+          "Kurzor rozložení odesílání pochází ze starého nastavení — uložte nastavení kampaně a vynuluje se.",
       };
     }
-    return { state: "paced", message: `Inside the window. Next send no earlier than ${local(nextSlotAt)}.` };
+    return {
+      state: "paced",
+      message: `V okně. Další odeslání nejdříve ${local(nextSlotAt)}.`,
+    };
   }
 
   return {
     state: "ready",
-    message: `Inside the window and ready to send (${sentToday}/${dailyLimit} used today).`,
+    message: `V okně, připraveno odesílat (dnes využito ${sentToday}/${dailyLimit}).`,
   };
 }

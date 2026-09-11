@@ -98,21 +98,21 @@ describe("parseContactsCsv", () => {
   it("fails clearly when there is no email column", () => {
     const result = parseContactsCsv("name,company\nJana,Vexy");
     expect(result.rows).toEqual([]);
-    expect(result.errors[0]).toContain('No "email" column');
+    expect(result.errors[0]).toContain('Nenalezen sloupec "email"');
   });
 
   it("skips bad rows but keeps the good ones", () => {
     const result = parseContactsCsv("email,first_name\ngood@vexy.cz,A\nnot-an-email,B\n,C");
     expect(result.rows.map((r) => r.email)).toEqual(["good@vexy.cz"]);
     expect(result.errors).toHaveLength(2);
-    expect(result.errors[0]).toContain("Line 3");
-    expect(result.errors[1]).toContain("Line 4");
+    expect(result.errors[0]).toContain("Řádek 3");
+    expect(result.errors[1]).toContain("Řádek 4");
   });
 
   it("deduplicates within the file, case-insensitively", () => {
     const result = parseContactsCsv("email\na@vexy.cz\nA@VEXY.CZ");
     expect(result.rows).toHaveLength(1);
-    expect(result.errors[0]).toContain("more than once");
+    expect(result.errors[0]).toContain("víckrát");
   });
 
   it("returns null rather than empty string for blank optional cells", () => {
@@ -122,6 +122,6 @@ describe("parseContactsCsv", () => {
   });
 
   it("reports an empty file", () => {
-    expect(parseContactsCsv("").errors[0]).toContain("empty");
+    expect(parseContactsCsv("").errors[0]).toContain("prázdný");
   });
 });

@@ -15,8 +15,8 @@ export function CampaignControls({ id, status }: { id: string; status: CampaignS
         {status === "active" ? (
           <ActionForm action={pauseCampaignAction} hideMessages>
             <input type="hidden" name="id" value={id} />
-            <SubmitButton className="btn-secondary" pendingLabel="Pausing…">
-              Pause
+            <SubmitButton className="btn-secondary" pendingLabel="Pozastavuji…">
+              Pozastavit
             </SubmitButton>
           </ActionForm>
         ) : (
@@ -26,14 +26,14 @@ export function CampaignControls({ id, status }: { id: string; status: CampaignS
                 <input type="hidden" name="id" value={id} />
                 <SubmitButton
                   className="btn-go"
-                  pendingLabel="Starting…"
+                  pendingLabel="Spouštím…"
                   confirm={
                     status === "draft"
-                      ? "Start this campaign? Check the test-mode banner at the top of the page first."
+                      ? "Spustit tuto kampaň? Nejdřív zkontrolujte pruh s testovacím režimem nahoře."
                       : undefined
                   }
                 >
-                  {status === "paused" ? "Resume" : "Start campaign"}
+                  {status === "paused" ? "Pokračovat" : "Spustit kampaň"}
                 </SubmitButton>
                 {state.error ? <span className="ml-3 text-sm text-red-600">{state.error}</span> : null}
               </div>
@@ -44,8 +44,8 @@ export function CampaignControls({ id, status }: { id: string; status: CampaignS
         {status !== "active" ? (
           <ActionForm action={deleteCampaignAction} hideMessages>
             <input type="hidden" name="id" value={id} />
-            <SubmitButton className="btn-danger" confirm="Delete this campaign and all of its send history?">
-              Delete
+            <SubmitButton className="btn-danger" confirm="Smazat tuto kampaň i celou historii odeslání?">
+              Smazat
             </SubmitButton>
           </ActionForm>
         ) : null}

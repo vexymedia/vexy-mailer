@@ -155,3 +155,63 @@ select es.sent_at, es.intended_email, es.to_email, es.step_number, es.status, es
 
 `to_email` is where it really went; `intended_email` is who it was for. They
 differ only in redirect test mode.
+
+---
+
+## Before your first calling campaign
+
+Calling has no equivalent of the unsend problem — a call that goes badly is
+recoverable — so this is much shorter. It is still worth ten minutes.
+
+- [ ] `npm run db:migrate` has applied `0003_calling.sql` to the production
+      database. This returns one row:
+      ```sql
+      select to_regclass('public.call_activities') as t, to_regclass('public.callers') as c;
+      ```
+- [ ] The contacts actually have phone numbers. A contact without one is never
+      offered to a caller and silently sits out the campaign:
+      ```sql
+      select count(*) filter (where c.phone is null or btrim(c.phone) = '') as no_phone,
+             count(*) as total
+        from campaign_contacts cc join contacts c on c.id = cc.contact_id
+       where cc.campaign_id = '...';
+      ```
+- [ ] Every caller who will work today exists under **Calleři** and is active.
+      A call logged with nobody selected is attributed to no one, and the
+      per-caller numbers will not add up.
+- [ ] The campaign has **Volání zapnuto**, an attempt limit you meant, and a
+      script the caller can actually read aloud.
+- [ ] **Kritéria kvalifikace** are filled in. They are shown to the caller at
+      the moment they book a meeting and they decide what is billable. An empty
+      box means every judgement is a guess.
+- [ ] The economics on the campaign match the deal you actually signed: the
+      right revenue model and rate, and the right caller cost model. Check one
+      number by hand before trusting the tab — for a campaign billed at 40 Kč
+      per connected call, 125 connected calls must read 5 000 Kč.
+- [ ] Walk one prospect through the workspace yourself: dial, log an outcome,
+      confirm the next contact loads, and confirm the attempt counter moved on
+      the campaign's **Volání** tab.
+
+### Watch for
+
+**Meetings nobody has judged.** The Volání tab says so in an amber banner.
+Every unjudged meeting is revenue you cannot invoice:
+
+```sql
+select count(*) from campaign_contacts
+ where campaign_id = '...' and meeting_booked and meeting_qualified is null;
+```
+
+**Prospects who ran out of attempts without ever being reached.** A large
+`max_attempts` count next to a small connected count usually means the phone
+numbers are wrong, not that the market is cold:
+
+```sql
+select call_status, count(*) from campaign_contacts
+ where campaign_id = '...' group by 1 order by 2 desc;
+```
+
+**Calling does not stop e-mails.** A `do_not_call` outcome is about the phone
+only: it does not add anyone to the do-not-contact list and does not pause the
+sequence. If someone asks for both, suppress them under **Nekontaktovat** as
+well — that is the switch that stops e-mail.

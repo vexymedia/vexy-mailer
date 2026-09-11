@@ -10,7 +10,7 @@ export function ImportForm({ campaignId }: { campaignId?: string }) {
       <div className="flex flex-wrap items-end gap-4">
         <div className="min-w-64 flex-1">
           <label className="label" htmlFor="file">
-            Import contacts from CSV
+            Import kontaktů z CSV
           </label>
           <input
             id="file"
@@ -21,12 +21,12 @@ export function ImportForm({ campaignId }: { campaignId?: string }) {
             className="input file:mr-3 file:rounded file:border-0 file:bg-zinc-100 file:px-3 file:py-1 file:text-sm"
           />
           <p className="hint">
-            Columns: <code className="font-mono">first_name, last_name, company, email, website</code>.
-            Only <code className="font-mono">email</code> is required. Comma, semicolon and tab
-            separators are all understood, and duplicates are skipped.
+            Sloupce: <code className="font-mono">first_name, last_name, company, email, website, phone</code>.
+            Povinný je jen <code className="font-mono">email</code>; <code className="font-mono">phone</code> je
+            potřeba pro volání. Rozpozná se čárka, středník i tabulátor a duplicity se přeskočí.
           </p>
         </div>
-        <SubmitButton pendingLabel="Importing…">Import</SubmitButton>
+        <SubmitButton pendingLabel="Importuji…">Importovat</SubmitButton>
       </div>
     </ActionForm>
   );

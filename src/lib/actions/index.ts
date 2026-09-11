@@ -27,6 +27,8 @@ import {
   sendManualReply,
   setClassification,
 } from "@/lib/queries/inbox";
+import { createCaller, logCall, setCallerActive, updateMeeting } from "@/lib/queries/calling";
+import { callOutcomeLabel, isCallOutcome } from "@/lib/calling";
 import type { Classification } from "@/lib/types";
 
 export interface ActionState {
@@ -44,7 +46,7 @@ function fail(error: string, problems?: string[]): ActionState {
 export async function loginAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
   const password = String(formData.get("password") ?? "");
   if (!password || !checkPassword(password)) {
-    return fail("Incorrect password.");
+    return fail("Nesprávné heslo.");
   }
   const store = await cookies();
   store.set(SESSION_COOKIE, createSessionToken(), sessionCookieOptions);
@@ -77,32 +79,32 @@ export async function saveSettingsAction(_prev: ActionState, formData: FormData)
     test_email: rawEmail || null,
     test_behavior: behavior,
   });
-  if (!parsed.success) return fail("Enter a valid test email address, or leave it blank.");
+  if (!parsed.success) return fail("Zadejte platnou testovací e-mailovou adresu, nebo pole nechte prázdné.");
 
   // Refuse a configuration that would silently send nowhere.
   if (parsed.data.test_mode && parsed.data.test_behavior === "redirect" && !parsed.data.test_email) {
-    return fail("Redirect mode needs a test email address to send to.");
+    return fail("Přesměrování potřebuje testovací e-mailovou adresu, kam odesílat.");
   }
 
   await updateSettings(parsed.data);
   await logActivity({
     level: parsed.data.test_mode ? "info" : "warn",
     action: parsed.data.test_mode ? "Test mode enabled" : "TEST MODE DISABLED - live sending is on",
-    detail: parsed.data.test_mode ? `Behaviour: ${parsed.data.test_behavior}` : null,
+    detail: parsed.data.test_mode ? `Chování: ${parsed.data.test_behavior}` : null,
   });
   revalidatePath("/", "layout");
-  return { success: parsed.data.test_mode ? "Test mode is on. Nothing will reach a real prospect." : "Test mode is OFF. Emails will go to real contacts." };
+  return { success: parsed.data.test_mode ? "Testovací režim je zapnutý. K žádnému reálnému prospektovi se nic nedostane." : "Testovací režim je VYPNUTÝ. E-maily půjdou skutečným kontaktům." };
 }
 
 // ----------------------------------------------------------- mailboxes
 
 const mailboxSchema = z.object({
-  name: z.string().min(1, "Give the mailbox a name."),
-  from_name: z.string().min(1, "From name is required."),
-  from_email: z.string().email("From email is not a valid address."),
-  smtp_host: z.string().min(1, "SMTP host is required."),
+  name: z.string().min(1, "Pojmenujte schránku."),
+  from_name: z.string().min(1, "Jméno odesílatele je povinné."),
+  from_email: z.string().email("E-mail odesílatele není platná adresa."),
+  smtp_host: z.string().min(1, "SMTP server je povinný."),
   smtp_port: z.coerce.number().int().min(1).max(65535),
-  smtp_username: z.string().min(1, "SMTP username is required."),
+  smtp_username: z.string().min(1, "SMTP uživatel je povinný."),
   smtp_password: z.string().optional(),
   smtp_secure: z.boolean(),
   imap_host: z.string().nullable(),
@@ -150,16 +152,16 @@ export async function saveMailboxAction(_prev: ActionState, formData: FormData):
   try {
     assertValidTimezone(parsed.data.timezone);
   } catch {
-    return fail(`"${parsed.data.timezone}" is not a valid IANA timezone (for example Europe/Prague).`);
+    return fail(`"${parsed.data.timezone}" není platné IANA časové pásmo (například Europe/Prague).`);
   }
   try {
     if (id) await updateMailbox(id, parsed.data);
     else {
-      if (!parsed.data.smtp_password) return fail("An SMTP password is required.");
+      if (!parsed.data.smtp_password) return fail("SMTP heslo je povinné.");
       await createMailbox(parsed.data);
     }
   } catch (error) {
-    return fail(error instanceof Error ? error.message : "Could not save the mailbox.");
+    return fail(error instanceof Error ? error.message : "Schránku se nepodařilo uložit.");
   }
   revalidatePath("/mailboxes");
   redirect("/mailboxes");
@@ -168,20 +170,20 @@ export async function saveMailboxAction(_prev: ActionState, formData: FormData):
 export async function testMailboxAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
   await requireAuth();
   const id = String(formData.get("id") ?? "");
-  if (!id) return fail("Save the mailbox before testing it.");
+  if (!id) return fail("Nejdřív schránku uložte, pak ji otestujte.");
   try {
     const result = await testMailbox(id);
     revalidatePath("/mailboxes");
-    if (!result.smtp.ok) return fail(`SMTP failed: ${result.smtp.error}`);
+    if (!result.smtp.ok) return fail(`SMTP selhalo: ${result.smtp.error}`);
     if (result.imap.skipped) {
-      return { success: "SMTP connected. No IMAP configured, so replies will not be detected automatically." };
+      return { success: "SMTP připojeno. IMAP není nastaveno, takže odpovědi se nebudou rozpoznávat automaticky." };
     }
     if (!result.imap.ok) {
-      return { error: `SMTP connected, but IMAP failed: ${result.imap.error}` };
+      return { error: `SMTP připojeno, ale IMAP selhalo: ${result.imap.error}` };
     }
-    return { success: "SMTP and IMAP both connected." };
+    return { success: "SMTP i IMAP jsou připojené." };
   } catch (error) {
-    return fail(error instanceof Error ? error.message : "Connection test failed.");
+    return fail(error instanceof Error ? error.message : "Test připojení selhal.");
   }
 }
 
@@ -192,15 +194,15 @@ export async function testMailboxAction(_prev: ActionState, formData: FormData):
 export async function testMailboxImapAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
   await requireAuth();
   const id = String(formData.get("id") ?? "");
-  if (!id) return fail("Save the mailbox before testing it.");
+  if (!id) return fail("Nejdřív schránku uložte, pak ji otestujte.");
   try {
     const result = await testMailboxImap(id);
     revalidatePath("/mailboxes");
     revalidatePath(`/mailboxes/${id}`);
-    if (result.ok) return { success: "IMAP connected and INBOX opened. Reply detection can run." };
-    return fail(result.error ?? "IMAP test failed.");
+    if (result.ok) return { success: "IMAP připojeno a INBOX otevřen. Detekce odpovědí může běžet." };
+    return fail(result.error ?? "Test IMAP selhal.");
   } catch (error) {
-    return fail(error instanceof Error ? error.message : "IMAP test failed.");
+    return fail(error instanceof Error ? error.message : "Test IMAP selhal.");
   }
 }
 
@@ -208,17 +210,17 @@ export async function deleteMailboxAction(_prev: ActionState, formData: FormData
   await requireAuth();
   const result = await deleteMailbox(String(formData.get("id") ?? ""));
   revalidatePath("/mailboxes");
-  return result.ok ? { success: "Mailbox deleted." } : fail(result.error ?? "Could not delete.");
+  return result.ok ? { success: "Schránka smazána." } : fail(result.error ?? "Smazat se nepodařilo.");
 }
 
 // ----------------------------------------------------------- campaigns
 
 const campaignSchema = z.object({
-  name: z.string().min(1, "Give the campaign a name."),
-  mailbox_ids: z.array(z.string().uuid()).min(1, "Choose at least one sender mailbox."),
+  name: z.string().min(1, "Pojmenujte kampaň."),
+  mailbox_ids: z.array(z.string().uuid()).min(1, "Vyberte alespoň jednu odesílací schránku."),
   daily_limit: z.coerce.number().int().min(1).max(2000),
   timezone: z.string().min(1),
-  send_days: z.array(z.number().int().min(1).max(7)).min(1, "Pick at least one sending day."),
+  send_days: z.array(z.number().int().min(1).max(7)).min(1, "Vyberte alespoň jeden den odesílání."),
   send_start_minute: z.number().int().min(0).max(1439),
   send_end_minute: z.number().int().min(1).max(1440),
 });
@@ -233,15 +235,15 @@ export async function saveCampaignAction(_prev: ActionState, formData: FormData)
     startMinute = hhmmToMinutes(String(formData.get("send_start") ?? "08:00"));
     endMinute = hhmmToMinutes(String(formData.get("send_end") ?? "16:00"));
   } catch {
-    return fail("Sending window times must look like 08:00.");
+    return fail("Časy odesílacího okna musí být ve tvaru 08:00.");
   }
-  if (endMinute <= startMinute) return fail("The sending window must end after it starts.");
+  if (endMinute <= startMinute) return fail("Odesílací okno musí končit později, než začíná.");
 
   const timezone = String(formData.get("timezone") ?? "Europe/Prague");
   try {
     assertValidTimezone(timezone);
   } catch {
-    return fail(`"${timezone}" is not a valid IANA timezone (for example Europe/Prague).`);
+    return fail(`"${timezone}" není platné IANA časové pásmo (například Europe/Prague).`);
   }
 
   const parsed = campaignSchema.safeParse({
@@ -281,7 +283,7 @@ export async function saveCampaignAction(_prev: ActionState, formData: FormData)
       returning id
     `;
     campaignId = row.id;
-    await logActivity({ action: "Campaign created", detail: data.name, campaignId });
+    await logActivity({ action: "Kampaň vytvořena", detail: data.name, campaignId });
   }
 
   const { kept } = await setCampaignMailboxes(campaignId, data.mailbox_ids);
@@ -289,20 +291,20 @@ export async function saveCampaignAction(_prev: ActionState, formData: FormData)
     revalidatePath(`/campaigns/${campaignId}`);
     revalidatePath("/");
     return {
-      success: "Campaign saved.",
+      success: "Kampaň uložena.",
       problems: [
-        "The send pacing was reset because the schedule changed. The campaign can send again as " +
-          "soon as it is inside the new window.",
-        ...(kept.length ? [`Kept ${kept.join(", ")} in the pool: contacts are pinned to them.`] : []),
+        "Rozložení odesílání bylo vynulováno, protože se změnil rozvrh. Kampaň může odeslat další " +
+          "e-mail, jakmile bude v novém okně.",
+        ...(kept.length ? [`${kept.join(", ")} zůstává mezi odesílateli: jsou na ni připnuté kontakty.`] : []),
       ],
     };
   }
   if (kept.length > 0) {
     revalidatePath(`/campaigns/${campaignId}`);
     return {
-      success: "Campaign saved.",
+      success: "Kampaň uložena.",
       problems: [
-        `Kept ${kept.join(", ")} in the pool: contacts are already pinned to ${kept.length > 1 ? "them" : "it"} and a thread is never moved to another sender.`,
+        `${kept.join(", ")} zůstává mezi odesílateli: kontakty jsou už připnuté a vlákno se nikdy nepřesouvá na jiného odesílatele.`,
       ],
     };
   }
@@ -317,8 +319,8 @@ export async function startCampaignAction(_prev: ActionState, formData: FormData
   const result = await startCampaign(id);
   revalidatePath(`/campaigns/${id}`);
   revalidatePath("/");
-  if (!result.ok) return fail("The campaign is not ready to start.", result.problems);
-  return { success: "Campaign is active. The worker will start sending inside the next window." };
+  if (!result.ok) return fail("Kampaň není připravená ke spuštění.", result.problems);
+  return { success: "Kampaň běží. Worker začne odesílat v nejbližším okně." };
 }
 
 export async function pauseCampaignAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
@@ -327,14 +329,14 @@ export async function pauseCampaignAction(_prev: ActionState, formData: FormData
   await pauseCampaign(id);
   revalidatePath(`/campaigns/${id}`);
   revalidatePath("/");
-  return { success: "Campaign paused. No further emails will be sent." };
+  return { success: "Kampaň pozastavena. Žádné další e-maily se neodešlou." };
 }
 
 export async function deleteCampaignAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
   await requireAuth();
   const id = String(formData.get("id") ?? "");
   const [campaign] = await sql<{ status: string }[]>`select status from campaigns where id = ${id}`;
-  if (campaign?.status === "active") return fail("Pause the campaign before deleting it.");
+  if (campaign?.status === "active") return fail("Před smazáním kampaň pozastavte.");
   await sql`delete from campaigns where id = ${id}`;
   revalidatePath("/campaigns");
   redirect("/campaigns");
@@ -359,16 +361,16 @@ export async function saveStepsAction(_prev: ActionState, formData: FormData): P
     const body = String(formData.get(`step_${i}_body`) ?? "").trim();
     const delay = Number(formData.get(`step_${i}_delay`) ?? 0);
     if (!subject && !body) continue;
-    if (!subject) return fail(`Step ${steps.length + 1} has no subject.`);
-    if (!body) return fail(`Step ${steps.length + 1} has no body.`);
+    if (!subject) return fail(`Krok ${steps.length + 1} nemá předmět.`);
+    if (!body) return fail(`Krok ${steps.length + 1} nemá text.`);
     if (!Number.isInteger(delay) || delay < 0 || delay > 365) {
-      return fail(`Step ${steps.length + 1} has an invalid delay.`);
+      return fail(`Krok ${steps.length + 1} má neplatnou prodlevu.`);
     }
     steps.push({ subject, body, delay_days: delay });
   }
 
-  if (steps.length === 0) return fail("A campaign needs at least one step.");
-  if (steps[0].delay_days !== 0) return fail("Step 1 must have a delay of 0 days - it is the first email.");
+  if (steps.length === 0) return fail("Kampaň potřebuje alespoň jeden krok.");
+  if (steps[0].delay_days !== 0) return fail("Krok 1 musí mít prodlevu 0 dnů — je to první e-mail.");
 
   const unknown = new Set<string>();
   for (const step of steps) {
@@ -378,8 +380,8 @@ export async function saveStepsAction(_prev: ActionState, formData: FormData): P
   }
   if (unknown.size > 0) {
     return fail(
-      `Unknown variable(s): ${[...unknown].map((v) => `{{${v}}}`).join(", ")}. ` +
-        "Supported: {{first_name}}, {{last_name}}, {{company}}, {{website}}, {{unsubscribe_link}}.",
+      `Neznámé proměnné: ${[...unknown].map((v) => `{{${v}}}`).join(", ")}. ` +
+        "Podporované: {{first_name}}, {{last_name}}, {{company}}, {{website}}, {{unsubscribe_link}}.",
     );
   }
 
@@ -417,9 +419,9 @@ export async function saveStepsAction(_prev: ActionState, formData: FormData): P
     }
   });
 
-  await logActivity({ action: "Sequence updated", detail: `${steps.length} step(s)`, campaignId });
+  await logActivity({ action: "Sekvence upravena", detail: `${steps.length} kroků`, campaignId });
   revalidatePath(`/campaigns/${campaignId}`);
-  return { success: `Sequence saved: ${steps.length} step(s).` };
+  return { success: `Sekvence uložena: ${steps.length} kroků.` };
 }
 
 // ------------------------------------------------------------ contacts
@@ -429,12 +431,12 @@ export async function importContactsAction(_prev: ActionState, formData: FormDat
   const file = formData.get("file");
   const campaignId = String(formData.get("campaign_id") ?? "") || null;
 
-  if (!(file instanceof File) || file.size === 0) return fail("Choose a CSV file to upload.");
-  if (file.size > 10 * 1024 * 1024) return fail("The file is larger than 10 MB.");
+  if (!(file instanceof File) || file.size === 0) return fail("Vyberte CSV soubor k nahrání.");
+  if (file.size > 10 * 1024 * 1024) return fail("Soubor je větší než 10 MB.");
 
   const parsed = parseContactsCsv(await file.text());
   if (parsed.rows.length === 0) {
-    return fail(parsed.errors[0] ?? "No usable rows found in the file.", parsed.errors.slice(0, 20));
+    return fail(parsed.errors[0] ?? "V souboru nejsou žádné použitelné řádky.", parsed.errors.slice(0, 20));
   }
 
   const result = await importContacts(parsed.rows, campaignId);
@@ -443,15 +445,15 @@ export async function importContactsAction(_prev: ActionState, formData: FormDat
 
   const notes: string[] = [];
   if (parsed.errors.length) notes.push(...parsed.errors.slice(0, 20));
-  if (parsed.ignoredColumns.length) notes.push(`Ignored column(s): ${parsed.ignoredColumns.join(", ")}.`);
+  if (parsed.ignoredColumns.length) notes.push(`Ignorované sloupce: ${parsed.ignoredColumns.join(", ")}.`);
   if (result.suppressed.length) {
-    notes.push(`${result.suppressed.length} address(es) are on the do-not-contact list and were not added to the campaign.`);
+    notes.push(`${result.suppressed.length} adres je na seznamu Nekontaktovat a do kampaně se nepřidaly.`);
   }
 
   return {
     success:
-      `Imported ${result.created} new contact(s); ${result.existing} were already known.` +
-      (campaignId ? ` ${result.addedToCampaign} added to the campaign, ${result.skippedFromCampaign} skipped.` : ""),
+      `Naimportováno ${result.created} nových kontaktů; ${result.existing} už bylo známých.` +
+      (campaignId ? ` ${result.addedToCampaign} přidáno do kampaně, ${result.skippedFromCampaign} přeskočeno.` : ""),
     problems: notes.length ? notes : undefined,
   };
 }
@@ -459,18 +461,18 @@ export async function importContactsAction(_prev: ActionState, formData: FormDat
 export async function suppressEmailAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
   await requireAuth();
   const email = String(formData.get("email") ?? "").trim().toLowerCase();
-  if (!email.includes("@")) return fail("Enter a valid email address.");
+  if (!email.includes("@")) return fail("Zadejte platnou e-mailovou adresu.");
   await suppressEmail(email, String(formData.get("reason") ?? "manual"), String(formData.get("note") ?? "") || undefined);
   revalidatePath("/suppression");
   revalidatePath("/contacts");
-  return { success: `${email} will never be contacted again.` };
+  return { success: `${email} už nikdy nebude kontaktován.` };
 }
 
 export async function unsuppressEmailAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
   await requireAuth();
   await unsuppressEmail(String(formData.get("email") ?? ""));
   revalidatePath("/suppression");
-  return { success: "Removed from the do-not-contact list." };
+  return { success: "Odebráno ze seznamu Nekontaktovat." };
 }
 
 export async function removeFromCampaignAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
@@ -481,7 +483,7 @@ export async function removeFromCampaignAction(_prev: ActionState, formData: For
   `;
   await sql`delete from campaign_contacts where id = ${id}`;
   if (row) revalidatePath(`/campaigns/${row.campaign_id}`);
-  return { success: "Contact removed from the campaign." };
+  return { success: "Kontakt odebrán z kampaně." };
 }
 
 export async function skipStepAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
@@ -489,7 +491,7 @@ export async function skipStepAction(_prev: ActionState, formData: FormData): Pr
   const id = String(formData.get("campaign_contact_id") ?? "");
   await skipStepAndResume(id);
   revalidatePath("/campaigns");
-  return { success: "Contact resumed at the next step." };
+  return { success: "Kontakt pokračuje dalším krokem." };
 }
 
 // ---------------------------------------------------------------- worker
@@ -506,7 +508,7 @@ export async function runWorkerNowAction(_prev: ActionState): Promise<ActionStat
   const actions = dispatch.outcomes.map((o) => `${o.campaignName}: ${o.action}${o.detail ? ` (${o.detail})` : ""}`);
   const matched = replies.mailboxes.reduce((sum, m) => sum + m.matched, 0);
   return {
-    success: `Worker ran. ${actions.length ? actions.join("; ") : "No active campaigns."}${matched ? ` ${matched} reply/replies detected.` : ""}`,
+    success: `Worker proběhl. ${actions.length ? actions.join("; ") : "Žádné běžící kampaně."}${matched ? ` Rozpoznáno odpovědí: ${matched}.` : ""}`,
   };
 }
 
@@ -516,13 +518,13 @@ export async function sendReplyAction(_prev: ActionState, formData: FormData): P
   await requireAuth();
   const conversationId = String(formData.get("conversation_id") ?? "");
   const body = String(formData.get("body") ?? "").trim();
-  if (!body) return fail("Write something before sending.");
+  if (!body) return fail("Než odešlete, něco napište.");
 
   const result = await sendManualReply(conversationId, body);
   revalidatePath(`/inbox/${conversationId}`);
   revalidatePath("/inbox");
-  if (!result.ok) return fail(result.error ?? "The reply could not be sent.");
-  return { success: "Reply sent." };
+  if (!result.ok) return fail(result.error ?? "Odpověď se nepodařilo odeslat.");
+  return { success: "Odpověď odeslána." };
 }
 
 export async function classifyConversationAction(
@@ -535,7 +537,7 @@ export async function classifyConversationAction(
   await setClassification(conversationId, classification);
   revalidatePath(`/inbox/${conversationId}`);
   revalidatePath("/inbox");
-  return { success: "Status updated." };
+  return { success: "Stav uložen." };
 }
 
 export async function markReadAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
@@ -554,4 +556,191 @@ export async function deleteConversationAction(
   await deleteConversation(String(formData.get("conversation_id") ?? ""));
   revalidatePath("/inbox");
   redirect("/inbox");
+}
+
+// --------------------------------------------------------------- volání
+
+/**
+ * Records one call and sends the caller straight back to the queue, which then
+ * renders the next prospect. Two clicks per call - dial, then outcome - is the
+ * whole point of the workspace, so nothing here asks for confirmation.
+ */
+export async function logCallAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  await requireAuth();
+  const campaignContactId = String(formData.get("campaign_contact_id") ?? "");
+  const outcome = String(formData.get("outcome") ?? "");
+  if (!isCallOutcome(outcome)) return fail("Vyberte výsledek hovoru.");
+
+  const parseWhen = (key: string): Date | null | "invalid" => {
+    const raw = String(formData.get(key) ?? "").trim();
+    if (!raw) return null;
+    const parsed = new Date(raw);
+    return Number.isNaN(parsed.getTime()) ? "invalid" : parsed;
+  };
+
+  const callbackAt = parseWhen("callback_at");
+  const meetingAt = parseWhen("meeting_at");
+  if (callbackAt === "invalid" || meetingAt === "invalid") {
+    return fail("Zadané datum není platné.");
+  }
+
+  const rawQualified = String(formData.get("meeting_qualified") ?? "");
+  const meetingQualified = rawQualified === "" ? null : rawQualified === "yes";
+
+  const rawDeal = String(formData.get("deal_value") ?? "").trim();
+  const dealValue = rawDeal === "" ? null : Number(rawDeal.replace(",", "."));
+  if (dealValue !== null && !Number.isFinite(dealValue)) {
+    return fail("Hodnota obchodu musí být číslo.");
+  }
+
+  const result = await logCall({
+    campaignContactId,
+    outcome,
+    callerId: String(formData.get("caller_id") ?? "") || null,
+    note: String(formData.get("note") ?? "") || null,
+    callbackAt,
+    meetingAt,
+    meetingQualified,
+    dealValue,
+  });
+  if (!result.ok) return fail(result.error ?? "Hovor se nepodařilo uložit.");
+
+  revalidatePath("/volani", "layout");
+  if (result.campaignId) revalidatePath(`/campaigns/${result.campaignId}`);
+  return { success: `Uloženo: ${callOutcomeLabel(outcome)}.` };
+}
+
+/** Marks a booked meeting as held and/or judges it against the criteria. */
+export async function updateMeetingAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  await requireAuth();
+  const campaignContactId = String(formData.get("campaign_contact_id") ?? "");
+  const rawHeld = String(formData.get("held") ?? "");
+  const rawQualified = String(formData.get("qualified") ?? "");
+
+  const result = await updateMeeting(campaignContactId, {
+    held: rawHeld === "" ? undefined : rawHeld === "yes",
+    qualified: rawQualified === "" ? undefined : rawQualified === "yes",
+  });
+  if (!result.ok) return fail("Schůzka nebyla nalezena — nejprve ji domluvte přes výsledek hovoru.");
+
+  revalidatePath("/volani", "layout");
+  if (result.campaignId) revalidatePath(`/campaigns/${result.campaignId}`);
+  return { success: "Schůzka aktualizována." };
+}
+
+const callingSchema = z.object({
+  calling_enabled: z.boolean(),
+  max_call_attempts: z.coerce.number().int().min(1).max(20),
+  script_opening: z.string().nullable(),
+  script_value: z.string().nullable(),
+  script_objections: z.string().nullable(),
+  script_closing: z.string().nullable(),
+  qualification_criteria: z.string().nullable(),
+});
+
+export async function saveCallingSettingsAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  await requireAuth();
+  const id = String(formData.get("campaign_id") ?? "");
+  const text = (key: string) => String(formData.get(key) ?? "").trim() || null;
+
+  const parsed = callingSchema.safeParse({
+    calling_enabled: formData.get("calling_enabled") === "on",
+    max_call_attempts: formData.get("max_call_attempts"),
+    script_opening: text("script_opening"),
+    script_value: text("script_value"),
+    script_objections: text("script_objections"),
+    script_closing: text("script_closing"),
+    qualification_criteria: text("qualification_criteria"),
+  });
+  if (!parsed.success) return fail("Maximální počet pokusů musí být 1 až 20.");
+
+  const data = parsed.data;
+  await sql`
+    update campaigns
+       set calling_enabled = ${data.calling_enabled},
+           max_call_attempts = ${data.max_call_attempts},
+           script_opening = ${data.script_opening},
+           script_value = ${data.script_value},
+           script_objections = ${data.script_objections},
+           script_closing = ${data.script_closing},
+           qualification_criteria = ${data.qualification_criteria},
+           updated_at = now()
+     where id = ${id}
+  `;
+  revalidatePath(`/campaigns/${id}`);
+  revalidatePath("/volani", "layout");
+  return { success: "Nastavení volání uloženo." };
+}
+
+const economicsSchema = z.object({
+  revenue_model: z.enum(["deal_values", "fixed", "per_meeting_booked", "per_qualified_meeting", "per_meeting_held", "per_client"]),
+  revenue_amount: z.coerce.number().min(0),
+  caller_cost_model: z.enum(["none", "fixed", "hourly", "per_connected_call"]),
+  caller_cost_amount: z.coerce.number().min(0),
+  caller_hours: z.coerce.number().min(0),
+  additional_costs: z.coerce.number().min(0),
+});
+
+export async function saveEconomicsAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  await requireAuth();
+  const id = String(formData.get("campaign_id") ?? "");
+  const num = (key: string) => String(formData.get(key) ?? "0").replace(",", ".") || "0";
+
+  const parsed = economicsSchema.safeParse({
+    revenue_model: String(formData.get("revenue_model") ?? "deal_values"),
+    revenue_amount: num("revenue_amount"),
+    caller_cost_model: String(formData.get("caller_cost_model") ?? "none"),
+    caller_cost_amount: num("caller_cost_amount"),
+    caller_hours: num("caller_hours"),
+    additional_costs: num("additional_costs"),
+  });
+  if (!parsed.success) return fail("Všechny částky musí být nezáporná čísla.");
+
+  const data = parsed.data;
+  await sql`
+    update campaigns
+       set revenue_model = ${data.revenue_model},
+           revenue_amount = ${data.revenue_amount},
+           caller_cost_model = ${data.caller_cost_model},
+           caller_cost_amount = ${data.caller_cost_amount},
+           caller_hours = ${data.caller_hours},
+           additional_costs = ${data.additional_costs},
+           updated_at = now()
+     where id = ${id}
+  `;
+  revalidatePath(`/campaigns/${id}`);
+  return { success: "Ekonomika kampaně uložena." };
+}
+
+// -------------------------------------------------------------- calleři
+
+export async function saveCallerAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  await requireAuth();
+  const name = String(formData.get("name") ?? "").trim();
+  if (!name) return fail("Zadejte jméno callera.");
+  await createCaller({
+    name,
+    email: String(formData.get("email") ?? "").trim().toLowerCase() || null,
+    phone: String(formData.get("phone") ?? "").trim() || null,
+  });
+  revalidatePath("/calleri");
+  revalidatePath("/volani", "layout");
+  return { success: `Caller ${name} přidán.` };
+}
+
+/**
+ * Retires or reinstates a caller. Never a delete: call history, and therefore
+ * the campaign's economics, reference the row.
+ */
+export async function toggleCallerAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  await requireAuth();
+  const id = String(formData.get("id") ?? "");
+  const active = String(formData.get("active") ?? "") === "yes";
+  await setCallerActive(id, active);
+  revalidatePath("/calleri");
+  revalidatePath("/volani", "layout");
+  return { success: active ? "Caller je znovu aktivní." : "Caller deaktivován." };
 }

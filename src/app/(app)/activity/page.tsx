@@ -8,17 +8,17 @@ export default async function ActivityPage() {
 
   return (
     <>
-      <PageHeader title="Activity" description="The 500 most recent events across every campaign." />
+      <PageHeader title="Aktivita" description="Posledních 500 událostí napříč všemi kampaněmi." />
       {rows.length === 0 ? (
-        <p className="card px-6 py-10 text-center text-sm text-zinc-500">Nothing has happened yet.</p>
+        <p className="card px-6 py-10 text-center text-sm text-zinc-500">Zatím se nic nestalo.</p>
       ) : (
         <Table
           head={
             <tr>
-              <th className="th">Time (UTC)</th>
-              <th className="th">Campaign</th>
-              <th className="th">Contact</th>
-              <th className="th">Action</th>
+              <th className="th">Čas (UTC)</th>
+              <th className="th">Kampaň</th>
+              <th className="th">Kontakt</th>
+              <th className="th">Akce</th>
               <th className="th">Detail</th>
             </tr>
           }

@@ -1,3 +1,7 @@
+import type { CallOutcome, CallStatus, CallerCostModel, RevenueModel } from "./calling";
+
+export type { CallOutcome, CallStatus, CallerCostModel, RevenueModel };
+
 export type CampaignStatus = "draft" | "active" | "paused" | "completed";
 
 export type CampaignContactStatus =
@@ -55,6 +59,7 @@ export interface Mailbox {
 export interface Contact {
   id: string;
   email: string;
+  phone: string | null;
   first_name: string | null;
   last_name: string | null;
   company: string | null;
@@ -79,6 +84,21 @@ export interface Campaign {
   updated_at: Date;
   started_at: Date | null;
   completed_at: Date | null;
+
+  // ---- calling. A campaign is e-mail AND phone; these are the phone half.
+  calling_enabled: boolean;
+  max_call_attempts: number;
+  script_opening: string | null;
+  script_value: string | null;
+  script_objections: string | null;
+  script_closing: string | null;
+  qualification_criteria: string | null;
+  revenue_model: RevenueModel;
+  revenue_amount: number;
+  caller_cost_model: CallerCostModel;
+  caller_cost_amount: number;
+  caller_hours: number;
+  additional_costs: number;
 }
 
 export interface SequenceStep {
@@ -104,6 +124,48 @@ export interface CampaignContact {
   thread_message_id: string | null;
   /** Sticky sender: set on the first send, never reassigned automatically. */
   sender_mailbox_id: string | null;
+
+  // ---- calling. Deliberately parallel to, and never mixed with, the e-mail
+  // fields above: `status` is the e-mail lifecycle, `call_status` the phone one.
+  call_status: CallStatus;
+  call_attempts: number;
+  last_call_at: Date | null;
+  next_call_at: Date | null;
+  last_call_outcome: CallOutcome | null;
+  call_note: string | null;
+  assigned_caller_id: string | null;
+  meeting_booked: boolean;
+  meeting_at: Date | null;
+  /** null = not judged yet. */
+  meeting_qualified: boolean | null;
+  meeting_held: boolean;
+  deal_value: number | null;
+}
+
+export interface Caller {
+  id: string;
+  name: string;
+  active: boolean;
+  email: string | null;
+  phone: string | null;
+  created_at: Date;
+}
+
+export interface CallActivity {
+  id: string;
+  campaign_id: string;
+  campaign_contact_id: string;
+  contact_id: string;
+  caller_id: string | null;
+  outcome: CallOutcome;
+  connected: boolean;
+  note: string | null;
+  attempt_number: number;
+  called_at: Date;
+  next_action_at: Date | null;
+  meeting_at: Date | null;
+  meeting_qualified: boolean | null;
+  deal_value: number | null;
 }
 
 export interface EmailSend {
@@ -139,14 +201,14 @@ export type Classification =
   | "other";
 
 export const CLASSIFICATIONS: { value: Classification; label: string }[] = [
-  { value: "unclassified", label: "Unclassified" },
-  { value: "positive", label: "Positive" },
-  { value: "not_interested", label: "Not interested" },
-  { value: "later", label: "Later" },
-  { value: "wrong_person", label: "Wrong person" },
-  { value: "ooo", label: "Out of office" },
-  { value: "unsubscribe", label: "Unsubscribe" },
-  { value: "other", label: "Other" },
+  { value: "unclassified", label: "Nezařazeno" },
+  { value: "positive", label: "Pozitivní" },
+  { value: "not_interested", label: "Nemá zájem" },
+  { value: "later", label: "Později" },
+  { value: "wrong_person", label: "Špatná osoba" },
+  { value: "ooo", label: "Mimo kancelář" },
+  { value: "unsubscribe", label: "Odhlášení" },
+  { value: "other", label: "Jiné" },
 ];
 
 export interface ConversationRow {

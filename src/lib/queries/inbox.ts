@@ -256,7 +256,7 @@ export async function deleteConversation(id: string): Promise<void> {
     const { logActivity } = await import("../activity");
     await logActivity({
       level: "warn",
-      action: "Conversation deleted",
+      action: "Konverzace smazána",
       detail:
         `Removed the inbox thread between ${conversation.mailbox_email} and ` +
         `${conversation.contact_email}. Send history and contact records were not affected.`,
@@ -359,23 +359,23 @@ export async function sendManualReply(
   const { logActivity } = await import("../activity");
 
   const conversation = await getConversation(conversationId);
-  if (!conversation) return { ok: false, error: "Conversation not found." };
+  if (!conversation) return { ok: false, error: "Konverzace nebyla nalezena." };
 
   const [mailbox] = await sql<import("../types").Mailbox[]>`
     select * from mailboxes where id = ${conversation.mailbox_id}
   `;
-  if (!mailbox) return { ok: false, error: "The sender mailbox no longer exists." };
-  if (!mailbox.enabled) return { ok: false, error: "The sender mailbox is disabled." };
+  if (!mailbox) return { ok: false, error: "Odesílací schránka už neexistuje." };
+  if (!mailbox.enabled) return { ok: false, error: "Odesílací schránka je vypnutá." };
 
   const settings = await getSettings();
   let to = conversation.contact_email;
   let subjectPrefix = "";
   if (settings.test_mode) {
     if (settings.test_behavior === "simulate") {
-      return { ok: false, error: "Test mode is set to simulate, so no reply can actually be sent." };
+      return { ok: false, error: "Testovací režim je nastavený na simulaci, takže odpověď nelze skutečně odeslat." };
     }
     if (!settings.test_email) {
-      return { ok: false, error: "Test mode is on but no test address is configured." };
+      return { ok: false, error: "Testovací režim je zapnutý, ale není nastavená testovací adresa." };
     }
     to = settings.test_email;
     subjectPrefix = `[TEST -> ${conversation.contact_email}] `;
@@ -398,7 +398,7 @@ export async function sendManualReply(
   if (!result.ok) {
     await logActivity({
       level: "error",
-      action: "Manual reply failed",
+      action: "Ruční odpověď selhala",
       detail: `${mailbox.from_email} -> ${conversation.contact_email}: ${result.message}`,
       campaignId: conversation.campaign_id,
       contactId: conversation.contact_id,
@@ -423,7 +423,7 @@ export async function sendManualReply(
 
   await sql`update mailboxes set last_send_at = now() where id = ${mailbox.id}`;
   await logActivity({
-    action: "Manual reply sent",
+    action: "Ruční odpověď odeslána",
     detail: `${mailbox.from_email} -> ${conversation.contact_email} - "${subject}"`,
     campaignId: conversation.campaign_id,
     contactId: conversation.contact_id,

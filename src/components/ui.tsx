@@ -60,11 +60,34 @@ const BADGE_STYLES: Record<string, string> = {
   skipped: "bg-zinc-50 text-zinc-500 ring-zinc-200",
 };
 
+/**
+ * Czech labels for the English status values stored in the database. The value
+ * itself is never translated - only what the operator reads.
+ */
+const STATUS_LABELS: Record<string, string> = {
+  // kampaň
+  draft: "koncept",
+  active: "běží",
+  paused: "pozastaveno",
+  completed: "dokončeno",
+  // kontakt v kampani
+  pending: "čeká",
+  scheduled: "naplánováno",
+  sent: "odesláno",
+  replied: "odpovědělo",
+  failed: "chyba",
+  unsubscribed: "odhlášeno",
+  // odeslání
+  sending: "odesílá se",
+  unknown: "neznámý výsledek",
+  skipped: "přeskočeno",
+};
+
 export function StatusBadge({ status }: { status: string | null }) {
   if (!status) return <span className="text-zinc-400">—</span>;
   return (
     <span className={`badge ${BADGE_STYLES[status] ?? "bg-zinc-50 text-zinc-600 ring-zinc-200"}`}>
-      {status}
+      {STATUS_LABELS[status] ?? status}
     </span>
   );
 }
