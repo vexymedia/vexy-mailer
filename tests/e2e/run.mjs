@@ -9,17 +9,26 @@
  *
  *   node tests/e2e/fake-smtp.mjs &     # a local SMTP server on port 2525
  *   npm run build && npm start &
- *   APP_PASSWORD=... CRON_SECRET=... SMTP_PORT=2525 node tests/e2e/run.mjs
+ *   APP_PASSWORD=... CRON_SECRET=... SESSION_SECRET=... DATABASE_URL=... \
+ *     SMTP_PORT=2525 node tests/e2e/run.mjs
  *
  * It writes to the database the server points at, so aim it at a scratch
- * database, never at production data.
+ * database, never at production data. SESSION_SECRET and DATABASE_URL must be
+ * the same values the server is running with: the unsubscribe checks mint a
+ * real signed link for a real contact and drive it over HTTP, which is the
+ * only place the GET/HEAD safety rule can be proved against actual routing
+ * rather than against the handler in isolation.
  */
 import { chromium } from "playwright";
 import { writeFileSync } from "node:fs";
+import { createHmac } from "node:crypto";
+import postgres from "postgres";
 
 const BASE = process.env.BASE_URL ?? "http://localhost:3000";
 const PASSWORD = process.env.APP_PASSWORD ?? "devpassword";
 const CRON_SECRET = process.env.CRON_SECRET ?? "devcron";
+const SESSION_SECRET = process.env.SESSION_SECRET ?? "";
+const DATABASE_URL = process.env.DATABASE_URL ?? "";
 const CHROMIUM = process.env.CHROMIUM_PATH ?? undefined;
 const OUT = process.env.OUT_DIR;
 const steps = [];
@@ -196,6 +205,68 @@ try {
 
   await page.goto(`${campaignUrl}?tab=contacts`);
   await expectVisible(page, "text=unsubscribed", "the suppressed contact leaves the campaign");
+
+  // ---- unsubscribe: GET and HEAD must not unsubscribe anybody -----------
+  // Every link in an email is fetched by things that are not the recipient:
+  // Safe Links rewrites, spam filters scoring the mail, link checkers issuing
+  // HEAD, clients prefetching a preview. Only a deliberate POST - the confirm
+  // button, or a mail client's RFC 8058 one-click - may remove an address.
+  if (!SESSION_SECRET || !DATABASE_URL) {
+    fail("unsubscribe safety checks", "SESSION_SECRET and DATABASE_URL are required (see the usage note above)");
+  } else {
+    const db = postgres(DATABASE_URL, { max: 1, prepare: false });
+    try {
+      const [target] = await db`
+        select id, email from contacts where email = ${"ann@prospect.test"}
+      `;
+      if (!target) {
+        fail("unsubscribe safety checks", "the imported contact ann@prospect.test was not found");
+      } else {
+        const token = createHmac("sha256", SESSION_SECRET)
+          .update(`unsub:${target.id}`)
+          .digest("hex")
+          .slice(0, 32);
+        const url = `${BASE}/u/${target.id}/${token}`;
+        const suppressed = async () =>
+          (await db`select 1 from suppression_list where email = ${target.email}`).length > 0;
+
+        // A link scanner sweeping the mail.
+        const head = await fetch(url, { method: "HEAD" });
+        if (head.status === 200) ok("HEAD on the unsubscribe URL is served, not rejected");
+        else fail("HEAD on the unsubscribe URL is served, not rejected", `got ${head.status}`);
+        if (!(await suppressed())) ok("HEAD does not unsubscribe the contact");
+        else fail("HEAD does not unsubscribe the contact", `${target.email} was suppressed by a HEAD`);
+
+        // A human, or a preview fetch, opening the link.
+        const get = await fetch(url);
+        const getBody = await get.text();
+        if (get.status === 200) ok("GET on the unsubscribe URL renders");
+        else fail("GET on the unsubscribe URL renders", `got ${get.status}`);
+        if (!(await suppressed())) ok("GET does not unsubscribe the contact");
+        else fail("GET does not unsubscribe the contact", `${target.email} was suppressed by a GET`);
+        if (/<form[^>]+method="post"/i.test(getBody)) ok("GET offers an explicit confirmation form");
+        else fail("GET offers an explicit confirmation form", "no POST form in the response");
+
+        // The recipient actually deciding.
+        const post = await fetch(url, {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: "List-Unsubscribe=One-Click",
+        });
+        if (post.status === 200) ok("POST performs the unsubscribe");
+        else fail("POST performs the unsubscribe", `got ${post.status}`);
+        if (await suppressed()) ok("the contact is suppressed after the explicit POST");
+        else fail("the contact is suppressed after the explicit POST", `${target.email} is not on the list`);
+
+        // A forged link changes nothing.
+        const forged = await fetch(`${BASE}/u/${target.id}/${"0".repeat(32)}`, { method: "POST" });
+        if (forged.status === 400) ok("a forged unsubscribe token is refused");
+        else fail("a forged unsubscribe token is refused", `got ${forged.status}`);
+      }
+    } finally {
+      await db.end({ timeout: 5 });
+    }
+  }
 
   // ---- settings ---------------------------------------------------------
   await page.goto(`${BASE}/settings`);
