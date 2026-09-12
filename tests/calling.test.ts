@@ -31,11 +31,11 @@ describe("the call outcomes", () => {
 
   it("keeps the primary buttons down to the handful a caller uses all day", () => {
     expect(PRIMARY_CALL_OUTCOMES.map((o) => o.value)).toEqual([
-      "no_answer",
-      "busy",
-      "send_info",
-      "callback",
       "meeting_booked",
+      "callback",
+      "no_answer",
+      "not_interested",
+      "send_info",
     ]);
     expect(PRIMARY_CALL_OUTCOMES.length + SECONDARY_CALL_OUTCOMES.length).toBe(
       CALL_OUTCOMES.length,
@@ -188,6 +188,46 @@ describe("no open prospect without a next step", () => {
     // A prospect nobody will dial again must not sit in the company list as
     // work in progress.
     expect(spent.companyStatus).toBe("lost");
+  });
+});
+
+describe("what a call does to the company", () => {
+  it("moves the company forward but never backwards", () => {
+    expect(nextCompanyStatus("new", "in_progress")).toBe("in_progress");
+    expect(nextCompanyStatus("in_progress", "interested")).toBe("interested");
+    expect(nextCompanyStatus("interested", "meeting")).toBe("meeting");
+    // Špatné číslo u druhého kontaktu nesmí shodit firmu se schůzkou zpět
+    // na "oslovujeme".
+    expect(nextCompanyStatus("meeting", "in_progress")).toBe("meeting");
+  });
+
+  it("records a negative answer even when the company was further along", () => {
+    expect(nextCompanyStatus("interested", "lost")).toBe("lost");
+    expect(nextCompanyStatus("meeting", "lost")).toBe("lost");
+  });
+
+  it("lets a new conversation reopen a company that was written off", () => {
+    expect(nextCompanyStatus("lost", "in_progress")).toBe("in_progress");
+  });
+
+  it("treats do-not-call and a won client as final", () => {
+    expect(nextCompanyStatus("meeting", "excluded")).toBe("excluded");
+    expect(nextCompanyStatus("excluded", "in_progress")).toBe("excluded");
+    expect(nextCompanyStatus("won", "lost")).toBe("won");
+  });
+
+  it("maps each outcome onto the status a person would expect", () => {
+    const status = (outcome: Parameters<typeof applyCallOutcome>[0]["outcome"]) =>
+      applyCallOutcome({ outcome, attemptsBefore: 0, maxAttempts: 4, now: NOW,
+        callbackAt: NOW, meetingAt: NOW }).companyStatus;
+    expect(status("meeting_booked")).toBe("meeting");
+    expect(status("send_info")).toBe("interested");
+    expect(status("not_interested")).toBe("lost");
+    expect(status("not_icp")).toBe("lost");
+    expect(status("existing_customer")).toBe("won");
+    expect(status("do_not_call")).toBe("excluded");
+    // Špatné číslo vyřazuje člověka, ne firmu - ta má typicky další kontakt.
+    expect(status("wrong_number")).toBe("in_progress");
   });
 });
 

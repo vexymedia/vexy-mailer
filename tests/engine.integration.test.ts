@@ -413,6 +413,7 @@ describe("edge cases around a running campaign", () => {
     company: null,
     website: null,
     phone: null,
+    position: null,
   };
 
   it("schedules contacts imported into an already-active campaign", async () => {

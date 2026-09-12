@@ -15,6 +15,8 @@ export interface ParsedContactRow {
   company: string | null;
   website: string | null;
   phone: string | null;
+  /** Funkce ve firmě. Caller potřebuje vědět, s kým mluví, ještě před vytočením. */
+  position: string | null;
 }
 
 export interface CsvParseResult {
@@ -133,6 +135,12 @@ const HEADER_ALIASES: Record<string, keyof Omit<ParsedContactRow, "line">> = {
   domain: "website",
   site: "website",
   webova: "website",
+  position: "position",
+  pozice: "position",
+  funkce: "position",
+  role: "position",
+  jobtitle: "position",
+  title: "position",
 };
 
 function normaliseHeader(header: string): string {
@@ -224,6 +232,7 @@ export function parseContactsCsv(input: string): CsvParseResult {
       company: null,
       website: null,
       phone: null,
+      position: null,
     };
 
     for (const [index, key] of columnMap) {
@@ -255,6 +264,7 @@ export function parseContactsCsv(input: string): CsvParseResult {
       company: record.company,
       website: normaliseWebsite(record.website),
       phone: normalisePhone(record.phone),
+      position: record.position,
     });
   }
 

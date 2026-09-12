@@ -21,3 +21,11 @@ alter table call_activities add constraint call_activities_outcome_check
 create index if not exists campaign_contacts_next_action_idx
   on campaign_contacts (next_call_at)
   where call_status in ('new', 'in_progress', 'callback');
+
+-- ---------------------------------------------------------------------
+-- Pozice kontaktu
+-- ---------------------------------------------------------------------
+-- "Správný člověk" je půlka úspěchu cold callu. Caller potřebuje před
+-- vytočením vidět, jestli mluví s jednatelem nebo s asistentkou - jinak
+-- outcome "není rozhodovatel" vzniká zbytečně.
+alter table contacts add column if not exists position text;

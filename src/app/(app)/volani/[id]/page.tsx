@@ -7,6 +7,7 @@ import { ActionForm, SubmitButton } from "@/components/action-form";
 import { clearCallerAction, nextCallAction } from "@/lib/actions";
 import { PageHeader, EmptyState, Stat } from "@/components/ui";
 import { CallWorkspace } from "@/components/call-workspace";
+import { buildCallBriefing } from "@/lib/briefing";
 
 export const dynamic = "force-dynamic";
 
@@ -149,6 +150,7 @@ export default async function CallerWorkspacePage({
             qualificationCriteria={next.script.qualification}
             callerName={caller.name}
             campaignScope={id}
+            briefing={await buildCallBriefing(next.prospect, next.campaign.name)}
           />
           <p className="mt-3 text-xs text-zinc-500">
             <Link href={`/kontakt/${next.prospect.id}`} className="underline">

@@ -8,6 +8,12 @@ import { sql } from "../db";
  * nevíme, není to tu.
  */
 
+/**
+ * Firma v těchto stavech se už neoslovuje - nepočítá se do práce.
+ * Funkce, ne konstanta: každé použití si bere vlastní fragment.
+ */
+const CLOSED = () => sql`('won', 'lost', 'excluded')`;
+
 export interface OverviewStats {
   /** Firmy, které jde oslovit: mají telefon a nejsou uzavřené. */
   companies_ready: number;
@@ -19,13 +25,15 @@ export interface OverviewStats {
   meetings: number;
   /** Nepřečtené odpovědi v doručené poště. */
   new_replies: number;
+  /** Aktivní firmy, které nemají naplánovaný další krok. */
+  without_next_step: number;
 }
 
 export async function getOverviewStats(): Promise<OverviewStats> {
   const [row] = await sql<OverviewStats[]>`
     select
       (select count(*)::int from companies co
-        where co.status not in ('won', 'lost', 'excluded')
+        where co.status not in ${CLOSED()}
           and exists (select 1 from contacts c
                        where c.company_id = co.id
                          and c.phone is not null and btrim(c.phone) <> '')) as companies_ready,
@@ -39,23 +47,38 @@ export async function getOverviewStats(): Promise<OverviewStats> {
           and cc.call_attempts < cp.max_call_attempts
           and c.phone is not null and btrim(c.phone) <> ''
           and not exists (select 1 from call_suppression cs where cs.contact_id = cc.contact_id)
-          and (cc.call_status <> 'callback' or cc.next_call_at is null or cc.next_call_at <= now()))
+          and (cc.next_call_at is null or cc.next_call_at <= now())
+          and not exists (select 1 from companies qco
+                           where qco.id = c.company_id and qco.status in ${CLOSED()}))
         as waiting,
 
+      -- Splatné dnes a dřív, napříč stavy: od zavedení kadence má datum
+      -- i "rozvolaný" kontakt, ne jen slíbený callback.
       (select count(*)::int from campaign_contacts cc
-        where cc.call_status = 'callback'
+        where cc.call_status in ('new', 'in_progress', 'callback')
           and cc.next_call_at is not null
           and cc.next_call_at < (current_date + 1)) as followups_today,
 
       (select count(*)::int from campaign_contacts cc where cc.meeting_booked) as meetings,
 
-      (select coalesce(sum(cv.unread_count), 0)::int from conversations cv) as new_replies
+      (select coalesce(sum(cv.unread_count), 0)::int from conversations cv) as new_replies,
+
+      (select count(*)::int from companies co
+        where co.status in ('ready', 'in_progress', 'interested', 'meeting')
+          and not exists (
+            select 1 from campaign_contacts cc join contacts c on c.id = cc.contact_id
+             where c.company_id = co.id
+               and ((cc.call_status in ('new','in_progress','callback') and cc.next_call_at is not null)
+                    or (cc.meeting_booked and cc.meeting_at is not null
+                        and cc.meeting_outcome = 'scheduled')))) as without_next_step
   `;
   return row;
 }
 
 export interface WeekSummary {
+  /** Pokusy o volání - každý zápis hovoru, i nedovolaný. */
   calls: number;
+  /** Hovory, kde jsme se skutečně dovolali. */
   connected: number;
   meetings_booked: number;
   emails_sent: number;
@@ -77,7 +100,7 @@ export async function getWeekSummary(): Promise<WeekSummary> {
   return row;
 }
 
-export type TodoKind = "followup" | "reply" | "queue";
+export type TodoKind = "overdue" | "followup" | "reply" | "queue" | "attention";
 
 export interface TodoItem {
   kind: TodoKind;
@@ -92,12 +115,18 @@ export interface TodoItem {
 /**
  * "Dnes řešit" - jeden seznam, který vede rovnou do práce.
  *
- * Pořadí je záměrné: splatné follow-upy (někomu jsme slíbili, že se ozveme),
- * pak nové odpovědi (někdo čeká na reakci), pak čerstvá fronta.
+ * Pořadí je záměrné a odpovídá tomu, co člověka nejvíc pálí:
+ *   1. co mělo být hotové včera,
+ *   2. co je na dnešek,
+ *   3. nové odpovědi (někdo čeká na reakci),
+ *   4. firmy připravené k prvnímu oslovení,
+ *   5. aktivní firmy, které nemají další krok - tiché díry v procesu.
  */
 export async function getTodayWork(limit = 12): Promise<TodoItem[]> {
-  const followups = await sql<TodoItem[]>`
-    select 'followup' as kind,
+  // Splatné hovory rozdělené na "po termínu" a "dnes". Jeden dotaz, aby
+  // se pořadí nemohlo rozejít mezi oběma skupinami.
+  const due = await sql<TodoItem[]>`
+    select case when cc.next_call_at < current_date then 'overdue' else 'followup' end as kind,
            '/osloveni' as href,
            coalesce(co.name, c.company, c.email) as title,
            nullif(btrim(coalesce(c.first_name, '') || ' ' || coalesce(c.last_name, '')), '') as subtitle,
@@ -106,9 +135,11 @@ export async function getTodayWork(limit = 12): Promise<TodoItem[]> {
       from campaign_contacts cc
       join contacts c on c.id = cc.contact_id
       left join companies co on co.id = c.company_id
-     where cc.call_status = 'callback'
+     where cc.call_status in ('new', 'in_progress', 'callback')
        and cc.next_call_at is not null
        and cc.next_call_at < (current_date + 1)
+       and not exists (select 1 from call_suppression cs where cs.contact_id = cc.contact_id)
+       and coalesce(co.status, 'new') not in ${CLOSED()}
      order by cc.next_call_at
      limit ${limit}
   `;
@@ -128,7 +159,7 @@ export async function getTodayWork(limit = 12): Promise<TodoItem[]> {
      limit ${limit}
   `;
 
-  const remaining = Math.max(0, limit - followups.length - replies.length);
+  let remaining = Math.max(0, limit - due.length - replies.length);
   const queue = remaining === 0 ? [] : await sql<TodoItem[]>`
     select 'queue' as kind,
            '/osloveni' as href,
@@ -142,12 +173,34 @@ export async function getTodayWork(limit = 12): Promise<TodoItem[]> {
       left join companies co on co.id = c.company_id
      where cp.calling_enabled
        and cc.call_status in ('new', 'in_progress')
+       and cc.next_call_at is null
        and cc.call_attempts < cp.max_call_attempts
        and c.phone is not null and btrim(c.phone) <> ''
        and not exists (select 1 from call_suppression cs where cs.contact_id = cc.contact_id)
+       and coalesce(co.status, 'new') not in ${CLOSED()}
      order by cc.call_attempts, cc.created_at, cc.id
      limit ${remaining}
   `;
 
-  return [...followups, ...replies, ...queue];
+  remaining = Math.max(0, remaining - queue.length);
+  const attention = remaining === 0 ? [] : await sql<TodoItem[]>`
+    select 'attention' as kind,
+           '/firmy/' || co.id::text as href,
+           co.name as title,
+           'Firmu řešíme, ale nemá naplánovaný další krok' as subtitle,
+           null::text as detail,
+           null::timestamptz as due_at
+      from companies co
+     where co.status in ('ready', 'in_progress', 'interested', 'meeting')
+       and not exists (
+         select 1 from campaign_contacts cc join contacts c on c.id = cc.contact_id
+          where c.company_id = co.id
+            and ((cc.call_status in ('new','in_progress','callback') and cc.next_call_at is not null)
+                 or (cc.meeting_booked and cc.meeting_at is not null
+                     and cc.meeting_outcome = 'scheduled')))
+     order by case co.priority when 'high' then 0 when 'normal' then 1 else 2 end, co.name
+     limit ${remaining}
+  `;
+
+  return [...due, ...replies, ...queue, ...attention];
 }

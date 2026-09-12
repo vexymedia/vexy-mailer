@@ -256,6 +256,7 @@ export interface CompanyContact {
   phone: string | null;
   first_name: string | null;
   last_name: string | null;
+  position: string | null;
   /** Nejnovější otevřený záznam kontaktu v kampani, pokud existuje. */
   campaign_contact_id: string | null;
   campaign_name: string | null;
@@ -325,7 +326,7 @@ export async function getCompany(id: string): Promise<CompanyDetail | null> {
 
 export async function listCompanyContacts(companyId: string): Promise<CompanyContact[]> {
   return sql<CompanyContact[]>`
-    select c.id, c.email, c.phone, c.first_name, c.last_name,
+    select c.id, c.email, c.phone, c.first_name, c.last_name, c.position,
            cc.id as campaign_contact_id, cp.name as campaign_name,
            cc.call_status, cc.call_attempts, cc.next_call_at,
            cc.last_call_at, cc.last_call_outcome,
@@ -422,12 +423,18 @@ export async function listCompanyOptions(): Promise<{ id: string; name: string }
 }
 
 /** Krátký kontext firmy pro pracovní kartu callera. */
-export async function getCompanyContext(
-  companyId: string | null,
-): Promise<{ reason: string | null; name: string } | null> {
+export interface CompanyContext {
+  name: string;
+  reason: string | null;
+  priority: CompanyPriority;
+  status: CompanyStatus;
+}
+
+/** To, co caller potřebuje o firmě vědět těsně před vytočením čísla. */
+export async function getCompanyContext(companyId: string | null): Promise<CompanyContext | null> {
   if (!companyId) return null;
-  const [row] = await sql<{ reason: string | null; name: string }[]>`
-    select reason, name from companies where id = ${companyId}
+  const [row] = await sql<CompanyContext[]>`
+    select name, reason, priority, status from companies where id = ${companyId}
   `;
   return row ?? null;
 }

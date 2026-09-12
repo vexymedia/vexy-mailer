@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { formatDateTime } from "@/lib/datetime";
 import type { ReactNode } from "react";
 
 export function PageHeader({
@@ -103,13 +104,16 @@ export function Stat({ label, value, tone }: { label: string; value: ReactNode; 
   );
 }
 
-/** Renders a timestamp in the browser's locale, with a stable server fallback. */
+/**
+ * Časový údaj v české podobě a v pražské zóně. Zóna je pevná schválně -
+ * viz lib/datetime.ts.
+ */
 export function DateTime({ value, fallback = "—" }: { value: Date | string | null; fallback?: string }) {
   if (!value) return <span className="text-zinc-400">{fallback}</span>;
   const date = typeof value === "string" ? new Date(value) : value;
   return (
     <time dateTime={date.toISOString()} title={date.toISOString()} className="tabular-nums">
-      {date.toISOString().slice(0, 16).replace("T", " ")}
+      {formatDateTime(date)}
     </time>
   );
 }

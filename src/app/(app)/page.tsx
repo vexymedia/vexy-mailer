@@ -1,7 +1,9 @@
 import Link from "next/link";
 import { getOverviewStats, getTodayWork, getWeekSummary } from "@/lib/queries/overview";
 import { listActivity } from "@/lib/queries/dashboard";
+import { plural } from "@/lib/plan";
 import { PageHeader, StatCard, EmptyState, DateTime } from "@/components/ui";
+import { formatWhen } from "@/lib/datetime";
 
 export const dynamic = "force-dynamic";
 
@@ -19,14 +21,31 @@ export default async function OverviewPage() {
   ]);
 
   const kindLabel: Record<string, string> = {
+    overdue: "Po termínu",
     followup: "Follow-up",
     reply: "Nová odpověď",
     queue: "K oslovení",
+    attention: "Bez dalšího kroku",
+  };
+  const kindStyle: Record<string, string> = {
+    overdue: "bg-red-50 text-red-700 ring-red-200",
+    followup: "bg-amber-50 text-amber-700 ring-amber-200",
+    reply: "bg-emerald-50 text-emerald-700 ring-emerald-200",
+    queue: "bg-zinc-50 text-zinc-600 ring-zinc-200",
+    attention: "bg-amber-50 text-amber-800 ring-amber-300",
   };
 
   return (
     <>
-      <PageHeader title="Přehled" description="Co se děje a co dnes potřebuje pozornost." />
+      <PageHeader
+        title="Přehled"
+        description="Co se děje a co dnes potřebuje pozornost."
+        actions={
+          <Link href="/osloveni" className="btn-go">
+            Začít oslovovat
+          </Link>
+        }
+      />
 
       <dl className="mb-8 grid grid-cols-2 gap-4 lg:grid-cols-5">
         <StatCard label="Připravené firmy" value={stats.companies_ready} hint="mají telefon a nejsou uzavřené" href="/firmy" />
@@ -51,12 +70,26 @@ export default async function OverviewPage() {
         />
       </dl>
 
+      {stats.without_next_step > 0 ? (
+        <Link
+          href="/firmy?krok=none"
+          className="mb-8 flex flex-wrap items-center gap-2 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 hover:bg-amber-100"
+        >
+          <span className="font-medium">
+            {plural(stats.without_next_step, "firma", "firmy", "firem")} bez dalšího kroku
+          </span>
+          <span className="text-amber-800">
+            — aktivně je řešíme, ale nikdo nemá naplánováno, co se stane dál.
+          </span>
+        </Link>
+      ) : null}
+
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
         <section>
           <div className="mb-3 flex items-baseline justify-between gap-3">
             <h2 className="section-title">Dnes řešit</h2>
-            <Link href="/osloveni" className="text-sm text-zinc-500 hover:text-zinc-900">
-              Otevřít oslovení
+            <Link href="/firmy?krok=due" className="text-sm text-zinc-500 hover:text-zinc-900">
+              Zobrazit jako seznam
             </Link>
           </div>
 
@@ -71,15 +104,7 @@ export default async function OverviewPage() {
               {todo.map((item, index) => (
                 <li key={`${item.kind}-${index}`}>
                   <Link href={item.href} className="flex items-center gap-4 px-5 py-3.5 hover:bg-zinc-50">
-                    <span
-                      className={`badge shrink-0 ${
-                        item.kind === "followup"
-                          ? "bg-amber-50 text-amber-700 ring-amber-200"
-                          : item.kind === "reply"
-                            ? "bg-emerald-50 text-emerald-700 ring-emerald-200"
-                            : "bg-zinc-50 text-zinc-600 ring-zinc-200"
-                      }`}
-                    >
+                    <span className={`badge shrink-0 ${kindStyle[item.kind]}`}>
                       {kindLabel[item.kind]}
                     </span>
                     <span className="min-w-0 flex-1">
@@ -89,8 +114,12 @@ export default async function OverviewPage() {
                       </span>
                     </span>
                     {item.due_at ? (
-                      <span className="shrink-0 text-xs text-zinc-500">
-                        <DateTime value={item.due_at} />
+                      <span
+                        className={`shrink-0 text-xs tabular-nums ${
+                          item.kind === "overdue" ? "font-medium text-red-600" : "text-zinc-500"
+                        }`}
+                      >
+                        {formatWhen(item.due_at)}
                       </span>
                     ) : null}
                   </Link>
@@ -105,15 +134,15 @@ export default async function OverviewPage() {
             <h2 className="section-title mb-4">Posledních 7 dní</h2>
             <dl className="grid grid-cols-2 gap-4">
               <div>
-                <dt className="text-xs text-zinc-500">Hovorů</dt>
+                <dt className="text-xs text-zinc-500">Pokusů o volání</dt>
                 <dd className="mt-0.5 text-xl font-semibold tabular-nums text-zinc-900">{week.calls}</dd>
               </div>
               <div>
-                <dt className="text-xs text-zinc-500">Dovolaných</dt>
+                <dt className="text-xs text-zinc-500">Spojených hovorů</dt>
                 <dd className="mt-0.5 text-xl font-semibold tabular-nums text-zinc-900">{week.connected}</dd>
               </div>
               <div>
-                <dt className="text-xs text-zinc-500">Domluvené schůzky</dt>
+                <dt className="text-xs text-zinc-500">Schůzek</dt>
                 <dd
                   className={`mt-0.5 text-xl font-semibold tabular-nums ${
                     week.meetings_booked > 0 ? "text-emerald-600" : "text-zinc-900"
@@ -123,7 +152,7 @@ export default async function OverviewPage() {
                 </dd>
               </div>
               <div>
-                <dt className="text-xs text-zinc-500">Odeslané e-maily</dt>
+                <dt className="text-xs text-zinc-500">Odeslaných e-mailů</dt>
                 <dd className="mt-0.5 text-xl font-semibold tabular-nums text-zinc-900">{week.emails_sent}</dd>
               </div>
             </dl>

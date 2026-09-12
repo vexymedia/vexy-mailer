@@ -92,7 +92,7 @@ export const CALL_OUTCOMES: CallOutcomeDefinition[] = [
   // Nedovoláno - firma zůstává otevřená a dostane další pokus.
   { value: "no_answer", label: "Nezastižen", connected: false, requires: null, primary: true,
     status: null, retryWorkingDays: 1, companyStatus: "in_progress" },
-  { value: "busy", label: "Nebere telefon", connected: false, requires: null, primary: true,
+  { value: "busy", label: "Nebere telefon", connected: false, requires: null,
     status: null, retryWorkingDays: 1, companyStatus: "in_progress" },
   { value: "gatekeeper", label: "Nepustili mě dál", connected: false, requires: null,
     status: null, retryWorkingDays: 2, companyStatus: "in_progress" },
@@ -115,7 +115,7 @@ export const CALL_OUTCOMES: CallOutcomeDefinition[] = [
 
   // Uzavřeno negativně - další krok se neplánuje.
   { value: "not_interested", label: "Nemá zájem", connected: true, requires: null,
-    status: "lost", companyStatus: "lost" },
+    primary: true, status: "lost", companyStatus: "lost" },
   { value: "no_budget", label: "Nemá rozpočet", connected: true, requires: null,
     status: "lost", companyStatus: "lost" },
   { value: "not_icp", label: "Není ICP", connected: true, requires: null,
@@ -128,10 +128,25 @@ export const CALL_OUTCOMES: CallOutcomeDefinition[] = [
 
 const OUTCOME_BY_VALUE = new Map(CALL_OUTCOMES.map((o) => [o.value, o]));
 
+/**
+ * Pořadí hlavních tlačítek. Nejcennější výsledek první, ne abecedně a ne
+ * podle toho, jak jsou výsledky seřazené v seznamu - caller mačká
+ * "Schůzka" a "Nezastižen" celý den a musí je trefit bez hledání.
+ */
+const PRIMARY_ORDER: CallOutcome[] = [
+  "meeting_booked",
+  "callback",
+  "no_answer",
+  "not_interested",
+  "send_info",
+];
+
 /** Výsledky na hlavních tlačítkách. */
-export const PRIMARY_CALL_OUTCOMES = CALL_OUTCOMES.filter((o) => o.primary);
+export const PRIMARY_CALL_OUTCOMES = PRIMARY_ORDER.map((value) => callOutcome(value));
 /** Zbytek, schovaný pod "Další výsledky". */
-export const SECONDARY_CALL_OUTCOMES = CALL_OUTCOMES.filter((o) => !o.primary);
+export const SECONDARY_CALL_OUTCOMES = CALL_OUTCOMES.filter(
+  (o) => !PRIMARY_ORDER.includes(o.value),
+);
 
 export function isMeetingOutcome(value: string): value is MeetingOutcome {
   return value in MEETING_OUTCOME_LABELS;

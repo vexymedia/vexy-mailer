@@ -1,6 +1,5 @@
 import Link from "next/link";
-import { getHeldCall, listCallQueue, listCallers } from "@/lib/queries/calling";
-import { getCompanyContext } from "@/lib/queries/companies";
+import { getCallerDayProgress, getHeldCall, listCallers } from "@/lib/queries/calling";
 import { getSelectedCallerId } from "@/lib/caller-session";
 import { clearCallerAction, nextCallAction } from "@/lib/actions";
 import { PageHeader, EmptyState } from "@/components/ui";
@@ -8,13 +7,18 @@ import { ActionForm, SubmitButton } from "@/components/action-form";
 import { CallWorkspace } from "@/components/call-workspace";
 import { CallerPicker } from "@/components/caller-picker";
 import { OsloveniTabs } from "@/components/osloveni-tabs";
+import { WorkProgress } from "@/components/work-progress";
+import { buildCallBriefing } from "@/lib/briefing";
 import { plural } from "@/lib/plan";
 
 export const dynamic = "force-dynamic";
 
 /**
- * Denní pracovní prostředí. Napříč kampaněmi: člověk, který sem přijde,
- * potřebuje vědět komu zavolat a proč, ne pod jakou kampaň to spadá.
+ * Denní pracovní režim. Jedna firma na obrazovce, jeden hovor, jeden výsledek,
+ * a další firma se načte sama - žádné proklikávání mezi tabulkou a detailem.
+ *
+ * Napříč kampaněmi: člověk, který sem přijde, potřebuje vědět komu zavolat
+ * a proč, ne pod jakou kampaň to spadá.
  *
  * Rezervace kontaktu vzniká výhradně z akce (výběr člověka nebo zápis
  * výsledku), nikdy ze samotného renderu - jinak by prefetch zablokoval
@@ -45,18 +49,17 @@ export default async function OsloveniPage() {
     );
   }
 
-  const [held, queue] = await Promise.all([
+  const [held, progress] = await Promise.all([
     getHeldCall(null, caller.id),
-    listCallQueue(null, { limit: 50, callerId: caller.id }),
+    getCallerDayProgress(caller.id),
   ]);
-
-  const company = await getCompanyContext(held?.prospect.company_id ?? null);
+  const briefing = held ? await buildCallBriefing(held.prospect, held.campaign.name) : null;
 
   return (
     <>
       <PageHeader
-        title="Oslovení"
-        description={`Zpracovává ${caller.name}. Ve frontě ${plural(queue.length, "kontakt", "kontakty", "kontaktů")}.`}
+        title="Dnes"
+        description={`Zpracovává ${caller.name}.`}
         actions={
           <ActionForm action={clearCallerAction} hideMessages>
             <input type="hidden" name="next" value="/osloveni" />
@@ -67,21 +70,25 @@ export default async function OsloveniPage() {
       />
       <OsloveniTabs active="/osloveni" />
 
+      <WorkProgress processed={progress.processed} total={progress.total} />
+
       {!held ? (
-        queue.length === 0 ? (
+        progress.remaining === 0 ? (
           <EmptyState
-            title="Na dnešek nemáte nikoho k oslovení"
+            title={progress.processed > 0 ? "Hotovo, dnešní fronta je prázdná" : "Na dnešek nemáte nikoho k oslovení"}
             description="Jakmile připravíme nové firmy nebo nastane čas naplánovaného follow-upu, objeví se tady. Zbytek fronty najdete na záložce Fronta."
             action={{ href: "/firmy", label: "Projít firmy" }}
           />
         ) : (
           <ActionForm action={nextCallAction} className="card max-w-md p-6">
-            <h2 className="section-title mb-1">Ve frontě čeká {plural(queue.length, "kontakt", "kontakty", "kontaktů")}</h2>
+            <h2 className="section-title mb-1">
+              Ve frontě čeká {plural(progress.remaining, "firma", "firmy", "firem")}
+            </h2>
             <p className="mb-4 text-xs text-zinc-500">
               Kontakt se rezervuje až teď, aby ho mezitím nedostal někdo jiný. Samotné otevření
               stránky nikoho neblokuje.
             </p>
-            <SubmitButton className="btn-go" pendingLabel="Načítám…">Začít</SubmitButton>
+            <SubmitButton className="btn-go" pendingLabel="Načítám…">Začít oslovovat</SubmitButton>
           </ActionForm>
         )
       ) : (
@@ -94,15 +101,11 @@ export default async function OsloveniPage() {
               qualificationCriteria={held.script.qualification}
               callerName={caller.name}
               campaignScope=""
-              context={{
-                reason: company?.reason ?? null,
-                companyHref: held.prospect.company_id ? `/firmy/${held.prospect.company_id}` : null,
-                campaignName: held.campaign.name,
-              }}
+              briefing={briefing ?? undefined}
             />
             <p className="mt-3 text-xs text-zinc-500">
               <Link href={`/kontakt/${held.prospect.id}`} className="underline">
-                Historie tohoto kontaktu
+                Celá historie tohoto kontaktu
               </Link>
             </p>
           </div>

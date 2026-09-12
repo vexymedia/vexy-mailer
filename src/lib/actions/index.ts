@@ -29,6 +29,7 @@ import {
 } from "@/lib/queries/inbox";
 import {
   claimNextCall,
+  scheduleNextStep,
   createCaller,
   logCall,
   releaseCall,
@@ -861,6 +862,33 @@ export async function saveCompanyAction(_prev: ActionState, formData: FormData):
   revalidatePath(`/firmy/${id}`);
   revalidatePath("/");
   return { success: "Uloženo." };
+}
+
+/**
+ * Oprava firmy, která zůstala bez dalšího kroku. Není to zápis hovoru,
+ * takže se nedotkne počtu pokusů ani timeline hovorů.
+ */
+export async function scheduleNextStepAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  await requireAuth();
+  const campaignContactId = String(formData.get("campaign_contact_id") ?? "");
+  if (!campaignContactId) return fail("Vyberte kontakt.");
+
+  const raw = String(formData.get("next_call_at") ?? "").trim();
+  if (!raw) return fail("Zadejte datum a čas dalšího kroku.");
+  const at = new Date(raw);
+  if (Number.isNaN(at.getTime())) return fail("Zadané datum není platné.");
+
+  const result = await scheduleNextStep(campaignContactId, at);
+  if (!result.ok) return fail(result.error ?? "Další krok se nepodařilo naplánovat.");
+
+  revalidatePath("/firmy");
+  if (result.companyId) revalidatePath(`/firmy/${result.companyId}`);
+  revalidatePath("/");
+  revalidatePath("/osloveni", "layout");
+  return { success: "Další krok naplánován." };
 }
 
 // ----------------------------------------------------------- týdenní plán
