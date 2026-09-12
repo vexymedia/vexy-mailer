@@ -84,7 +84,11 @@ Cold email is unusual in that mistakes are unrecoverable. You cannot unsend to
 - [ ] An email arrives in your inbox with the subject prefixed
       `[TEST -> someone@theircompany.com]`.
 - [ ] Read it as a recipient would. Are the variables filled in? Does it read
-      like a person wrote it? Does the unsubscribe link work?
+      like a person wrote it?
+- [ ] Click the unsubscribe link. It must show a **confirmation page with a
+      button**, not unsubscribe you on the spot - opening the link is not a
+      decision, pressing the button is. Press it and confirm the address lands
+      on the **Do not contact** list.
 - [ ] Check the From name and address in your mail client's header.
 - [ ] Reply to it from a *different* address that is in the list, wait for the
       next IMAP poll, and confirm that contact flips to **replied** and its

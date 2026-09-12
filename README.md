@@ -189,6 +189,18 @@ Follow-ups carry `In-Reply-To` and `References` pointing at step 1, so the
 sequence renders as one conversation and replies come back with a header that
 identifies the exact send.
 
+**Unsubscribing.** The link we mail out is signed with an HMAC of the contact
+id, so it needs no session and cannot be forged. Opening it (`GET`, or a `HEAD`
+from a link checker) renders a confirmation page and changes nothing; the
+address is removed only by the `POST` behind that page's button, or by a mail
+client's RFC 8058 one-click `POST` to the same URL.
+
+That split is not ceremony. A server-rendered page that suppresses while it
+renders is triggered by everything that follows a URL in an email without being
+the recipient - Safe Links and its equivalents, spam filters scoring the mail,
+link checkers, preview prefetches - so prospects unsubscribe themselves by
+receiving the mail. GET and HEAD are safe methods because crawlers assume it.
+
 ## Contact statuses
 
 | Status | Meaning |
@@ -243,7 +255,7 @@ npm run db:migrate  # apply supabase/migrations
 
 ### Tests
 
-`npm test` runs 132 tests. Most are ordinary unit tests, but the interesting
+`npm test` runs 293 tests. Most are ordinary unit tests, but the interesting
 ones need a real database:
 
 ```bash
@@ -261,20 +273,29 @@ point them at a scratch database. Among other things they assert that:
 - a 4xx rejection is retried in place, reusing the same ledger row, and still
   delivers exactly once;
 - a contact marked replied receives no further follow-up, however hard the
-  dispatcher is prodded.
+  dispatcher is prodded;
+- a GET or HEAD on an unsubscribe link - a link scanner, a spam filter, a
+  client prefetching a preview - never suppresses anybody, and only a POST
+  does.
 
 ### Verifying a deployment in a browser
 
 ```bash
 node tests/e2e/fake-smtp.mjs &          # a local SMTP server on port 2525
 npm run build && npm start &
-SMTP_PORT=2525 npm run test:e2e
+SMTP_PORT=2525 SESSION_SECRET=... DATABASE_URL=... npm run test:e2e
 ```
 
-35 checks driving the real UI: sign-in, mailbox setup and connection test, CSV
-import, sequence editing, campaign start, a worker tick, suppression, and the
-cron endpoint's authorisation. It writes to whichever database the server
-points at, so aim it at a scratch database.
+70 checks driving the real UI: sign-in, mailbox setup and connection test, CSV
+import, sequence editing, campaign start, a worker tick, suppression, the
+unsubscribe link under every HTTP method, the calling workspace through to a
+booked and qualified meeting, and the cron endpoint's authorisation. It writes to whichever database the server points at, so aim it
+at a scratch database.
+
+`SESSION_SECRET` and `DATABASE_URL` must match what the server is running with.
+The unsubscribe checks mint a real signed link for a real contact and drive it
+over HTTP, which is the only place the GET/HEAD safety rule can be proved
+against actual routing rather than against the handler in isolation.
 
 ## Project layout
 
@@ -282,7 +303,7 @@ points at, so aim it at a scratch database.
 src/
   app/(app)/        authenticated pages (dashboard, campaigns, contacts, …)
   app/api/cron/     the worker endpoint
-  app/u/            public one-click unsubscribe
+  app/u/            public unsubscribe: GET confirms, POST acts
   app/volani/       the caller's workspace
   app/kontakt/      one prospect's timeline, calls and e-mails together
   lib/engine/       dispatch.ts (sending) and replies.ts (IMAP)
