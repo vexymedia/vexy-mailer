@@ -20,7 +20,7 @@ export default async function EditCampaignPage({ params }: { params: Promise<{ i
 
   return (
     <>
-      <PageHeader title="Campaign settings" description={campaign.name} />
+      <PageHeader title="Nastavení kampaně" description={campaign.name} />
       <div className="max-w-2xl">
         <CampaignForm
           mailboxes={mailboxes}

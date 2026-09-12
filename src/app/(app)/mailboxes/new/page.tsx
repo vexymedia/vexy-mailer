@@ -6,7 +6,7 @@ export const dynamic = "force-dynamic";
 export default function NewMailboxPage() {
   return (
     <>
-      <PageHeader title="Add mailbox" />
+      <PageHeader title="Přidat schránku" />
       <div className="max-w-3xl">
         <MailboxForm
           values={{

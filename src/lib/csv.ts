@@ -14,6 +14,7 @@ export interface ParsedContactRow {
   last_name: string | null;
   company: string | null;
   website: string | null;
+  phone: string | null;
 }
 
 export interface CsvParseResult {
@@ -118,6 +119,14 @@ const HEADER_ALIASES: Record<string, keyof Omit<ParsedContactRow, "line">> = {
   organisation: "company",
   firma: "company",
   spolecnost: "company",
+  phone: "phone",
+  phonenumber: "phone",
+  telephone: "phone",
+  tel: "phone",
+  telefon: "phone",
+  mobil: "phone",
+  mobile: "phone",
+  cislo: "phone",
   website: "website",
   url: "website",
   web: "website",
@@ -147,6 +156,17 @@ export function normaliseEmail(value: string): string {
   return value.trim().toLowerCase();
 }
 
+/**
+ * Keeps the number as the operator typed it, minus the spacing a spreadsheet
+ * export adds. Deliberately not reformatted to E.164: the caller reads it and
+ * dials it, and a "helpful" rewrite of a Czech number is how a digit gets lost.
+ */
+export function normalisePhone(value: string | null): string | null {
+  if (!value) return null;
+  const cleaned = value.replace(/[\s\u00a0]+/g, " ").trim();
+  return cleaned === "" ? null : cleaned;
+}
+
 export function normaliseWebsite(value: string | null): string | null {
   if (!value) return null;
   const trimmed = value.trim();
@@ -165,7 +185,7 @@ export function parseContactsCsv(input: string): CsvParseResult {
 
   const matrix = parseCsv(input, detectDelimiter(input));
   if (matrix.length === 0) {
-    return { rows, errors: ["The file is empty."], ignoredColumns: [] };
+    return { rows, errors: ["Soubor je prázdný."], ignoredColumns: [] };
   }
 
   const header = matrix[0];
@@ -186,7 +206,7 @@ export function parseContactsCsv(input: string): CsvParseResult {
     return {
       rows,
       errors: [
-        `No "email" column found. Detected headers: ${header.map((h) => h.trim()).join(", ") || "(none)"}.`,
+        `Nenalezen sloupec "email". Rozpoznané hlavičky: ${header.map((h) => h.trim()).join(", ") || "(žádné)"}.`,
       ],
       ignoredColumns,
     };
@@ -203,6 +223,7 @@ export function parseContactsCsv(input: string): CsvParseResult {
       last_name: null,
       company: null,
       website: null,
+      phone: null,
     };
 
     for (const [index, key] of columnMap) {
@@ -211,17 +232,17 @@ export function parseContactsCsv(input: string): CsvParseResult {
     }
 
     if (!record.email) {
-      errors.push(`Line ${line}: missing email address, row skipped.`);
+      errors.push(`Řádek ${line}: chybí e-mailová adresa, řádek přeskočen.`);
       continue;
     }
     const email = normaliseEmail(record.email);
     if (!isValidEmail(email)) {
-      errors.push(`Line ${line}: "${record.email}" is not a valid email address, row skipped.`);
+      errors.push(`Řádek ${line}: "${record.email}" není platná e-mailová adresa, řádek přeskočen.`);
       continue;
     }
     // Deduplicate inside the file itself; DB-level dedupe happens on insert.
     if (seen.has(email)) {
-      errors.push(`Line ${line}: ${email} appears more than once in this file, later row skipped.`);
+      errors.push(`Řádek ${line}: ${email} je v souboru víckrát, pozdější řádek přeskočen.`);
       continue;
     }
     seen.add(email);
@@ -233,6 +254,7 @@ export function parseContactsCsv(input: string): CsvParseResult {
       last_name: record.last_name,
       company: record.company,
       website: normaliseWebsite(record.website),
+      phone: normalisePhone(record.phone),
     });
   }
 

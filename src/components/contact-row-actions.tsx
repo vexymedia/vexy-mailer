@@ -19,9 +19,9 @@ export function ContactRowActions({
           <input type="hidden" name="campaign_contact_id" value={campaignContactId} />
           <SubmitButton
             className="btn-secondary !px-2 !py-1 text-xs"
-            confirm="Skip the failed step and continue with the next follow-up?"
+            confirm="Přeskočit chybný krok a pokračovat dalším follow-upem?"
           >
-            Skip step
+            Přeskočit krok
           </SubmitButton>
         </ActionForm>
       ) : null}
@@ -31,9 +31,9 @@ export function ContactRowActions({
         <input type="hidden" name="reason" value="manual" />
         <SubmitButton
           className="btn-danger !px-2 !py-1 text-xs"
-          confirm={`Add ${email} to the do-not-contact list? They will be excluded from every campaign, now and in future.`}
+          confirm={`Přidat ${email} na seznam Nekontaktovat? Bude vyřazen ze všech kampaní, teď i v budoucnu.`}
         >
-          Do not contact
+          Nekontaktovat
         </SubmitButton>
       </ActionForm>
 
@@ -41,9 +41,9 @@ export function ContactRowActions({
         <input type="hidden" name="campaign_contact_id" value={campaignContactId} />
         <SubmitButton
           className="btn-secondary !px-2 !py-1 text-xs"
-          confirm="Remove this contact from the campaign?"
+          confirm="Odebrat tento kontakt z kampaně?"
         >
-          Remove
+          Odebrat
         </SubmitButton>
       </ActionForm>
     </div>

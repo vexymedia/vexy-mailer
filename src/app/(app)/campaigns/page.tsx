@@ -11,31 +11,31 @@ export default async function CampaignsPage() {
   return (
     <>
       <PageHeader
-        title="Campaigns"
+        title="Kampaně"
         actions={
           <Link href="/campaigns/new" className="btn-primary">
-            New campaign
+            Nová kampaň
           </Link>
         }
       />
 
       {campaigns.length === 0 ? (
         <EmptyState
-          title="No campaigns yet"
-          description="A campaign combines a sender mailbox, a contact list and an email sequence."
-          action={{ href: "/campaigns/new", label: "New campaign" }}
+          title="Zatím žádné kampaně"
+          description="Kampaň spojuje odesílací schránku, seznam kontaktů a e-mailovou sekvenci — a volitelně i volání."
+          action={{ href: "/campaigns/new", label: "Nová kampaň" }}
         />
       ) : (
         <Table
           head={
             <tr>
-              <th className="th">Campaign</th>
-              <th className="th">Status</th>
-              <th className="th">Window</th>
-              <th className="th text-right">Contacts</th>
-              <th className="th text-right">Sent</th>
-              <th className="th text-right">Replies</th>
-              <th className="th text-right">Remaining</th>
+              <th className="th">Kampaň</th>
+              <th className="th">Stav</th>
+              <th className="th">Okno</th>
+              <th className="th text-right">Kontakty</th>
+              <th className="th text-right">Odesláno</th>
+              <th className="th text-right">Odpovědi</th>
+              <th className="th text-right">Zbývá</th>
             </tr>
           }
         >
@@ -48,7 +48,7 @@ export default async function CampaignsPage() {
                 <div className="text-xs text-zinc-500">
                   {describeSenderPool(campaign.mailbox_names)}
                   {campaign.mailbox_names.length > 1 ? (
-                    <span className="ml-1 text-zinc-400">({campaign.mailbox_names.length} senders)</span>
+                    <span className="ml-1 text-zinc-400">({campaign.mailbox_names.length} odesílatelů)</span>
                   ) : null}
                 </div>
               </td>

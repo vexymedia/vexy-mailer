@@ -16,8 +16,8 @@ export function RunWorkerButton() {
             <span className="max-w-md text-xs text-zinc-500">{state.success}</span>
           ) : null}
           {state.error ? <span className="max-w-md text-xs text-red-600">{state.error}</span> : null}
-          <SubmitButton className="btn-secondary" pendingLabel="Running…">
-            Run worker now
+          <SubmitButton className="btn-secondary" pendingLabel="Spouštím…">
+            Spustit worker
           </SubmitButton>
         </div>
       )}

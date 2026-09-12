@@ -50,16 +50,16 @@ export function CampaignForm({
 
       <div className="space-y-5">
         <div>
-          <label className="label" htmlFor="name">Campaign name</label>
-          <input id="name" name="name" defaultValue={values.name} required className="input" placeholder="Q3 agencies — Prague" />
+          <label className="label" htmlFor="name">Název kampaně</label>
+          <input id="name" name="name" defaultValue={values.name} required className="input" placeholder="Q3 agentury — Praha" />
         </div>
 
         <fieldset>
-          <legend className="label">Sender mailboxes</legend>
+          <legend className="label">Odesílací schránky</legend>
           <p className="mb-2 text-xs text-zinc-500">
-            Emails are spread across the mailboxes you tick, always choosing the least-used one for a
-            new contact. Once a prospect has heard from one address, every follow-up keeps coming
-            from that same address.
+            E-maily se rozdělí mezi zaškrtnuté schránky — nový kontakt vždy dostane tu nejméně
+            vytíženou. Jakmile se prospektovi jednou ozvete z nějaké adresy, všechny follow-upy
+            chodí už jen z ní.
           </p>
           <div className="space-y-1.5">
             {mailboxes.map((mailbox) => (
@@ -78,29 +78,29 @@ export function CampaignForm({
                   <span className="font-medium text-zinc-900">{mailbox.from_email}</span>
                   <span className="ml-2 text-xs text-zinc-500">{mailbox.name}</span>
                   {!mailbox.enabled ? (
-                    <span className="badge ml-2 bg-orange-50 text-orange-700 ring-orange-200">disabled</span>
+                    <span className="badge ml-2 bg-orange-50 text-orange-700 ring-orange-200">vypnutá</span>
                   ) : null}
                   {mailbox.pinned ? (
                     <span className="badge ml-2 bg-blue-50 text-blue-700 ring-blue-200">
-                      contacts pinned
+                      kontakty připnuté
                     </span>
                   ) : null}
                 </span>
                 <span className="tabular-nums text-xs text-zinc-500">
-                  {mailbox.used_today} / {mailbox.daily_limit} today
+                  {mailbox.used_today} / {mailbox.daily_limit} dnes
                 </span>
               </label>
             ))}
           </div>
           {mailboxes.length === 0 ? (
             <p className="hint text-amber-700">
-              No mailboxes yet. <Link href="/mailboxes/new" className="underline">Add one first.</Link>
+              Zatím žádné schránky. <Link href="/mailboxes/new" className="underline">Nejdřív jednu přidejte.</Link>
             </p>
           ) : null}
         </fieldset>
 
         <div>
-          <label className="label" htmlFor="daily_limit">Daily send limit</label>
+          <label className="label" htmlFor="daily_limit">Denní limit odeslání</label>
           <input
             id="daily_limit"
             name="daily_limit"
@@ -112,13 +112,13 @@ export function CampaignForm({
             className="input"
           />
           <p className="hint">
-            An upper bound for this campaign alone. Each mailbox also has its own global limit
-            across every campaign, and the lower of the two always wins.
+            Horní hranice jen pro tuto kampaň. Každá schránka má navíc vlastní globální limit
+            napříč kampaněmi a vždy platí ten nižší z obou.
           </p>
         </div>
 
         <fieldset>
-          <legend className="label">Sending days</legend>
+          <legend className="label">Dny odesílání</legend>
           <div className="flex flex-wrap gap-2">
             {WEEKDAY_LABELS.map((label, index) => {
               const day = index + 1;
@@ -143,15 +143,15 @@ export function CampaignForm({
 
         <div className="grid gap-5 sm:grid-cols-3">
           <div>
-            <label className="label" htmlFor="send_start">Window starts</label>
+            <label className="label" htmlFor="send_start">Okno začíná</label>
             <input id="send_start" name="send_start" defaultValue={values.send_start} required className="input" placeholder="08:00" />
           </div>
           <div>
-            <label className="label" htmlFor="send_end">Window ends</label>
+            <label className="label" htmlFor="send_end">Okno končí</label>
             <input id="send_end" name="send_end" defaultValue={values.send_end} required className="input" placeholder="16:00" />
           </div>
           <div>
-            <label className="label" htmlFor="timezone">Timezone</label>
+            <label className="label" htmlFor="timezone">Časové pásmo</label>
             <input
               id="timezone"
               name="timezone"
@@ -170,15 +170,15 @@ export function CampaignForm({
       </div>
 
       <div className="mt-6 flex items-center gap-3 border-t border-zinc-200 pt-5">
-        <SubmitButton pendingLabel="Saving…">
-          {values.id ? "Save changes" : "Create campaign"}
+        <SubmitButton pendingLabel="Ukládám…">
+          {values.id ? "Uložit změny" : "Vytvořit kampaň"}
         </SubmitButton>
         <Link href={values.id ? `/campaigns/${values.id}` : "/campaigns"} className="btn-secondary">
-          Cancel
+          Zrušit
         </Link>
         {!values.id ? (
           <p className="text-xs text-zinc-500">
-            The campaign is created as a draft. Nothing is sent until you start it.
+            Kampaň se založí jako koncept. Dokud ji nespustíte, nic se neodešle.
           </p>
         ) : null}
       </div>

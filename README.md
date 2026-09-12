@@ -1,11 +1,17 @@
 # vexy-mailer
 
-A deliberately small cold-email tool for one person: import a CSV, write a
-short sequence, and let a worker send it inside a window you choose, stopping
-the moment somebody replies.
+A deliberately small outreach tool: import a CSV, write a short sequence, and
+let a worker send it inside a window you choose, stopping the moment somebody
+replies — and, on the same contacts, work a calling queue that ends in a booked,
+qualified meeting.
+
+The user interface is in Czech. Everything stored in the database — statuses,
+outcomes, models, column names — stays in English, so nothing in the app's logic
+depends on a translation.
 
 It is not a SaaS and has no accounts, billing, teams, AI personalisation,
-warm-up or inbox rotation. Everything it does is in service of one guarantee.
+warm-up, inbox rotation or dialler. Everything it does is in service of one
+guarantee.
 
 ## The guarantee
 
@@ -35,8 +41,9 @@ not sending.
 - **Mailboxes** — your own SMTP for sending and IMAP for reply detection, with
   a *Test connection* button. Passwords are encrypted with AES-256-GCM and are
   never sent back to the browser.
-- **Contacts** — CSV import (`first_name, last_name, company, email, website`)
-  with de-duplication by email. Comma, semicolon and tab files all work.
+- **Contacts** — CSV import (`first_name, last_name, company, email, website,
+  phone`) with de-duplication by email. Comma, semicolon and tab files all work.
+  A phone number is what makes a contact callable.
 - **Campaigns** — a sender mailbox, a contact list, a daily limit, and a
   sending window with days, hours and an IANA timezone.
 - **Sequences** — any number of steps, each with a delay in days measured from
@@ -50,6 +57,66 @@ not sending.
   email to your own address or simulates sending entirely.
 - **Do not contact** — a global suppression list enforced by a database
   trigger, so a suppressed address cannot enter a campaign by any route.
+- **Calling** — the same campaign, worked by phone: a queue, twelve outcomes,
+  an attempt limit, callbacks, meetings with a qualification judgement, and the
+  economics of the whole thing. See below.
+
+## Calling
+
+One campaign is e-mail **and** phone. Calling adds columns to the rows that
+already exist rather than a parallel model, and it never touches the e-mail
+side: `campaign_contacts.status` stays the e-mail lifecycle, `call_status` is
+the calling one, and no calling code writes `next_send_at`, `current_step` or
+the sticky sender.
+
+- **Callers** (`/calleri`) are a first-class record, because calling capacity is
+  assembled from several people: one caller works across campaigns, one campaign
+  is worked by several callers. A caller is never deleted, only deactivated —
+  the call history and the campaign's economics reference them.
+- **The queue** is ordered: callbacks that are due now, then prospects already
+  started but still under the attempt limit (fewest attempts first), then
+  contacts nobody has called. Anyone without a phone number is never offered,
+  and the order is fully deterministic - it ends on the row id, because a batch
+  added by one `INSERT ... SELECT` shares a timestamp and would otherwise come
+  back in whatever order the storage engine felt like.
+- **One caller at a time.** A caller says who they are once per shift, and the
+  prospect they are handed is leased to them for five minutes - the same
+  mechanism the send worker uses for its own lock. Two callers on one campaign
+  cannot be given the same person to dial, and a closed tab frees the prospect
+  on its own.
+- **The workspace** (`/volani/<campaign>`) is two clicks per call: dial the
+  `tel:` link, press an outcome. Only a callback and a booked meeting open a
+  second step, for the date — and a booked meeting also asks the question the
+  service is billed on: does it meet the campaign's qualification criteria.
+- **Twelve outcomes.** Four of them never reached a human (`no_answer`, `busy`,
+  `gatekeeper`, `wrong_number`); the other eight count as a connected call,
+  which is the billable unit. "Connected" is stored on the call, not derived at
+  read time, so the number cannot move under an invoice.
+- **The attempt limit** (4 by default, per campaign) only ever retires a
+  prospect whose outcome left them open. A meeting booked on the fourth attempt
+  is a meeting, not a prospect who ran out of attempts. The limit is enforced
+  where attempts are written, not only where the queue is read, so a stale tab
+  cannot push a "max 4" campaign to five.
+- **Do not call** is global. "Nevolat" is a decision about the person, so it
+  goes on `call_suppression` and removes them from every campaign's queue.
+  Deliberately not the e-mail suppression list: phone and e-mail are separate
+  consents, and merging them would let a call outcome stop a campaign's e-mail.
+- **The meeting lifecycle** is `scheduled → held / no_show / cancelled`, not a
+  boolean. A meeting in the diary and one the prospect never turned up to are
+  different things, and only one of them is billable. `meeting_held` is derived
+  from that column in the database, so the two can never disagree.
+- **The funnel**: contacts → called → connected → meetings booked → qualified →
+  held → clients, each rate against the stage above it.
+- **Economics**: revenue per campaign, per booked or qualified or held meeting,
+  per client, or summed from the deal values won; caller cost fixed, hourly or
+  per connected call; plus other costs. From those it computes gross profit and
+  margin, cost per connected call / booked / qualified / held meeting, and —
+  for VEXY's own acquisition — clients won, CAC, ROAS and revenue per connected
+  call.
+- **Not built**: no dialler, no VoIP, no recording or transcription, no shift
+  planning, availability, skill matching or payroll, no automatic assignment of
+  callers. The `callers` table is shaped so those can be added later without
+  touching anything that references it.
 
 ## Stack
 
@@ -106,7 +173,7 @@ you want to type at the login screen.
    deleting a reply, a campaign or a contact does to the Inbox, and how to
    remove a stale conversation safely.
 5. **[docs/PRE_FLIGHT.md](docs/PRE_FLIGHT.md)** — the checklist to work through
-   before your first real campaign. Do not skip this one.
+   before your first real campaign, e-mail and calling. Do not skip this one.
 
 ## How sending actually works
 
@@ -140,6 +207,18 @@ Follow-ups carry `In-Reply-To` and `References` pointing at step 1, so the
 sequence renders as one conversation and replies come back with a header that
 identifies the exact send.
 
+**Unsubscribing.** The link we mail out is signed with an HMAC of the contact
+id, so it needs no session and cannot be forged. Opening it (`GET`, or a `HEAD`
+from a link checker) renders a confirmation page and changes nothing; the
+address is removed only by the `POST` behind that page's button, or by a mail
+client's RFC 8058 one-click `POST` to the same URL.
+
+That split is not ceremony. A server-rendered page that suppresses while it
+renders is triggered by everything that follows a URL in an email without being
+the recipient - Safe Links and its equivalents, spam filters scoring the mail,
+link checkers, preview prefetches - so prospects unsubscribe themselves by
+receiving the mail. GET and HEAD are safe methods because crawlers assume it.
+
 ## Contact statuses
 
 | Status | Meaning |
@@ -151,6 +230,26 @@ identifies the exact send.
 | `replied` | They answered — removed from the sequence |
 | `failed` | A send failed permanently, or its outcome is unknown |
 | `unsubscribed` | On the do-not-contact list |
+
+## Calling statuses
+
+Separate from the e-mail statuses above, on the same row, and never mixed.
+
+| `call_status` | Meaning |
+| --- | --- |
+| `new` | Never dialled |
+| `in_progress` | Dialled, still worth dialling again |
+| `callback` | They asked to be called back at `next_call_at` |
+| `meeting_booked` | A meeting is in the diary |
+| `won` | Became a client |
+| `lost` | Not interested, no budget, or an unusable number |
+| `do_not_call` | Asked us not to phone again (this does **not** stop e-mails) |
+| `max_attempts` | Ran out of attempts without ever deciding anything |
+
+Invariants enforced by the database, not by the application: a prospect in
+`callback` must have a `next_call_at` (no active contact without a next
+action), a booked meeting must have a date, only a booked meeting can carry a
+qualification judgement or a meeting outcome, and attempts cannot go negative.
 
 ## Test mode
 
@@ -179,7 +278,7 @@ npm run db:migrate  # apply supabase/migrations
 
 ### Tests
 
-`npm test` runs 132 tests. Most are ordinary unit tests, but the interesting
+`npm test` runs 313 tests. Most are ordinary unit tests, but the interesting
 ones need a real database:
 
 ```bash
@@ -197,20 +296,30 @@ point them at a scratch database. Among other things they assert that:
 - a 4xx rejection is retried in place, reusing the same ledger row, and still
   delivers exactly once;
 - a contact marked replied receives no further follow-up, however hard the
-  dispatcher is prodded.
+  dispatcher is prodded;
+- a GET or HEAD on an unsubscribe link - a link scanner, a spam filter, a
+  client prefetching a preview - never suppresses anybody, and only a POST
+  does.
 
 ### Verifying a deployment in a browser
 
 ```bash
 node tests/e2e/fake-smtp.mjs &          # a local SMTP server on port 2525
 npm run build && npm start &
-SMTP_PORT=2525 npm run test:e2e
+SMTP_PORT=2525 SESSION_SECRET=... DATABASE_URL=... npm run test:e2e
 ```
 
-35 checks driving the real UI: sign-in, mailbox setup and connection test, CSV
-import, sequence editing, campaign start, a worker tick, suppression, and the
-cron endpoint's authorisation. It writes to whichever database the server
-points at, so aim it at a scratch database.
+75 checks driving the real UI: sign-in, mailbox setup and connection test, CSV
+import, sequence editing, campaign start, a worker tick, suppression, the
+unsubscribe link under every HTTP method, the calling workspace through to a
+booked, qualified meeting and on to a no-show, and the cron endpoint's
+authorisation. It writes to whichever database the server points at, so aim it
+at a scratch database.
+
+`SESSION_SECRET` and `DATABASE_URL` must match what the server is running with.
+The unsubscribe checks mint a real signed link for a real contact and drive it
+over HTTP, which is the only place the GET/HEAD safety rule can be proved
+against actual routing rather than against the handler in isolation.
 
 ## Project layout
 
@@ -218,11 +327,14 @@ points at, so aim it at a scratch database.
 src/
   app/(app)/        authenticated pages (dashboard, campaigns, contacts, …)
   app/api/cron/     the worker endpoint
-  app/u/            public one-click unsubscribe
+  app/u/            public unsubscribe: GET confirms, POST acts
+  app/volani/       the caller's workspace
+  app/kontakt/      one prospect's timeline, calls and e-mails together
   lib/engine/       dispatch.ts (sending) and replies.ts (IMAP)
   lib/queries/      data access, grouped by subject
   lib/actions/      server actions used by the forms
   lib/schedule.ts   windows, timezones, pacing
+  lib/calling.ts    call outcomes, queue order and economics (pure, no DB)
 supabase/migrations/
 tests/              unit, integration and browser suites
 ```
@@ -230,6 +342,6 @@ tests/              unit, integration and browser suites
 ## Deliberate limitations
 
 No AI personalisation, no warm-up, no email verification, no CRM, no multi-user
-accounts, no billing, no teams, no inbox rotation, no analytics beyond the
-counters on the dashboard. Each of those is a reason for something to go wrong
+accounts, no billing, no teams, no inbox rotation, no dialler or call recording,
+no analytics beyond the counters on the dashboard. Each of those is a reason for something to go wrong
 with a mailbox you depend on.

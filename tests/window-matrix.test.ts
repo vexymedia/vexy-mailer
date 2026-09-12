@@ -119,7 +119,7 @@ describe("what the dashboard says matches what the worker will do", () => {
     // Friday 2026-09-11 with the limit spent: the next opening is Monday.
     const friday = zonedTimeToUtc(2026, 9, 11, 15 * 60, TZ);
     const result = explainNextSend(WINDOW, 100, 100, null, friday);
-    expect(result.message).toContain("Mon 14/09");
+    expect(result.message).toContain("Po 14/09");
     expect(result.message).toContain("08:00");
   });
 
@@ -128,7 +128,7 @@ describe("what the dashboard says matches what the worker will do", () => {
     const stale = new Date("2026-09-10T05:00:00.000Z");
     const result = explainNextSend(WINDOW, 100, 32, stale, sept(15, 45));
     expect(result.state).toBe("cursor_stale");
-    expect(result.message).toMatch(/predates the current settings/i);
+    expect(result.message).toMatch(/pochází ze starého nastavení/i);
     // 05:00 UTC renders as 07:00 Prague - an opening from an older window,
     // which is what made the reported value look like a DST error.
     expect(result.message).toContain("07:00 Europe/Prague");

@@ -16,7 +16,7 @@ export async function checkCampaignReadiness(campaignId: string): Promise<Campai
   const problems: string[] = [];
 
   const [campaign] = await sql<Campaign[]>`select * from campaigns where id = ${campaignId}`;
-  if (!campaign) return { ok: false, problems: ["Campaign not found."] };
+  if (!campaign) return { ok: false, problems: ["Kampaň nebyla nalezena."] };
 
   const pool = await sql<{ id: string; from_email: string; last_test_ok: boolean | null; enabled: boolean }[]>`
     select m.id, m.from_email, m.last_test_ok, m.enabled
@@ -26,7 +26,7 @@ export async function checkCampaignReadiness(campaignId: string): Promise<Campai
      order by m.from_email
   `;
   if (pool.length === 0) {
-    problems.push("The campaign has no sender mailboxes.");
+    problems.push("Kampaň nemá žádnou odesílací schránku.");
   } else {
     // One unusable mailbox in a pool of five is not a reason to block the
     // campaign - the others can carry it, and allocation skips the bad one.
@@ -36,30 +36,30 @@ export async function checkCampaignReadiness(campaignId: string): Promise<Campai
       const reasons = pool
         .map((m) =>
           !m.enabled
-            ? `${m.from_email} is disabled`
-            : `${m.from_email} has not passed a connection test`,
+            ? `${m.from_email} je vypnutá`
+            : `${m.from_email} neprošla testem připojení`,
         )
         .join("; ");
-      problems.push(`No sender mailbox is usable: ${reasons}.`);
+      problems.push(`Žádná odesílací schránka není použitelná: ${reasons}.`);
     }
   }
 
   const steps = await sql<SequenceStep[]>`
     select * from sequence_steps where campaign_id = ${campaignId} order by step_number
   `;
-  if (steps.length === 0) problems.push("The sequence has no steps.");
+  if (steps.length === 0) problems.push("Sekvence nemá žádné kroky.");
   if (steps.length > 0 && steps[0].delay_days !== 0) {
-    problems.push("Step 1 must have a delay of 0 days.");
+    problems.push("Krok 1 musí mít prodlevu 0 dnů.");
   }
   for (const step of steps) {
-    if (!step.subject.trim()) problems.push(`Step ${step.step_number} has an empty subject.`);
-    if (!step.body.trim()) problems.push(`Step ${step.step_number} has an empty body.`);
+    if (!step.subject.trim()) problems.push(`Krok ${step.step_number} má prázdný předmět.`);
+    if (!step.body.trim()) problems.push(`Krok ${step.step_number} má prázdný text.`);
   }
 
   const [{ count: contacts }] = await sql<{ count: number }[]>`
     select count(*)::int as count from campaign_contacts where campaign_id = ${campaignId}
   `;
-  if (contacts === 0) problems.push("The campaign has no contacts.");
+  if (contacts === 0) problems.push("Kampaň nemá žádné kontakty.");
 
   return { ok: problems.length === 0, problems };
 }
@@ -139,7 +139,7 @@ export async function pauseCampaign(campaignId: string): Promise<void> {
     update campaigns set status = 'paused', updated_at = now()
      where id = ${campaignId} and status = 'active'
   `;
-  await logActivity({ action: "Campaign paused", campaignId });
+  await logActivity({ action: "Kampaň pozastavena", campaignId });
 }
 
 /**
@@ -175,7 +175,7 @@ export async function skipStepAndResume(campaignContactId: string): Promise<void
   }
   await logActivity({
     level: "warn",
-    action: "Step skipped manually",
+    action: "Krok ručně přeskočen",
     detail: `Sequence resumed from step ${next?.step_number ?? "end"}.`,
     campaignId: row.campaign_id,
     contactId: row.contact_id,
@@ -231,7 +231,7 @@ export async function setCampaignMailboxes(
   });
 
   await logActivity({
-    action: "Sender pool updated",
+    action: "Změna odesílacích schránek",
     detail: `${mailboxIds.length} mailbox(es) selected` +
       (kept.length ? `; kept ${kept.join(", ")} because contacts are pinned to them` : ""),
     campaignId,
@@ -289,7 +289,7 @@ export async function saveCampaignSchedule(
 
   if (scheduleChanged && current.next_slot_at) {
     await logActivity({
-      action: "Sending schedule changed",
+      action: "Změna rozvrhu odesílání",
       detail:
         "The pacing cursor was cleared because it was computed from the previous schedule. " +
         "The campaign can send again as soon as it is inside the new window.",

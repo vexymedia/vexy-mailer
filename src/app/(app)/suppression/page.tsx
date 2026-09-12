@@ -21,32 +21,32 @@ export default async function SuppressionPage() {
   return (
     <>
       <PageHeader
-        title="Do not contact"
-        description="A global block list. These addresses are removed from every campaign and the database refuses to add them to a new one."
+        title="Nekontaktovat"
+        description="Globální blokační seznam. Tyto adresy se odstraní ze všech kampaní a databáze je do žádné nové nepustí."
       />
 
       <div className="mb-6 max-w-xl">
         <ActionForm action={suppressEmailAction} className="card p-5">
           <div className="flex flex-wrap items-end gap-3">
             <div className="flex-1">
-              <label className="label" htmlFor="email">Add an address</label>
+              <label className="label" htmlFor="email">Přidat adresu</label>
               <input id="email" name="email" type="email" required className="input" placeholder="someone@company.com" />
             </div>
             <input type="hidden" name="reason" value="manual" />
-            <SubmitButton pendingLabel="Adding…">Add</SubmitButton>
+            <SubmitButton pendingLabel="Přidávám…">Přidat</SubmitButton>
           </div>
         </ActionForm>
       </div>
 
       {rows.length === 0 ? (
-        <p className="card px-6 py-10 text-center text-sm text-zinc-500">The list is empty.</p>
+        <p className="card px-6 py-10 text-center text-sm text-zinc-500">Seznam je prázdný.</p>
       ) : (
         <Table
           head={
             <tr>
-              <th className="th">Email</th>
-              <th className="th">Reason</th>
-              <th className="th">Added</th>
+              <th className="th">E-mail</th>
+              <th className="th">Důvod</th>
+              <th className="th">Přidáno</th>
               <th className="th"></th>
             </tr>
           }
@@ -64,9 +64,9 @@ export default async function SuppressionPage() {
                   <input type="hidden" name="email" value={row.email} />
                   <SubmitButton
                     className="btn-secondary !px-2 !py-1 text-xs"
-                    confirm={`Remove ${row.email} from the do-not-contact list? They will become contactable again.`}
+                    confirm={`Odebrat ${row.email} ze seznamu Nekontaktovat? Adresa půjde znovu kontaktovat.`}
                   >
-                    Remove
+                    Odebrat
                   </SubmitButton>
                 </ActionForm>
               </td>

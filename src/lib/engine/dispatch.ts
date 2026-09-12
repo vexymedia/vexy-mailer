@@ -100,7 +100,7 @@ export async function reapStuckSends(): Promise<number> {
     `;
     await logActivity({
       level: "error",
-      action: `Email step ${row.step_number} status unknown`,
+      action: `E-mail krok ${row.step_number} — neznámý výsledek`,
       detail: "Worker interrupted mid-send. Not retried to avoid a possible duplicate. Review manually.",
       campaignId: row.campaign_id,
       campaignContactId: row.campaign_contact_id,
@@ -425,7 +425,7 @@ async function processCampaign(campaign: Campaign, settings: AppSettings): Promi
   if (claim.kind === "finished") {
     await maybeCompleteCampaign(campaign.id);
     await logActivity({
-      action: "Sequence completed",
+      action: "Sekvence dokončena",
       campaignId: campaign.id,
       campaignContactId: claim.candidate.campaign_contact_id,
       contactId: claim.candidate.contact_id,
@@ -434,7 +434,7 @@ async function processCampaign(campaign: Campaign, settings: AppSettings): Promi
   }
 
   if (claim.kind === "blocked") {
-    await logActivity({ level: "error", action: "Send blocked", detail: claim.reason, campaignId: campaign.id });
+    await logActivity({ level: "error", action: "Odeslání zablokováno", detail: claim.reason, campaignId: campaign.id });
     return { ...base, action: "blocked", detail: claim.reason };
   }
 
@@ -469,7 +469,7 @@ async function processCampaign(campaign: Campaign, settings: AppSettings): Promi
     `;
     await advanceContact(campaign, candidate, step, steps, new Date(), null);
     await logActivity({
-      action: `Email step ${step.step_number} simulated`,
+      action: `E-mail krok ${step.step_number} simulován`,
       detail: `TEST MODE: would have gone to ${candidate.email} - "${subject}"`,
       campaignId: campaign.id,
       contactId: candidate.contact_id,
@@ -497,7 +497,7 @@ async function processCampaign(campaign: Campaign, settings: AppSettings): Promi
     `;
     await logActivity({
       level: "warn",
-      action: `Email step ${step.step_number} not sent`,
+      action: `E-mail krok ${step.step_number} neodeslán`,
       detail: `${candidate.email}: ${abortReason}`,
       campaignId: campaign.id,
       contactId: candidate.contact_id,
@@ -549,7 +549,7 @@ async function processCampaign(campaign: Campaign, settings: AppSettings): Promi
 
     await advanceContact(campaign, candidate, step, steps, sentAt, result.messageId);
     await logActivity({
-      action: `Email step ${step.step_number} sent`,
+      action: `E-mail krok ${step.step_number} odeslán`,
       detail:
         recipient.mode === "redirect"
           ? `TEST MODE: redirected to ${recipient.to} (intended ${candidate.email})`
@@ -593,7 +593,7 @@ async function processCampaign(campaign: Campaign, settings: AppSettings): Promi
 
   await logActivity({
     level: "error",
-    action: result.outcome === "unknown" ? `Email step ${step.step_number} status unknown` : "SMTP error",
+    action: result.outcome === "unknown" ? `E-mail krok ${step.step_number} — neznámý výsledek` : "Chyba SMTP",
     detail:
       result.outcome === "unknown"
         ? `Delivery to ${candidate.email} could not be confirmed; not retried. ${result.message}`
@@ -772,7 +772,7 @@ export async function dispatchTick(): Promise<DispatchSummary> {
         const message = error instanceof Error ? error.message : String(error);
         await logActivity({
           level: "error",
-          action: "Dispatcher error",
+          action: "Chyba dispatcheru",
           detail: message,
           campaignId: campaign.id,
         });

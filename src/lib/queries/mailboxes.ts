@@ -36,7 +36,7 @@ export async function getMailbox(id: string): Promise<Mailbox | null> {
 }
 
 export async function createMailbox(input: MailboxInput): Promise<string> {
-  if (!input.smtp_password) throw new Error("An SMTP password is required.");
+  if (!input.smtp_password) throw new Error("SMTP heslo je povinné.");
   const [row] = await sql<{ id: string }[]>`
     insert into mailboxes (name, from_name, from_email, smtp_host, smtp_port, smtp_username,
                            smtp_password_enc, smtp_secure, imap_host, imap_port, imap_username,
@@ -49,7 +49,7 @@ export async function createMailbox(input: MailboxInput): Promise<string> {
             ${input.daily_limit}, ${input.timezone}, ${input.enabled})
     returning id
   `;
-  await logActivity({ action: "Mailbox created", detail: input.from_email });
+  await logActivity({ action: "Schránka vytvořena", detail: input.from_email });
   return row.id;
 }
 
@@ -102,7 +102,7 @@ export async function updateMailbox(id: string, input: MailboxInput): Promise<vo
            updated_at = now()
      where id = ${id}
   `;
-  await logActivity({ action: "Mailbox updated", detail: input.from_email });
+  await logActivity({ action: "Schránka upravena", detail: input.from_email });
 }
 
 export interface MailboxTestResult {
@@ -135,7 +135,7 @@ export async function testMailboxImap(id: string): Promise<{ ok: boolean; error?
       mailbox.imap_username ? null : "username",
       mailbox.imap_password_enc ? null : "password",
     ].filter(Boolean);
-    return { ok: false, skipped: true, error: `IMAP is not fully configured - missing ${missing.join(", ")}.` };
+    return { ok: false, skipped: true, error: `IMAP není kompletně nastaveno — chybí ${missing.join(", ")}.` };
   }
 
   const result = await testImapConnection(mailbox);
@@ -148,7 +148,7 @@ export async function testMailboxImap(id: string): Promise<{ ok: boolean; error?
   `;
   await logActivity({
     level: result.ok ? "info" : "error",
-    action: "IMAP connection tested",
+    action: "Test IMAP připojení",
     detail: `${mailbox.from_email}: ${result.ok ? "connected and opened INBOX" : result.error}`,
   });
   return result;
@@ -161,7 +161,7 @@ export async function testMailbox(id: string): Promise<MailboxTestResult> {
   const smtp = await testSmtpConnection(mailbox);
   const imap: MailboxTestResult["imap"] = hasImapConfigured(mailbox)
     ? await testImapConnection(mailbox)
-    : { ok: false, skipped: true, error: "No IMAP configuration - reply detection is off." };
+    : { ok: false, skipped: true, error: "IMAP není nastaveno — detekce odpovědí je vypnutá." };
 
   const ok = smtp.ok;
   const error = [smtp.ok ? null : `SMTP: ${smtp.error}`, imap.ok || imap.skipped ? null : `IMAP: ${imap.error}`]
@@ -180,7 +180,7 @@ export async function testMailbox(id: string): Promise<MailboxTestResult> {
   `;
   await logActivity({
     level: ok ? "info" : "error",
-    action: "Mailbox connection tested",
+    action: "Test připojení schránky",
     detail: `${mailbox.from_email}: ${ok ? "SMTP ok" : "SMTP failed"}${imap.skipped ? ", IMAP not configured" : `, IMAP ${imap.ok ? "ok" : "failed"}`}${error ? ` - ${error}` : ""}`,
   });
 
@@ -199,18 +199,18 @@ export async function deleteMailbox(id: string): Promise<{ ok: boolean; error?: 
   if (usage.campaigns > 0) {
     return {
       ok: false,
-      error: `This mailbox is in the sender pool of ${usage.campaigns} campaign(s) and cannot be deleted.`,
+      error: `Tato schránka je mezi odesílateli u ${usage.campaigns} kampaní a nelze ji smazat.`,
     };
   }
   if (usage.pinned_contacts > 0) {
     return {
       ok: false,
       error:
-        `${usage.pinned_contacts} contact(s) are pinned to this mailbox as their sender and cannot be ` +
-        "moved to another one, so it cannot be deleted.",
+        `${usage.pinned_contacts} kontaktů má tuto schránku připnutou jako odesílatele a nelze je ` +
+        "přesunout jinam, takže schránku nelze smazat.",
     };
   }
   await sql`delete from mailboxes where id = ${id}`;
-  await logActivity({ action: "Mailbox deleted", level: "warn" });
+  await logActivity({ action: "Schránka smazána", level: "warn" });
   return { ok: true };
 }

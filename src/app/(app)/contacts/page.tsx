@@ -22,7 +22,7 @@ export default async function ContactsPage({
 
   return (
     <>
-      <PageHeader title="Contacts" description={`${total} row(s). A contact appears once per campaign it belongs to.`} />
+      <PageHeader title="Kontakty" description={`${total} řádků. Kontakt se objeví jednou za každou kampaň, ve které je.`} />
 
       <div className="mb-6 space-y-4">
         <ImportForm />
@@ -30,29 +30,30 @@ export default async function ContactsPage({
           <input
             name="q"
             defaultValue={q ?? ""}
-            placeholder="Search email, name or company…"
+            placeholder="Hledat e-mail, jméno nebo firmu…"
             className="input max-w-sm"
           />
-          <button type="submit" className="btn-secondary">Search</button>
+          <button type="submit" className="btn-secondary">Hledat</button>
         </form>
       </div>
 
       {rows.length === 0 ? (
         <p className="card px-6 py-10 text-center text-sm text-zinc-500">
-          {q ? "No contacts match that search." : "No contacts yet — import a CSV above."}
+          {q ? "Tomuto hledání neodpovídá žádný kontakt." : "Zatím žádné kontakty — nahrajte CSV výše."}
         </p>
       ) : (
         <Table
           head={
             <tr>
-              <th className="th">Email</th>
-              <th className="th">Name</th>
-              <th className="th">Company</th>
-              <th className="th">Campaign</th>
-              <th className="th">Status</th>
-              <th className="th">Last email sent</th>
-              <th className="th">Next email</th>
-              <th className="th">Replied</th>
+              <th className="th">E-mail</th>
+              <th className="th">Jméno</th>
+              <th className="th">Firma</th>
+              <th className="th">Telefon</th>
+              <th className="th">Kampaň</th>
+              <th className="th">Stav</th>
+              <th className="th">Poslední e-mail</th>
+              <th className="th">Další e-mail</th>
+              <th className="th">Odpověď</th>
               <th className="th"></th>
             </tr>
           }
@@ -63,18 +64,27 @@ export default async function ContactsPage({
                 {row.email}
                 {row.suppressed ? (
                   <span className="badge ml-2 bg-orange-50 text-orange-700 ring-orange-200">
-                    do not contact
+                    nekontaktovat
                   </span>
                 ) : null}
               </td>
               <td className="td">{[row.first_name, row.last_name].filter(Boolean).join(" ") || "—"}</td>
               <td className="td">{row.company ?? "—"}</td>
+              <td className="td text-xs">
+                {row.phone ? (
+                  <a href={`tel:${row.phone.replace(/\s+/g, "")}`} className="text-zinc-900 hover:underline">
+                    {row.phone}
+                  </a>
+                ) : (
+                  <span className="text-zinc-400">—</span>
+                )}
+              </td>
               <td className="td">{row.campaign_name ?? <span className="text-zinc-400">—</span>}</td>
               <td className="td"><StatusBadge status={row.status} /></td>
               <td className="td text-xs"><DateTime value={row.last_sent_at} /></td>
               <td className="td text-xs"><DateTime value={row.next_send_at} /></td>
               <td className="td">
-                {row.replied ? <span className="font-medium text-emerald-600">yes</span> : "—"}
+                {row.replied ? <span className="font-medium text-emerald-600">ano</span> : "—"}
               </td>
               <td className="td text-right">
                 {row.suppressed ? null : <SuppressButton email={row.email} />}
@@ -86,16 +96,16 @@ export default async function ContactsPage({
 
       {pages > 1 ? (
         <div className="mt-4 flex items-center justify-between text-sm text-zinc-600">
-          <span>Page {pageNumber} of {pages}</span>
+          <span>Strana {pageNumber} z {pages}</span>
           <div className="flex gap-2">
             {pageNumber > 1 ? (
               <a className="btn-secondary" href={`/contacts?page=${pageNumber - 1}${q ? `&q=${encodeURIComponent(q)}` : ""}`}>
-                Previous
+                Předchozí
               </a>
             ) : null}
             {pageNumber < pages ? (
               <a className="btn-secondary" href={`/contacts?page=${pageNumber + 1}${q ? `&q=${encodeURIComponent(q)}` : ""}`}>
-                Next
+                Další
               </a>
             ) : null}
           </div>

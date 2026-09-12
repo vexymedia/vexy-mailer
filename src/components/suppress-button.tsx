@@ -10,9 +10,9 @@ export function SuppressButton({ email }: { email: string }) {
       <input type="hidden" name="reason" value="manual" />
       <SubmitButton
         className="btn-danger !px-2 !py-1 text-xs"
-        confirm={`Add ${email} to the do-not-contact list? They will be removed from every campaign and can never be added to another one.`}
+        confirm={`Přidat ${email} na seznam Nekontaktovat? Bude odebrán ze všech kampaní a už do žádné nepůjde přidat.`}
       >
-        Do not contact
+        Nekontaktovat
       </SubmitButton>
     </ActionForm>
   );

@@ -19,12 +19,12 @@ export default async function LoginPage({
         <h1 className="mb-1 text-center text-xl font-semibold tracking-tight text-zinc-900">
           vexy<span className="text-zinc-400">-mailer</span>
         </h1>
-        <p className="mb-6 text-center text-sm text-zinc-500">Internal outreach tool</p>
+        <p className="mb-6 text-center text-sm text-zinc-500">Interní nástroj pro outreach a volání</p>
         <div className="card p-6">
           <ActionForm action={loginAction}>
             <input type="hidden" name="next" value={next ?? "/"} />
             <label className="label" htmlFor="password">
-              Password
+              Heslo
             </label>
             <input
               id="password"
@@ -34,8 +34,8 @@ export default async function LoginPage({
               autoComplete="current-password"
               className="input"
             />
-            <SubmitButton className="btn-primary mt-4 w-full" pendingLabel="Signing in…">
-              Sign in
+            <SubmitButton className="btn-primary mt-4 w-full" pendingLabel="Přihlašuji…">
+              Přihlásit
             </SubmitButton>
           </ActionForm>
         </div>

@@ -56,7 +56,7 @@ describe("campaign lifecycle", () => {
     const seed = await seedCampaign({ contacts: [] });
     const result = await startCampaign(seed.campaignId);
     expect(result.ok).toBe(false);
-    expect(result.problems).toContain("The campaign has no contacts.");
+    expect(result.problems).toContain("Kampaň nemá žádné kontakty.");
 
     const [campaign] = await sql`select status from campaigns where id = ${seed.campaignId}`;
     expect(campaign.status).toBe("draft"); // unchanged
@@ -67,7 +67,7 @@ describe("campaign lifecycle", () => {
     await sql`update mailboxes set last_test_ok = null where id = ${seed.mailboxId}`;
     const result = await startCampaign(seed.campaignId);
     expect(result.ok).toBe(false);
-    expect(result.problems.join(" ")).toContain("has not passed a connection test");
+    expect(result.problems.join(" ")).toContain("neprošla testem připojení");
   });
 
   it("walks a contact through every step of the sequence, in order", async () => {
@@ -412,6 +412,7 @@ describe("edge cases around a running campaign", () => {
     last_name: null,
     company: null,
     website: null,
+    phone: null,
   };
 
   it("schedules contacts imported into an already-active campaign", async () => {

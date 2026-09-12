@@ -5,14 +5,16 @@ import { usePathname } from "next/navigation";
 import { logoutAction } from "@/lib/actions";
 
 const LINKS = [
-  { href: "/", label: "Dashboard" },
-  { href: "/inbox", label: "Inbox" },
-  { href: "/campaigns", label: "Campaigns" },
-  { href: "/contacts", label: "Contacts" },
-  { href: "/mailboxes", label: "Mailboxes" },
-  { href: "/suppression", label: "Do not contact" },
-  { href: "/activity", label: "Activity" },
-  { href: "/settings", label: "Settings" },
+  { href: "/", label: "Přehled" },
+  { href: "/volani", label: "Volání" },
+  { href: "/inbox", label: "Doručená pošta" },
+  { href: "/campaigns", label: "Kampaně" },
+  { href: "/contacts", label: "Kontakty" },
+  { href: "/calleri", label: "Calleři" },
+  { href: "/mailboxes", label: "Schránky" },
+  { href: "/suppression", label: "Nekontaktovat" },
+  { href: "/activity", label: "Aktivita" },
+  { href: "/settings", label: "Nastavení" },
 ];
 
 export function Nav() {
@@ -39,7 +41,7 @@ export function Nav() {
         })}
         <form action={logoutAction} className="ml-auto">
           <button type="submit" className="text-sm text-zinc-500 hover:text-zinc-900">
-            Sign out
+            Odhlásit
           </button>
         </form>
       </div>

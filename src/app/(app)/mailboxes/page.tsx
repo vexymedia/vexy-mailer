@@ -25,28 +25,28 @@ export default async function MailboxesPage() {
   return (
     <>
       <PageHeader
-        title="Mailboxes"
-        description="Each mailbox has its own daily cap, applied across every campaign it is used by."
-        actions={<Link href="/mailboxes/new" className="btn-primary">Add mailbox</Link>}
+        title="Schránky"
+        description="Každá schránka má vlastní denní limit, který platí napříč všemi kampaněmi."
+        actions={<Link href="/mailboxes/new" className="btn-primary">Přidat schránku</Link>}
       />
 
       {mailboxes.length === 0 ? (
         <EmptyState
-          title="No mailboxes yet"
-          description="Add the SMTP and IMAP details of the account you want to send from."
-          action={{ href: "/mailboxes/new", label: "Add mailbox" }}
+          title="Zatím žádné schránky"
+          description="Zadejte SMTP a IMAP údaje účtu, ze kterého chcete odesílat."
+          action={{ href: "/mailboxes/new", label: "Přidat schránku" }}
         />
       ) : (
         <Table
           head={
             <tr>
-              <th className="th">Mailbox</th>
+              <th className="th">Schránka</th>
               <th className="th">SMTP</th>
               <th className="th">IMAP</th>
-              <th className="th">Sent today</th>
-              <th className="th text-right">Campaigns</th>
-              <th className="th">Last send</th>
-              <th className="th">Last inbox check</th>
+              <th className="th">Dnes odesláno</th>
+              <th className="th text-right">Kampaně</th>
+              <th className="th">Poslední odeslání</th>
+              <th className="th">Poslední kontrola pošty</th>
             </tr>
           }
         >
@@ -64,28 +64,28 @@ export default async function MailboxesPage() {
                     {mailbox.from_name} · {mailbox.name} · {mailbox.timezone}
                   </div>
                   {!mailbox.enabled ? (
-                    <span className="badge mt-1 bg-orange-50 text-orange-700 ring-orange-200">disabled</span>
+                    <span className="badge mt-1 bg-orange-50 text-orange-700 ring-orange-200">vypnuto</span>
                   ) : null}
                 </td>
                 <td className="td">
                   {mailbox.last_test_ok === true ? (
                     <span className="badge bg-emerald-50 text-emerald-700 ring-emerald-200">ok</span>
                   ) : mailbox.last_test_ok === false ? (
-                    <span className="badge bg-red-50 text-red-700 ring-red-200">failed</span>
+                    <span className="badge bg-red-50 text-red-700 ring-red-200">chyba</span>
                   ) : (
-                    <span className="badge bg-zinc-50 text-zinc-600 ring-zinc-200">untested</span>
+                    <span className="badge bg-zinc-50 text-zinc-600 ring-zinc-200">neotestováno</span>
                   )}
                   <div className="mt-1 text-xs text-zinc-500">{mailbox.smtp_host}:{mailbox.smtp_port}</div>
                 </td>
                 <td className="td">
                   {mailbox.imap_host ? (
                     mailbox.imap_last_error ? (
-                      <span className="badge bg-red-50 text-red-700 ring-red-200">error</span>
+                      <span className="badge bg-red-50 text-red-700 ring-red-200">chyba</span>
                     ) : (
-                      <span className="badge bg-emerald-50 text-emerald-700 ring-emerald-200">configured</span>
+                      <span className="badge bg-emerald-50 text-emerald-700 ring-emerald-200">nastaveno</span>
                     )
                   ) : (
-                    <span className="badge bg-amber-50 text-amber-700 ring-amber-200">none</span>
+                    <span className="badge bg-amber-50 text-amber-700 ring-amber-200">chybí</span>
                   )}
                   {mailbox.imap_last_error ? (
                     <div className="mt-1 max-w-48 text-xs text-red-600">{mailbox.imap_last_error}</div>
@@ -103,8 +103,8 @@ export default async function MailboxesPage() {
                   </div>
                 </td>
                 <td className="td text-right tabular-nums">{activeCampaigns.get(mailbox.id) ?? 0}</td>
-                <td className="td text-xs"><DateTime value={mailbox.last_send_at} fallback="never" /></td>
-                <td className="td text-xs"><DateTime value={mailbox.imap_last_checked_at} fallback="never" /></td>
+                <td className="td text-xs"><DateTime value={mailbox.last_send_at} fallback="nikdy" /></td>
+                <td className="td text-xs"><DateTime value={mailbox.imap_last_checked_at} fallback="nikdy" /></td>
               </tr>
             );
           })}

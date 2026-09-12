@@ -315,7 +315,7 @@ describe("manual replies", () => {
     const { sendManualReply } = await import("@/lib/queries/inbox");
     const result = await sendManualReply(conversationId, "Hello?");
     expect(result.ok).toBe(false);
-    expect(result.error).toContain("disabled");
+    expect(result.error).toContain("vypnutá");
     expect(sentMail).toHaveLength(0);
   });
 

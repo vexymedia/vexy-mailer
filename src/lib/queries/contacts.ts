@@ -40,13 +40,17 @@ export async function importContacts(
   for (const row of rows) {
     // `xmax = 0` distinguishes a fresh INSERT from an ON CONFLICT UPDATE.
     const [contact] = await sql<{ id: string; inserted: boolean }[]>`
-      insert into contacts (email, first_name, last_name, company, website)
-      values (${row.email}, ${row.first_name}, ${row.last_name}, ${row.company}, ${row.website})
+      insert into contacts (email, first_name, last_name, company, website, phone)
+      values (${row.email}, ${row.first_name}, ${row.last_name}, ${row.company},
+              ${row.website}, ${row.phone})
       on conflict (email) do update
          set first_name = coalesce(contacts.first_name, excluded.first_name),
              last_name  = coalesce(contacts.last_name,  excluded.last_name),
              company    = coalesce(contacts.company,    excluded.company),
              website    = coalesce(contacts.website,    excluded.website),
+             -- A re-import is the normal way a phone number arrives later, so
+             -- fill a blank one in; never overwrite a number already there.
+             phone      = coalesce(contacts.phone,      excluded.phone),
              updated_at = now()
       returning id, (xmax = 0) as inserted
     `;
@@ -74,7 +78,7 @@ export async function importContacts(
   if (campaignId) await schedulePendingContacts(campaignId);
 
   await logActivity({
-    action: "Contacts imported",
+    action: "Kontakty naimportovány",
     detail:
       `${result.created} new, ${result.existing} already known` +
       (campaignId ? `, ${result.addedToCampaign} added to the campaign` : "") +
@@ -111,6 +115,7 @@ export interface ContactOverviewRow {
   last_name: string | null;
   company: string | null;
   website: string | null;
+  phone: string | null;
   campaign_id: string | null;
   campaign_name: string | null;
   status: string | null;
@@ -133,7 +138,7 @@ export async function listContactOverview(options: {
   const offset = options.offset ?? 0;
 
   const rows = await sql<ContactOverviewRow[]>`
-    select c.id, c.email, c.first_name, c.last_name, c.company, c.website,
+    select c.id, c.email, c.first_name, c.last_name, c.company, c.website, c.phone,
            cc.campaign_id,
            cp.name as campaign_name,
            cc.status,
@@ -190,10 +195,10 @@ export async function suppressEmail(email: string, reason: string, note?: string
          and cc.status not in ('unsubscribed')
     `;
   });
-  await logActivity({ action: "Contact unsubscribed", detail: `${normalised} added to the suppression list (${reason})` });
+  await logActivity({ action: "Kontakt odhlášen", detail: `${normalised} added to the suppression list (${reason})` });
 }
 
 export async function unsuppressEmail(email: string): Promise<void> {
   await sql`delete from suppression_list where email = ${email.trim().toLowerCase()}`;
-  await logActivity({ action: "Suppression removed", detail: email.trim().toLowerCase(), level: "warn" });
+  await logActivity({ action: "Zrušeno nekontaktovat", detail: email.trim().toLowerCase(), level: "warn" });
 }
