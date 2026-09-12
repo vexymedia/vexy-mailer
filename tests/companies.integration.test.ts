@@ -293,19 +293,37 @@ describe("týdenní plán", () => {
   });
 });
 
-describe("redesign se nedotkl e-mailu ani volání", () => {
-  it("firma ani plán nezasahují do fronty a odesílání", async () => {
+describe("uzavřená firma opouští prospecting", () => {
+  it("vyřadí z fronty volání všechny kontakty firmy, i ty nevolané", async () => {
     await seedWithCompanies();
     const [company] = await sql<{ id: string }[]>`select id from companies where name = 'Acme'`;
 
     const before = await calling.listCallQueue(null);
+    expect(before.some((r) => r.company_id === company.id)).toBe(true);
+
     await companies.updateCompany(company.id, { status: "excluded", priority: "low" });
+
     const after = await calling.listCallQueue(null);
+    expect(after.some((r) => r.company_id === company.id)).toBe(false);
+    // Globex se nezměnil: zavírá se firma, ne fronta.
+    expect(after).toHaveLength(before.length - 1);
+  });
 
-    // Stav firmy je zatím informace pro lidi, ne blokace kanálu - tu drží
-    // suppression_list a call_suppression.
-    expect(after.map((r) => r.id).sort()).toEqual(before.map((r) => r.id).sort());
+  it("nezasahuje do e-mailového kanálu", async () => {
+    await seedWithCompanies();
+    const [company] = await sql<{ id: string }[]>`select id from companies where name = 'Acme'`;
 
+    const emailBefore = await sql<{ id: string; status: string; next_send_at: Date | null }[]>`
+      select cc.id, cc.status, cc.next_send_at from campaign_contacts cc order by cc.id
+    `;
+    await companies.updateCompany(company.id, { status: "excluded", priority: "low" });
+    const emailAfter = await sql<{ id: string; status: string; next_send_at: Date | null }[]>`
+      select cc.id, cc.status, cc.next_send_at from campaign_contacts cc order by cc.id
+    `;
+
+    // Stav firmy je rozhodnutí o prospectingu. Odhlášení z e-mailu je jiný
+    // souhlas a drží ho suppression_list - ten se nesmí hnout.
+    expect(emailAfter).toEqual(emailBefore);
     const [{ count }] = await sql<{ count: number }[]>`select count(*)::int from suppression_list`;
     expect(count).toBe(0);
   });

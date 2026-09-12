@@ -12,6 +12,7 @@ import {
   type FunnelStage,
   type MeetingOutcome,
 } from "../calling";
+import { isCompanyStatus, nextCompanyStatus } from "../companies";
 import type { Campaign } from "../types";
 
 /**
@@ -92,8 +93,13 @@ export async function listCallQueue(
        -- ...nor anyone another caller is on the phone to right now.
        and (${callerId}::uuid is null or cc.call_locked_until is null
             or cc.call_locked_until < now() or cc.call_locked_by = ${callerId}::uuid)
-       -- A callback in the future is not work yet.
-       and (cc.call_status <> 'callback' or cc.next_call_at is null or cc.next_call_at <= now())
+       -- Naplánováno na později = dnes to není práce. Od zavedení kadence
+       -- má datum dalšího kroku každý otevřený kontakt, ne jen callback.
+       and (cc.next_call_at is null or cc.next_call_at <= now())
+       -- Uzavřená firma ("nemá zájem", "není ICP", "už je zákazník") nesmí
+       -- jít do prospectingu ani přes svůj druhý kontakt.
+       and not exists (select 1 from companies qco where qco.id = c.company_id
+                        and qco.status in ('won', 'lost', 'excluded'))
      order by
        case cc.call_status when 'callback' then 0 when 'in_progress' then 1 else 2 end,
        cc.call_attempts,
@@ -164,8 +170,9 @@ export async function claimNextCall(
           and (inner_cc.assigned_caller_id is null or inner_cc.assigned_caller_id = ${callerId})
           and (inner_cc.call_locked_until is null or inner_cc.call_locked_until < now()
                or inner_cc.call_locked_by = ${callerId})
-          and (inner_cc.call_status <> 'callback' or inner_cc.next_call_at is null
-               or inner_cc.next_call_at <= now())
+          and (inner_cc.next_call_at is null or inner_cc.next_call_at <= now())
+          and not exists (select 1 from companies qco where qco.id = c.company_id
+                           and qco.status in ('won', 'lost', 'excluded'))
         order by
           case inner_cc.call_status when 'callback' then 0 when 'in_progress' then 1 else 2 end,
           inner_cc.call_attempts,
@@ -339,13 +346,16 @@ export async function logCall(input: LogCallInput): Promise<LogCallResult> {
         call_attempts: number;
         max_call_attempts: number;
         email: string;
+        company_id: string | null;
+        company_status: string | null;
       }[]
     >`
       select cc.id, cc.campaign_id, cc.contact_id, cc.call_attempts,
-             cp.max_call_attempts, c.email
+             cp.max_call_attempts, c.email, c.company_id, co.status as company_status
         from campaign_contacts cc
         join campaigns cp on cp.id = cc.campaign_id
         join contacts c on c.id = cc.contact_id
+        left join companies co on co.id = c.company_id
        where cc.id = ${input.campaignContactId}
          for update of cc
     `;
@@ -396,6 +406,21 @@ export async function logCall(input: LogCallInput): Promise<LogCallResult> {
              updated_at         = now()
        where id = ${row.id}
     `;
+
+    // Výsledek hovoru je to jediné, co firmu posouvá procesem. Bez tohohle
+    // zápisu by firma zůstala "Nová" i po deseti hovorech a seznam firem by
+    // lhal. nextCompanyStatus hlídá, aby ji slabší signál neposunul zpátky.
+    if (row.company_id && row.company_status) {
+      const merged = nextCompanyStatus(
+        isCompanyStatus(row.company_status) ? row.company_status : "new",
+        applied.companyStatus,
+      );
+      if (merged !== row.company_status) {
+        await tx`
+          update companies set status = ${merged}, updated_at = now() where id = ${row.company_id}
+        `;
+      }
+    }
 
     // "Nevolat" is a decision about the person, not about this campaign, so it
     // goes on the global list the queue checks. Deliberately not the e-mail
@@ -555,8 +580,9 @@ export async function getCampaignCallingReport(campaignId: string): Promise<Camp
             and cc.call_attempts < ${campaign.max_call_attempts}
             and c.phone is not null and btrim(c.phone) <> ''
             and not exists (select 1 from call_suppression cs where cs.contact_id = cc.contact_id)
-            and (cc.call_status <> 'callback' or cc.next_call_at is null or cc.next_call_at <= now()))
-          as queue_size,
+            and (cc.next_call_at is null or cc.next_call_at <= now())
+            and not exists (select 1 from companies qco where qco.id = c.company_id
+                             and qco.status in ('won', 'lost', 'excluded'))) as queue_size,
         (select count(*)::int
            from campaign_contacts cc
            join contacts c on c.id = cc.contact_id
@@ -770,8 +796,11 @@ export async function listCallingCampaigns(): Promise<
                and cc.call_status in ('new', 'in_progress', 'callback')
                and cc.call_attempts < cp.max_call_attempts
                and c.phone is not null and btrim(c.phone) <> ''
-               and (cc.call_status <> 'callback' or cc.next_call_at is null
-                    or cc.next_call_at <= now())) as queue_size,
+               and not exists (select 1 from call_suppression cs
+                                where cs.contact_id = cc.contact_id)
+               and (cc.next_call_at is null or cc.next_call_at <= now())
+               and not exists (select 1 from companies qco where qco.id = c.company_id
+                                and qco.status in ('won', 'lost', 'excluded'))) as queue_size,
            (select count(*)::int from campaign_contacts cc
              where cc.campaign_id = cp.id and cc.call_status = 'callback'
                and cc.next_call_at is not null and cc.next_call_at <= now()) as callbacks_due

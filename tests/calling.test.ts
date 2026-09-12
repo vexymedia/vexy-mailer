@@ -4,10 +4,14 @@ import {
   buildFunnel,
   computeEconomics,
   CALL_OUTCOMES,
+  nextAttemptAt,
   orderCallQueue,
+  PRIMARY_CALL_OUTCOMES,
   queuePriority,
+  SECONDARY_CALL_OUTCOMES,
   type CallCounts,
 } from "@/lib/calling";
+import { nextCompanyStatus } from "@/lib/companies";
 
 /**
  * The calling rules that decide persistence and money, tested without a
@@ -17,10 +21,25 @@ import {
 
 const NOW = new Date("2026-09-11T09:00:00Z");
 
-describe("the twelve call outcomes", () => {
-  it("has exactly twelve, each with a unique value", () => {
-    expect(CALL_OUTCOMES).toHaveLength(12);
-    expect(new Set(CALL_OUTCOMES.map((o) => o.value)).size).toBe(12);
+describe("the call outcomes", () => {
+  it("has a unique value and a company status for each", () => {
+    expect(new Set(CALL_OUTCOMES.map((o) => o.value)).size).toBe(CALL_OUTCOMES.length);
+    for (const outcome of CALL_OUTCOMES) {
+      expect(outcome.companyStatus, outcome.value).toBeTruthy();
+    }
+  });
+
+  it("keeps the primary buttons down to the handful a caller uses all day", () => {
+    expect(PRIMARY_CALL_OUTCOMES.map((o) => o.value)).toEqual([
+      "no_answer",
+      "busy",
+      "send_info",
+      "callback",
+      "meeting_booked",
+    ]);
+    expect(PRIMARY_CALL_OUTCOMES.length + SECONDARY_CALL_OUTCOMES.length).toBe(
+      CALL_OUTCOMES.length,
+    );
   });
 
   it("only asks for a date on the two outcomes that schedule something", () => {
@@ -94,8 +113,9 @@ describe("callbacks", () => {
     expect(result.nextCallAt).toEqual(when);
   });
 
-  it("does not leave a next action behind on any other outcome", () => {
-    for (const outcome of CALL_OUTCOMES.filter((o) => o.value !== "callback")) {
+  it("leaves no next action behind on an outcome that closed the prospect", () => {
+    const closed = CALL_OUTCOMES.filter((o) => o.status !== null && o.value !== "callback");
+    for (const outcome of closed) {
       const result = applyCallOutcome({
         outcome: outcome.value,
         attemptsBefore: 0,
@@ -105,6 +125,69 @@ describe("callbacks", () => {
       });
       expect(result.nextCallAt, outcome.value).toBeNull();
     }
+  });
+});
+
+/**
+ * Tohle je jádro produktu: firma, kterou dál řešíme, musí mít termín dalšího
+ * kroku. Bez toho se "nezvedá" ztratí a nikdo si toho nevšimne.
+ */
+describe("no open prospect without a next step", () => {
+  it("schedules the next attempt for every outcome that leaves the prospect open", () => {
+    const open = CALL_OUTCOMES.filter((o) => o.status === null);
+    expect(open.length).toBeGreaterThan(0);
+    for (const outcome of open) {
+      const result = applyCallOutcome({
+        outcome: outcome.value,
+        attemptsBefore: 0,
+        maxAttempts: 4,
+        now: NOW,
+      });
+      expect(result.status, outcome.value).toBe("in_progress");
+      expect(result.nextCallAt, outcome.value).not.toBeNull();
+      expect(result.nextCallAt!.getTime(), outcome.value).toBeGreaterThan(NOW.getTime());
+    }
+  });
+
+  it("counts the delay in working days, so Friday leads to Monday", () => {
+    const friday = new Date("2026-09-11T15:00:00");
+    expect(friday.getDay()).toBe(5);
+    const next = nextAttemptAt(friday, 1);
+    expect(next.getDay()).toBe(1);
+    expect(next.getDate()).toBe(14);
+    // Půlnoc cílového dne, ne "za 24 hodin" - jinak by follow-up naskočil
+    // callerovi až odpoledne.
+    expect(next.getHours()).toBe(0);
+    expect(next.getMinutes()).toBe(0);
+  });
+
+  it("skips the whole weekend when the delay spans it", () => {
+    const thursday = new Date("2026-09-10T09:00:00");
+    expect(thursday.getDay()).toBe(4);
+    // Čtvrtek + 3 pracovní dny = úterý.
+    const next = nextAttemptAt(thursday, 3);
+    expect(next.getDay()).toBe(2);
+    expect(next.getDate()).toBe(15);
+  });
+
+  it("leaves the weekend itself pointing at Monday", () => {
+    const saturday = new Date("2026-09-12T09:00:00");
+    expect(saturday.getDay()).toBe(6);
+    expect(nextAttemptAt(saturday, 1).getDay()).toBe(1);
+  });
+
+  it("plans nothing once the attempts run out", () => {
+    const spent = applyCallOutcome({
+      outcome: "no_answer",
+      attemptsBefore: 3,
+      maxAttempts: 4,
+      now: NOW,
+    });
+    expect(spent.status).toBe("max_attempts");
+    expect(spent.nextCallAt).toBeNull();
+    // A prospect nobody will dial again must not sit in the company list as
+    // work in progress.
+    expect(spent.companyStatus).toBe("lost");
   });
 });
 

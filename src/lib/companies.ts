@@ -58,3 +58,39 @@ export function companyStatusLabel(value: string | null): string {
   if (!value) return "—";
   return COMPANY_STATUS_LABELS[value as CompanyStatus] ?? value;
 }
+
+/**
+ * Pořadí, ve kterém se firma posouvá procesem. Slouží jen k tomu, aby ji
+ * slabší signál nevrátil zpátky: "špatné číslo" u jednoho kontaktu nesmí
+ * přepsat firmu, se kterou už máme domluvenou schůzku.
+ */
+const PROGRESS_RANK: Record<string, number> = {
+  new: 0,
+  ready: 1,
+  in_progress: 2,
+  interested: 3,
+  meeting: 4,
+};
+
+/**
+ * Jaký stav má firma mít po výsledku hovoru.
+ *
+ * Pravidla, v tomhle pořadí:
+ *   * `excluded` (nekontaktovat) je tvrdý stop a přebije všechno,
+ *   * `won` a `excluded` už se nikam neposouvají,
+ *   * `lost` se zapíše, i když byla firma dál - "nemá zájem" je odpověď,
+ *     ne krok zpět,
+ *   * `lost` se naopak dá znovu otevřít, když jiný kontakt ve firmě
+ *     rozjede hovor znovu,
+ *   * jinak se bere ten vyšší ze dvou stavů.
+ */
+export function nextCompanyStatus(current: CompanyStatus, fromOutcome: CompanyStatus): CompanyStatus {
+  if (fromOutcome === "excluded") return "excluded";
+  if (current === "excluded" || current === "won") return current;
+  if (fromOutcome === "won") return "won";
+  if (fromOutcome === "lost") return "lost";
+  if (current === "lost") return fromOutcome;
+  const currentRank = PROGRESS_RANK[current] ?? 0;
+  const nextRank = PROGRESS_RANK[fromOutcome] ?? 0;
+  return nextRank > currentRank ? fromOutcome : current;
+}

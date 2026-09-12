@@ -9,6 +9,8 @@
  * and checked by constraints. Only the labels are Czech.
  */
 
+import type { CompanyStatus } from "./companies";
+
 export type CallOutcome =
   | "no_answer"
   | "busy"
@@ -21,7 +23,9 @@ export type CallOutcome =
   | "send_info"
   | "meeting_booked"
   | "won"
-  | "do_not_call";
+  | "do_not_call"
+  | "not_icp"
+  | "existing_customer";
 
 /**
  * What became of a booked meeting. A boolean could not tell "not yet" from
@@ -58,6 +62,14 @@ export interface CallOutcomeDefinition {
    * nevybíral z dvanácti možností při každém hovoru.
    */
   primary?: boolean;
+  /**
+   * Za kolik pracovních dní zkusit znovu, pokud výsledek nechal firmu
+   * otevřenou. Bez toho by "nezvedá" skončilo jako aktivní firma bez
+   * dalšího kroku - přesně ta díra, kterou tenhle produkt řeší.
+   */
+  retryWorkingDays?: number;
+  /** Stav, který výsledek propisuje do firmy. */
+  companyStatus: CompanyStatus;
   /** Czech label shown on the button in the caller's workspace. */
   label: string;
   /** Did we actually speak to the person? This is the billable unit. */
@@ -72,25 +84,54 @@ export interface CallOutcomeDefinition {
 }
 
 /**
- * The twelve outcomes. Ordered as the caller thinks about them: could not
- * reach, reached but no, reached and yes.
+ * The outcomes, ordered as the caller thinks about them: could not reach,
+ * reached but this is not the person, reached and it leads somewhere,
+ * reached and it is over.
  */
 export const CALL_OUTCOMES: CallOutcomeDefinition[] = [
-  { value: "no_answer",          label: "Nezvedá",                connected: false, requires: null,         primary: true, status: null },
-  { value: "busy",               label: "Obsazeno",               connected: false, requires: null,         status: null },
-  { value: "gatekeeper",         label: "Nepustili mě dál",       connected: false, requires: null,         status: null },
-  { value: "wrong_number",       label: "Špatné číslo",           connected: false, requires: null,         status: "lost" },
-  { value: "not_decision_maker", label: "Není rozhodovatel",      connected: true,  requires: null,         status: null },
-  { value: "send_info",          label: "Poslat informace",       connected: true,  requires: null,         primary: true, status: null },
-  { value: "callback",           label: "Zavolat později",        connected: true,  requires: "callback_at", primary: true, status: "callback" },
-  { value: "not_interested",     label: "Nemá zájem",             connected: true,  requires: null,         primary: true, status: "lost" },
-  { value: "no_budget",          label: "Nemá rozpočet",          connected: true,  requires: null,         status: "lost" },
-  { value: "do_not_call",        label: "Nevolat",                connected: true,  requires: null,         status: "do_not_call" },
-  { value: "meeting_booked",     label: "Domluvená schůzka",      connected: true,  requires: "meeting_at", primary: true, status: "meeting_booked" },
-  { value: "won",                label: "Získaný klient",         connected: true,  requires: null,         status: "won" },
+  // Nedovoláno - firma zůstává otevřená a dostane další pokus.
+  { value: "no_answer", label: "Nezastižen", connected: false, requires: null, primary: true,
+    status: null, retryWorkingDays: 1, companyStatus: "in_progress" },
+  { value: "busy", label: "Nebere telefon", connected: false, requires: null, primary: true,
+    status: null, retryWorkingDays: 1, companyStatus: "in_progress" },
+  { value: "gatekeeper", label: "Nepustili mě dál", connected: false, requires: null,
+    status: null, retryWorkingDays: 2, companyStatus: "in_progress" },
+
+  // Dovoláno, ale tenhle člověk to není.
+  { value: "wrong_number", label: "Špatný kontakt", connected: false, requires: null,
+    status: "lost", companyStatus: "in_progress" },
+  { value: "not_decision_maker", label: "Není rozhodovatel", connected: true, requires: null,
+    status: null, retryWorkingDays: 2, companyStatus: "in_progress" },
+
+  // Dovoláno a někam to vede.
+  { value: "send_info", label: "Zájem — poslat informace", connected: true, requires: null,
+    primary: true, status: null, retryWorkingDays: 3, companyStatus: "interested" },
+  { value: "callback", label: "Volat jindy", connected: true, requires: "callback_at",
+    primary: true, status: "callback", companyStatus: "in_progress" },
+  { value: "meeting_booked", label: "Schůzka sjednána", connected: true, requires: "meeting_at",
+    primary: true, status: "meeting_booked", companyStatus: "meeting" },
+  { value: "won", label: "Získaný klient", connected: true, requires: null,
+    status: "won", companyStatus: "won" },
+
+  // Uzavřeno negativně - další krok se neplánuje.
+  { value: "not_interested", label: "Nemá zájem", connected: true, requires: null,
+    status: "lost", companyStatus: "lost" },
+  { value: "no_budget", label: "Nemá rozpočet", connected: true, requires: null,
+    status: "lost", companyStatus: "lost" },
+  { value: "not_icp", label: "Není ICP", connected: true, requires: null,
+    status: "lost", companyStatus: "lost" },
+  { value: "existing_customer", label: "Již zákazník", connected: true, requires: null,
+    status: "lost", companyStatus: "won" },
+  { value: "do_not_call", label: "Nekontaktovat", connected: true, requires: null,
+    status: "do_not_call", companyStatus: "excluded" },
 ];
 
 const OUTCOME_BY_VALUE = new Map(CALL_OUTCOMES.map((o) => [o.value, o]));
+
+/** Výsledky na hlavních tlačítkách. */
+export const PRIMARY_CALL_OUTCOMES = CALL_OUTCOMES.filter((o) => o.primary);
+/** Zbytek, schovaný pod "Další výsledky". */
+export const SECONDARY_CALL_OUTCOMES = CALL_OUTCOMES.filter((o) => !o.primary);
 
 export function isMeetingOutcome(value: string): value is MeetingOutcome {
   return value in MEETING_OUTCOME_LABELS;
@@ -145,6 +186,33 @@ export function isClosedCallStatus(status: CallStatus): boolean {
 
 // ------------------------------------------------------- applying an outcome
 
+const MS_PER_DAY = 86_400_000;
+
+function isWeekend(date: Date): boolean {
+  const day = date.getDay();
+  return day === 0 || day === 6;
+}
+
+/**
+ * Kdy zkusit znovu, počítáno v pracovních dnech.
+ *
+ * Vrací půlnoc cílového dne, ne "za 24 hodin". Hovor v 16:00 s odkladem
+ * jeden pracovní den má být ve frontě hned ráno druhý den, ne až odpoledne -
+ * jinak by callerovi ráno fronta vypadala prázdně a odpoledne by mu naskočilo
+ * třicet firem naráz.
+ */
+export function nextAttemptAt(from: Date, workingDays: number): Date {
+  const date = new Date(from.getTime());
+  date.setHours(0, 0, 0, 0);
+  let remaining = Math.max(1, Math.round(workingDays));
+  while (remaining > 0) {
+    date.setTime(date.getTime() + MS_PER_DAY);
+    date.setHours(0, 0, 0, 0); // přechod letního času nesmí posunout půlnoc
+    if (!isWeekend(date)) remaining -= 1;
+  }
+  return date;
+}
+
 export interface CallResultInput {
   outcome: CallOutcome;
   /** Attempts made BEFORE this call. */
@@ -154,6 +222,8 @@ export interface CallResultInput {
   meetingAt?: Date | null;
   /** Whether the booked meeting meets the campaign's qualification criteria. */
   meetingQualified?: boolean | null;
+  /** Kdy hovor proběhl. Injektované kvůli testovatelnosti kadence. */
+  now?: Date;
 }
 
 export interface CallResult {
@@ -164,18 +234,26 @@ export interface CallResult {
   meetingBooked: boolean;
   meetingAt: Date | null;
   meetingQualified: boolean | null;
+  /** Stav, který se má propsat do firmy (přes nextCompanyStatus). */
+  companyStatus: CompanyStatus;
 }
 
 /**
  * The one place that decides what a logged call does to a prospect.
  *
- * The attempt limit only ever applies to outcomes that leave the prospect
- * open. A booked meeting on the fifth attempt is a booked meeting, not a
- * prospect who ran out of attempts.
+ * Two rules matter more than the rest:
+ *
+ * 1. Výsledek, který nechá firmu otevřenou, VŽDY nastaví další krok.
+ *    "Nezastižen" bez data dalšího pokusu je přesně ta díra, kvůli které
+ *    firmy tiše vypadnou z procesu - a kterou tenhle produkt řeší.
+ * 2. The attempt limit only ever applies to outcomes that leave the prospect
+ *    open. A booked meeting on the fifth attempt is a booked meeting, not a
+ *    prospect who ran out of attempts.
  */
 export function applyCallOutcome(input: CallResultInput): CallResult {
   const definition = callOutcome(input.outcome);
   const attempts = input.attemptsBefore + 1;
+  const now = input.now ?? new Date();
 
   if (definition.status !== null) {
     return {
@@ -187,20 +265,38 @@ export function applyCallOutcome(input: CallResultInput): CallResult {
       meetingAt: definition.status === "meeting_booked" ? (input.meetingAt ?? null) : null,
       meetingQualified:
         definition.status === "meeting_booked" ? (input.meetingQualified ?? null) : null,
+      companyStatus: definition.companyStatus,
     };
   }
 
-  // Still open. Either keep it in the queue, or retire it because the campaign
-  // says this many attempts is enough.
+  // Still open. Either keep it in the queue with a concrete next attempt, or
+  // retire it because the campaign says this many attempts is enough.
   const exhausted = attempts >= input.maxAttempts;
+  if (exhausted) {
+    return {
+      attempts,
+      status: "max_attempts",
+      connected: definition.connected,
+      nextCallAt: null,
+      meetingBooked: false,
+      meetingAt: null,
+      meetingQualified: null,
+      // Vyčerpané pokusy znamenají, že další krok nikdo neplánuje. Firma se
+      // proto zavírá - s výjimkou zájmu, který si zaslouží člověka, ne
+      // automatické odepsání.
+      companyStatus: definition.companyStatus === "interested" ? "interested" : "lost",
+    };
+  }
+
   return {
     attempts,
-    status: exhausted ? "max_attempts" : "in_progress",
+    status: "in_progress",
     connected: definition.connected,
-    nextCallAt: null,
+    nextCallAt: nextAttemptAt(now, definition.retryWorkingDays ?? 1),
     meetingBooked: false,
     meetingAt: null,
     meetingQualified: null,
+    companyStatus: definition.companyStatus,
   };
 }
 
@@ -214,13 +310,20 @@ export interface QueueCandidate {
   created_at: Date;
 }
 
+/**
+ * Je kontakt splatný? Další krok v budoucnu znamená "ještě to není práce",
+ * a to bez ohledu na stav - od zavedení kadence má datum i `in_progress`.
+ */
+export function isCallDue(candidate: QueueCandidate, now: Date): boolean {
+  return !candidate.next_call_at || candidate.next_call_at.getTime() <= now.getTime();
+}
+
 /** Lower is dialled first. Matches the ORDER BY used by the queue query. */
 export function queuePriority(candidate: QueueCandidate, now: Date): number {
-  if (candidate.call_status === "callback") {
-    // A callback that is already due outranks everything; one in the future is
-    // not work yet and sits behind the rest of the list.
-    return candidate.next_call_at && candidate.next_call_at.getTime() <= now.getTime() ? 0 : 3;
-  }
+  // Naplánováno na později = dnes se nevolá. Dřív to platilo jen pro
+  // callbacky, protože jen ty měly datum; teď ho má každý otevřený kontakt.
+  if (!isCallDue(candidate, now)) return 3;
+  if (candidate.call_status === "callback") return 0;
   if (candidate.call_status === "in_progress") return 1;
   if (candidate.call_status === "new") return 2;
   return 4;

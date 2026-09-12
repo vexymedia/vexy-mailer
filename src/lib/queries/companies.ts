@@ -21,6 +21,75 @@ export type { CompanyPriority, CompanyStatus } from "../companies";
  * už v aplikaci jsou. Žádná z těchto funkcí nic neodesílá ani nevolá.
  */
 
+/**
+ * Další krok firmy: nejbližší naplánovaný hovor nebo domluvená schůzka.
+ *
+ * Funkce, ne konstanta, aby si každý dotaz vzal vlastní fragment. Používá se
+ * i ve WHERE, protože filtr "Bez dalšího kroku" musí platit i pro count -
+ * a ten žádné lateraly nemá.
+ */
+const nextActionAt = () => sql`(
+  select min(t.at)
+    from (
+      select cc.next_call_at as at
+        from campaign_contacts cc join contacts c on c.id = cc.contact_id
+       where c.company_id = co.id
+         and cc.call_status in ('new', 'in_progress', 'callback')
+         and cc.next_call_at is not null
+      union all
+      select cc.meeting_at
+        from campaign_contacts cc join contacts c on c.id = cc.contact_id
+       where c.company_id = co.id and cc.meeting_booked
+         and cc.meeting_at is not null and cc.meeting_outcome = 'scheduled'
+    ) t
+)`;
+
+/** Kolikrát jsme se o firmu pokusili - přes všechny její kontakty dohromady. */
+const companyAttempts = () => sql`(
+  select coalesce(sum(cc.call_attempts), 0)::int
+    from campaign_contacts cc join contacts c on c.id = cc.contact_id
+   where c.company_id = co.id
+)`;
+
+/** Poslední stopa po firmě: hovor, odeslaný e-mail nebo odpověď. */
+const lastActivityAt = () => sql`greatest(
+  (select max(ca.called_at) from call_activities ca
+     join contacts c on c.id = ca.contact_id where c.company_id = co.id),
+  (select max(coalesce(es.sent_at, es.claimed_at)) from email_sends es
+     join campaign_contacts cc on cc.id = es.campaign_contact_id
+     join contacts c on c.id = cc.contact_id where c.company_id = co.id),
+  (select max(r.received_at) from replies r
+     join contacts c on c.id = r.contact_id where c.company_id = co.id)
+)`;
+
+/**
+ * Je aspoň jeden kontakt firmy právě na řadě?
+ *
+ * Stejné podmínky jako fronta volání v queries/calling.ts - firma nesmí
+ * v seznamu tvrdit "je ve frontě", když ji caller nikdy neuvidí.
+ */
+const inCallQueue = () => sql`exists (
+  select 1
+    from campaign_contacts cc
+    join campaigns cp on cp.id = cc.campaign_id
+    join contacts c on c.id = cc.contact_id
+   where c.company_id = co.id
+     and cp.calling_enabled
+     and cc.call_status in ('new', 'in_progress', 'callback')
+     and cc.call_attempts < cp.max_call_attempts
+     and c.phone is not null and btrim(c.phone) <> ''
+     and not exists (select 1 from call_suppression cs where cs.contact_id = cc.contact_id)
+     and (cc.next_call_at is null or cc.next_call_at <= now())
+     and co.status not in ('won', 'lost', 'excluded')
+)`;
+
+/**
+ * Stavy, ve kterých firmu aktivně řešíme. Firma v některém z nich BEZ
+ * dalšího kroku je přesně to, co se v praxi ztratí - proto má vlastní
+ * příznak i vlastní pohled v seznamu.
+ */
+const ACTIVE_COMPANY_STATUSES = ["ready", "in_progress", "interested", "meeting"];
+
 export interface CompanyRow {
   id: string;
   name: string;
@@ -40,7 +109,22 @@ export interface CompanyRow {
   /** Je aspoň jeden kontakt firmy právě ve frontě k oslovení? */
   in_queue: boolean;
   meetings: number;
+  /** Součet pokusů o volání přes všechny kontakty firmy. */
+  attempts: number;
+  /** Aktivní firma bez naplánovaného dalšího kroku. */
+  needs_attention: boolean;
 }
+
+/**
+ * Co dělat s firmou dál:
+ *   `due`   - další krok už měl proběhnout nebo je na dnešek,
+ *   `today` - dnešní follow-up,
+ *   `none`  - aktivní firma, která žádný další krok nemá.
+ */
+export type NextActionFilter = "due" | "today" | "none";
+
+/** Jak dávno se s firmou naposledy něco dělo. */
+export type ActivityFilter = "7d" | "30d" | "stale" | "never";
 
 export interface CompanyFilters {
   search?: string | null;
@@ -49,6 +133,12 @@ export interface CompanyFilters {
   ownerId?: string | null;
   /** Jen firmy, které právě čekají ve frontě k oslovení. */
   queueOnly?: boolean;
+  nextAction?: NextActionFilter | null;
+  activity?: ActivityFilter | null;
+  /** "Zkoušeli jsme to už N×" - pohled na firmy, kde volání nikam nevede. */
+  minAttempts?: number | null;
+  /** Jen firmy s domluvenou schůzkou. */
+  meetingsOnly?: boolean;
   limit?: number;
   offset?: number;
 }
@@ -65,6 +155,10 @@ export async function listCompanies(
   const priority = filters.priority ?? null;
   const ownerId = filters.ownerId ?? null;
   const queueOnly = filters.queueOnly ?? false;
+  const nextAction = filters.nextAction ?? null;
+  const activity = filters.activity ?? null;
+  const minAttempts = filters.minAttempts ?? null;
+  const meetingsOnly = filters.meetingsOnly ?? false;
   const limit = filters.limit ?? 100;
   const offset = filters.offset ?? 0;
 
@@ -79,18 +173,30 @@ export async function listCompanies(
       and (${status}::text is null or co.status = ${status})
       and (${priority}::text is null or co.priority = ${priority})
       and (${ownerId}::uuid is null or co.owner_id = ${ownerId}::uuid)
-      and (${queueOnly} = false or exists (
-            select 1
-              from campaign_contacts cc
-              join campaigns cp on cp.id = cc.campaign_id
-              join contacts c3 on c3.id = cc.contact_id
-             where c3.company_id = co.id
-               and cp.calling_enabled
-               and cc.call_status in ('new', 'in_progress', 'callback')
-               and cc.call_attempts < cp.max_call_attempts
-               and c3.phone is not null and btrim(c3.phone) <> ''
-               and not exists (select 1 from call_suppression cs where cs.contact_id = cc.contact_id)
-               and (cc.call_status <> 'callback' or cc.next_call_at is null or cc.next_call_at <= now())))
+      and (${queueOnly} = false or ${inCallQueue()})
+      and (${meetingsOnly} = false or exists (
+            select 1 from campaign_contacts cc join contacts c4 on c4.id = cc.contact_id
+             where c4.company_id = co.id and cc.meeting_booked))
+      and (${minAttempts}::int is null or ${companyAttempts()} >= ${minAttempts}::int)
+      and case ${nextAction}::text
+            when 'due'   then ${nextActionAt()} is not null
+                            and ${nextActionAt()} < date_trunc('day', now()) + interval '1 day'
+            when 'today' then ${nextActionAt()} >= date_trunc('day', now())
+                            and ${nextActionAt()} < date_trunc('day', now()) + interval '1 day'
+            -- "Bez dalšího kroku" schválně jen pro aktivní firmy. Nová firma,
+            -- kterou jsme ještě nezačali řešit, nikde nechybí.
+            when 'none'  then co.status = any(${ACTIVE_COMPANY_STATUSES}::text[])
+                            and ${nextActionAt()} is null
+            else true
+          end
+      and case ${activity}::text
+            when '7d'    then ${lastActivityAt()} >= now() - interval '7 days'
+            when '30d'   then ${lastActivityAt()} >= now() - interval '30 days'
+            when 'stale' then ${lastActivityAt()} is null
+                            or ${lastActivityAt()} < now() - interval '14 days'
+            when 'never' then ${lastActivityAt()} is null
+            else true
+          end
   `;
 
   const rows = await sql<CompanyRow[]>`
@@ -100,9 +206,12 @@ export async function listCompanies(
            mc.name as main_contact_name,
            mc.email as main_contact_email,
            mc.phone as main_contact_phone,
-           act.last_activity_at,
-           nxt.next_action_at,
-           coalesce(q.in_queue, false) as in_queue,
+           ${lastActivityAt()} as last_activity_at,
+           ${nextActionAt()} as next_action_at,
+           ${inCallQueue()} as in_queue,
+           ${companyAttempts()} as attempts,
+           (co.status = any(${ACTIVE_COMPANY_STATUSES}::text[]) and ${nextActionAt()} is null)
+             as needs_attention,
            coalesce(mt.meetings, 0) as meetings
       from companies co
       left join callers ow on ow.id = co.owner_id
@@ -116,48 +225,6 @@ export async function listCompanies(
          limit 1
       ) mc on true
       left join lateral (
-        select greatest(
-                 (select max(ca.called_at) from call_activities ca
-                    join contacts c on c.id = ca.contact_id where c.company_id = co.id),
-                 (select max(coalesce(es.sent_at, es.claimed_at)) from email_sends es
-                    join campaign_contacts cc on cc.id = es.campaign_contact_id
-                    join contacts c on c.id = cc.contact_id where c.company_id = co.id),
-                 (select max(r.received_at) from replies r
-                    join contacts c on c.id = r.contact_id where c.company_id = co.id)
-               ) as last_activity_at
-      ) act on true
-      left join lateral (
-        -- Další krok je nejbližší z naplánovaného hovoru a domluvené schůzky.
-        -- Bez schůzky by firma s termínem v diáři hlásila "žádný další krok".
-        select min(t.at) as next_action_at
-          from (
-            select cc.next_call_at as at
-              from campaign_contacts cc join contacts c on c.id = cc.contact_id
-             where c.company_id = co.id
-               and cc.call_status in ('new','in_progress','callback')
-               and cc.next_call_at is not null
-            union all
-            select cc.meeting_at
-              from campaign_contacts cc join contacts c on c.id = cc.contact_id
-             where c.company_id = co.id and cc.meeting_booked
-               and cc.meeting_at is not null and cc.meeting_outcome = 'scheduled'
-          ) t
-      ) nxt on true
-      left join lateral (
-        select true as in_queue
-          from campaign_contacts cc
-          join campaigns cp on cp.id = cc.campaign_id
-          join contacts c on c.id = cc.contact_id
-         where c.company_id = co.id
-           and cp.calling_enabled
-           and cc.call_status in ('new', 'in_progress', 'callback')
-           and cc.call_attempts < cp.max_call_attempts
-           and c.phone is not null and btrim(c.phone) <> ''
-           and not exists (select 1 from call_suppression cs where cs.contact_id = cc.contact_id)
-           and (cc.call_status <> 'callback' or cc.next_call_at is null or cc.next_call_at <= now())
-         limit 1
-      ) q on true
-      left join lateral (
         select count(*)::int as meetings
           from campaign_contacts cc
           join contacts c on c.id = cc.contact_id
@@ -165,8 +232,13 @@ export async function listCompanies(
       ) mt on true
       ${where}
      order by
+       -- Práce napřed: co je splatné dnes, pak priorita, pak jméno. Firma bez
+       -- dalšího kroku je taky práce, jen ji nikdo nenaplánoval.
+       case when ${nextActionAt()} < date_trunc('day', now()) + interval '1 day' then 0
+            when co.status = any(${ACTIVE_COMPANY_STATUSES}::text[]) and ${nextActionAt()} is null then 1
+            else 2 end,
        case co.priority when 'high' then 0 when 'normal' then 1 else 2 end,
-       nxt.next_action_at nulls last,
+       ${nextActionAt()} nulls last,
        co.name
      limit ${limit} offset ${offset}
   `;
@@ -190,9 +262,17 @@ export interface CompanyContact {
   call_status: string | null;
   call_attempts: number | null;
   next_call_at: Date | null;
+  last_call_at: Date | null;
+  last_call_outcome: string | null;
   email_status: string | null;
   suppressed: boolean;
   do_not_call: boolean;
+  /**
+   * Jde tomuhle člověku teď zavolat? Stejné podmínky jako fronta - tlačítko
+   * "Zavolat" nesmí vést na kontakt, který je na do-not-call listu nebo
+   * nemá telefon.
+   */
+  callable: boolean;
 }
 
 export interface CompanyDetail extends CompanyRow {
@@ -208,8 +288,12 @@ export async function getCompany(id: string): Promise<CompanyDetail | null> {
            co.owner_id, ow.name as owner_name, co.note, co.created_at,
            (select count(*)::int from contacts c where c.company_id = co.id) as contacts_count,
            mc.name as main_contact_name, mc.email as main_contact_email, mc.phone as main_contact_phone,
-           act.last_activity_at, nxt.next_action_at,
-           false as in_queue,
+           ${lastActivityAt()} as last_activity_at,
+           ${nextActionAt()} as next_action_at,
+           ${inCallQueue()} as in_queue,
+           ${companyAttempts()} as attempts,
+           (co.status = any(${ACTIVE_COMPANY_STATUSES}::text[]) and ${nextActionAt()} is null)
+             as needs_attention,
            coalesce(mt.meetings, 0) as meetings,
            coalesce(qual.criteria, '{}') as qualification
       from companies co
@@ -220,34 +304,6 @@ export async function getCompany(id: string): Promise<CompanyDetail | null> {
           from contacts c where c.company_id = co.id
          order by (c.phone is null or btrim(c.phone) = ''), c.created_at, c.id limit 1
       ) mc on true
-      left join lateral (
-        select greatest(
-                 (select max(ca.called_at) from call_activities ca
-                    join contacts c on c.id = ca.contact_id where c.company_id = co.id),
-                 (select max(coalesce(es.sent_at, es.claimed_at)) from email_sends es
-                    join campaign_contacts cc on cc.id = es.campaign_contact_id
-                    join contacts c on c.id = cc.contact_id where c.company_id = co.id),
-                 (select max(r.received_at) from replies r
-                    join contacts c on c.id = r.contact_id where c.company_id = co.id)
-               ) as last_activity_at
-      ) act on true
-      left join lateral (
-        -- Další krok je nejbližší z naplánovaného hovoru a domluvené schůzky.
-        -- Bez schůzky by firma s termínem v diáři hlásila "žádný další krok".
-        select min(t.at) as next_action_at
-          from (
-            select cc.next_call_at as at
-              from campaign_contacts cc join contacts c on c.id = cc.contact_id
-             where c.company_id = co.id
-               and cc.call_status in ('new','in_progress','callback')
-               and cc.next_call_at is not null
-            union all
-            select cc.meeting_at
-              from campaign_contacts cc join contacts c on c.id = cc.contact_id
-             where c.company_id = co.id and cc.meeting_booked
-               and cc.meeting_at is not null and cc.meeting_outcome = 'scheduled'
-          ) t
-      ) nxt on true
       left join lateral (
         select count(*)::int as meetings from campaign_contacts cc
           join contacts c on c.id = cc.contact_id
@@ -272,9 +328,17 @@ export async function listCompanyContacts(companyId: string): Promise<CompanyCon
     select c.id, c.email, c.phone, c.first_name, c.last_name,
            cc.id as campaign_contact_id, cp.name as campaign_name,
            cc.call_status, cc.call_attempts, cc.next_call_at,
+           cc.last_call_at, cc.last_call_outcome,
            cc.status as email_status,
            exists (select 1 from suppression_list s where s.email = c.email) as suppressed,
-           exists (select 1 from call_suppression cs where cs.contact_id = c.id) as do_not_call
+           exists (select 1 from call_suppression cs where cs.contact_id = c.id) as do_not_call,
+           (cc.id is not null
+            and cp.calling_enabled
+            and cc.call_status in ('new', 'in_progress', 'callback')
+            and cc.call_attempts < cp.max_call_attempts
+            and c.phone is not null and btrim(c.phone) <> ''
+            and not exists (select 1 from call_suppression cs2 where cs2.contact_id = c.id))
+             as callable
       from contacts c
       left join lateral (
         select cc2.* from campaign_contacts cc2
@@ -288,11 +352,6 @@ export async function listCompanyContacts(companyId: string): Promise<CompanyCon
   `;
 }
 
-/**
- * Celá historie firmy na jednom místě: hovory, e-maily i odpovědi napříč
- * všemi kontakty a kampaněmi. Staví na stejných tabulkách jako timeline
- * jednoho kontaktu, jen o úroveň výš.
- */
 export async function getCompanyTimeline(companyId: string): Promise<TimelineEntry[]> {
   return sql<TimelineEntry[]>`
     select ca.id::text as id, 'call' as kind, ca.called_at as occurred_at,
