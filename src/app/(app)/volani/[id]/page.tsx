@@ -1,10 +1,10 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { getNextCall, getCampaignCallingReport, listCallers } from "@/lib/queries/calling";
+import { getHeldCall, getCampaignCallingReport, listCallers } from "@/lib/queries/calling";
 import { getSelectedCallerId } from "@/lib/caller-session";
 import { CallerPicker } from "@/components/caller-picker";
 import { ActionForm, SubmitButton } from "@/components/action-form";
-import { clearCallerAction } from "@/lib/actions";
+import { clearCallerAction, nextCallAction } from "@/lib/actions";
 import { PageHeader, EmptyState, Stat } from "@/components/ui";
 import { CallWorkspace } from "@/components/call-workspace";
 
@@ -57,11 +57,17 @@ export default async function CallerWorkspacePage({
     );
   }
 
+  // Read-only: the workspace shows whichever prospect this caller already
+  // holds. Taking a lease is an action, never a render - a prefetch of this
+  // page must not reserve anybody.
   const [next, report] = await Promise.all([
-    getNextCall(id, caller.id),
+    getHeldCall(id, caller.id),
     getCampaignCallingReport(id),
   ]);
 
+  // Nothing held: either the shift is starting, the lease ran out while the
+  // caller was away, or the queue is empty. The first two are one press away;
+  // the third has nothing to press.
   if (!next) {
     const [campaign] = await import("@/lib/db").then(({ sql }) =>
       sql<{ name: string }[]>`select name from campaigns where id = ${id}`,
@@ -71,14 +77,30 @@ export default async function CallerWorkspacePage({
       <>
         <PageHeader
           title={campaign.name}
-          description="Fronta volání"
+          description={`Volá ${caller.name}`}
           actions={<Link href={`/campaigns/${id}?tab=volani`} className="btn-secondary">Přehled kampaně</Link>}
         />
-        <EmptyState
-          title="Fronta je prázdná"
-          description="Nikdo další k volání není: buď jsou všichni vyřízení, vyčerpali pokusy, nemají telefon, nebo mají callback až na později."
-          action={{ href: "/volani", label: "Zpět na kampaně" }}
-        />
+        {report.queue_size === 0 ? (
+          <EmptyState
+            title="Fronta je prázdná"
+            description="Nikdo další k volání není: buď jsou všichni vyřízení, vyčerpali pokusy, nemají telefon, nebo mají callback až na později."
+            action={{ href: "/volani", label: "Zpět na kampaně" }}
+          />
+        ) : (
+          <ActionForm action={nextCallAction} className="card max-w-md p-6">
+            <input type="hidden" name="campaign_id" value={id} />
+            <h2 className="mb-1 text-sm font-semibold text-zinc-900">
+              Ve frontě čeká {report.queue_size} kontaktů
+            </h2>
+            <p className="mb-4 text-xs text-zinc-500">
+              Kontakt se rezervuje až teď, aby ho mezitím nedostal jiný caller. Samotné otevření
+              stránky nikoho neblokuje.
+            </p>
+            <SubmitButton className="btn-go" pendingLabel="Načítám…">
+              Načíst další kontakt
+            </SubmitButton>
+          </ActionForm>
+        )}
       </>
     );
   }

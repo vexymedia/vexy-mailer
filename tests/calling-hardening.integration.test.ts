@@ -213,6 +213,89 @@ describe("two callers are never handed the same prospect", () => {
   });
 });
 
+describe("a lease comes from an action, never from a render", () => {
+  async function lockedCount(): Promise<number> {
+    const [row] = await sql<{ count: number }[]>`
+      select count(*)::int from campaign_contacts where call_locked_until is not null
+    `;
+    return row.count;
+  }
+
+  it("renders and prefetches without reserving anybody", async () => {
+    const seed = await seedCalling({ contacts: 3 });
+
+    // Everything the workspace touches while it renders, several times over -
+    // a router prefetch, the render itself, a stray refresh.
+    for (let render = 0; render < 3; render++) {
+      await calling.getHeldCall(seed.campaignId, seed.callerId);
+      await calling.getNextCall(seed.campaignId, seed.callerId);
+      await calling.listCallQueue(seed.campaignId, { callerId: seed.callerId });
+      await calling.getCampaignCallingReport(seed.campaignId);
+    }
+
+    expect(await lockedCount()).toBe(0);
+
+    // Another caller is still offered everyone, because nobody was taken out
+    // of the queue by the first caller merely looking at the page.
+    const other = await calling.createCaller({ name: "Petra", email: null, phone: null });
+    expect(await calling.listCallQueue(seed.campaignId, { callerId: other })).toHaveLength(3);
+  });
+
+  it("reserves exactly one prospect when the caller actually asks", async () => {
+    const seed = await seedCalling({ contacts: 3 });
+    expect(await lockedCount()).toBe(0);
+
+    const claimed = await calling.claimNextCall(seed.campaignId, seed.callerId);
+    expect(claimed).not.toBeNull();
+    expect(await lockedCount()).toBe(1);
+
+    const held = await calling.getHeldCall(seed.campaignId, seed.callerId);
+    expect(held?.prospect.id).toBe(claimed);
+  });
+
+  it("shows the same prospect on refresh without taking a second lease", async () => {
+    const seed = await seedCalling({ contacts: 3 });
+    const claimed = await calling.claimNextCall(seed.campaignId, seed.callerId);
+
+    const [before] = await sql<{ call_locked_until: Date }[]>`
+      select call_locked_until from campaign_contacts where id = ${claimed}
+    `;
+
+    for (let refresh = 0; refresh < 4; refresh++) {
+      expect((await calling.getHeldCall(seed.campaignId, seed.callerId))?.prospect.id).toBe(claimed);
+    }
+
+    expect(await lockedCount()).toBe(1);
+    const [after] = await sql<{ call_locked_until: Date }[]>`
+      select call_locked_until from campaign_contacts where id = ${claimed}
+    `;
+    // Reading does not extend the lease either, so an abandoned tab still
+    // frees the prospect on schedule.
+    expect(after.call_locked_until.getTime()).toBe(before.call_locked_until.getTime());
+  });
+
+  it("holds nothing for a caller who has not asked yet", async () => {
+    const seed = await seedCalling({ contacts: 2 });
+    const other = await calling.createCaller({ name: "Petra", email: null, phone: null });
+
+    await calling.claimNextCall(seed.campaignId, seed.callerId);
+
+    // The second caller's workspace renders; it must show them nothing held,
+    // not somebody else's prospect.
+    expect(await calling.getHeldCall(seed.campaignId, other)).toBeNull();
+  });
+
+  it("stops showing a held prospect once they are decided", async () => {
+    const seed = await seedCalling({ contacts: 2 });
+    const claimed = await calling.claimNextCall(seed.campaignId, seed.callerId);
+    await calling.logCall({ campaignContactId: claimed!, outcome: "not_interested", callerId: seed.callerId });
+
+    // Logging released the lease, so the workspace falls back to asking.
+    expect(await calling.getHeldCall(seed.campaignId, seed.callerId)).toBeNull();
+    expect(await lockedCount()).toBe(0);
+  });
+});
+
 describe("the meeting lifecycle", () => {
   async function bookOne() {
     const seed = await seedCalling({ contacts: 1 });

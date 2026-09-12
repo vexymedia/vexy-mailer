@@ -178,19 +178,14 @@ export async function releaseCall(campaignContactId: string): Promise<void> {
   `;
 }
 
-export async function getNextCall(
+/**
+ * The campaign's own details and the script, for whichever prospect is being
+ * shown. Split out because both the read-only peek and the held-prospect view
+ * need it and neither may mutate anything to get it.
+ */
+async function callContext(
   campaignId: string,
-  callerId?: string | null,
-): Promise<NextCall | null> {
-  // With a known caller the prospect is leased, so nobody else is handed the
-  // same person. Without one (a read-only preview) the queue is only read.
-  if (callerId) {
-    const claimed = await claimNextCall(campaignId, callerId);
-    if (!claimed) return null;
-  }
-  const queue = await listCallQueue(campaignId, { limit: 50, callerId });
-  if (queue.length === 0) return null;
-
+): Promise<Pick<NextCall, "campaign" | "script"> | null> {
   const [campaign] = await sql<
     {
       id: string;
@@ -210,7 +205,6 @@ export async function getNextCall(
   if (!campaign) return null;
 
   return {
-    prospect: queue[0],
     campaign: { id: campaign.id, name: campaign.name, max_call_attempts: campaign.max_call_attempts },
     script: {
       opening: campaign.script_opening,
@@ -219,8 +213,64 @@ export async function getNextCall(
       closing: campaign.script_closing,
       qualification: campaign.qualification_criteria,
     },
-    remaining: queue.length,
   };
+}
+
+/**
+ * Read-only peek at the head of the queue. Leases nothing.
+ *
+ * Rendering a page must never reserve a prospect: a Next.js prefetch, a double
+ * render or a stray refresh would take somebody out of every other caller's
+ * queue for five minutes without a human ever seeing them. Reserving is
+ * claimNextCall(), and only an explicit action calls it.
+ */
+export async function getNextCall(
+  campaignId: string,
+  callerId?: string | null,
+): Promise<NextCall | null> {
+  const queue = await listCallQueue(campaignId, { limit: 50, callerId });
+  if (queue.length === 0) return null;
+  const context = await callContext(campaignId);
+  if (!context) return null;
+  return { ...context, prospect: queue[0], remaining: queue.length };
+}
+
+/**
+ * The prospect this caller is currently holding, if any.
+ *
+ * This is what the workspace renders, so a refresh shows the same person and
+ * costs nothing: the lease already exists and is not touched, extended or
+ * replaced by looking at it.
+ */
+export async function getHeldCall(
+  campaignId: string,
+  callerId: string,
+): Promise<NextCall | null> {
+  const [prospect] = await sql<CallQueueRow[]>`
+    select cc.id, cc.contact_id, c.email, c.phone, c.first_name, c.last_name,
+           c.company, c.website, cc.call_status, cc.call_attempts, cc.last_call_at,
+           cc.next_call_at, cc.last_call_outcome, cc.call_note, cc.assigned_caller_id,
+           ca.name as assigned_caller_name, cc.created_at
+      from campaign_contacts cc
+      join campaigns cp on cp.id = cc.campaign_id
+      join contacts c on c.id = cc.contact_id
+      left join callers ca on ca.id = cc.assigned_caller_id
+     where cc.campaign_id = ${campaignId}
+       and cc.call_locked_by = ${callerId}
+       and cc.call_locked_until > now()
+       -- A lease is not a reason to show somebody who has since been decided,
+       -- run out of attempts or landed on the do-not-call list.
+       and cc.call_status in ('new', 'in_progress', 'callback')
+       and cc.call_attempts < cp.max_call_attempts
+       and not exists (select 1 from call_suppression cs where cs.contact_id = cc.contact_id)
+     limit 1
+  `;
+  if (!prospect) return null;
+  const context = await callContext(campaignId);
+  if (!context) return null;
+
+  const queue = await listCallQueue(campaignId, { limit: 50, callerId });
+  return { ...context, prospect, remaining: Math.max(queue.length, 1) };
 }
 
 // -------------------------------------------------------------- logging

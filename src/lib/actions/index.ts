@@ -27,7 +27,14 @@ import {
   sendManualReply,
   setClassification,
 } from "@/lib/queries/inbox";
-import { createCaller, logCall, releaseCall, setCallerActive, updateMeeting } from "@/lib/queries/calling";
+import {
+  claimNextCall,
+  createCaller,
+  logCall,
+  releaseCall,
+  setCallerActive,
+  updateMeeting,
+} from "@/lib/queries/calling";
 import { clearSelectedCaller, getSelectedCallerId, setSelectedCallerId } from "@/lib/caller-session";
 import { callOutcomeLabel, isCallOutcome, isMeetingOutcome, type MeetingOutcome } from "@/lib/calling";
 import type { Classification } from "@/lib/types";
@@ -594,12 +601,14 @@ export async function logCallAction(_prev: ActionState, formData: FormData): Pro
     return fail("Hodnota obchodu musí být číslo.");
   }
 
+  // From the session, not the form: an outcome is attributed to whoever is
+  // actually at this workstation, and a stale tab cannot credit someone else.
+  const callerId = await getSelectedCallerId();
+
   const result = await logCall({
     campaignContactId,
     outcome,
-    // From the session, not the form: an outcome is attributed to whoever is
-    // actually at this workstation, and a stale tab cannot credit someone else.
-    callerId: await getSelectedCallerId(),
+    callerId,
     note: String(formData.get("note") ?? "") || null,
     callbackAt,
     meetingAt,
@@ -607,6 +616,11 @@ export async function logCallAction(_prev: ActionState, formData: FormData): Pro
     dealValue,
   });
   if (!result.ok) return fail(result.error ?? "Hovor se nepodařilo uložit.");
+
+  // Submitting an outcome is the caller asking for the next number, so the
+  // next prospect is reserved here - by an action - and not by the render that
+  // follows it. Nothing else in the workspace ever takes a lease.
+  if (result.campaignId && callerId) await claimNextCall(result.campaignId, callerId);
 
   revalidatePath("/volani", "layout");
   if (result.campaignId) revalidatePath(`/campaigns/${result.campaignId}`);
@@ -763,6 +777,7 @@ export async function selectCallerAction(_prev: ActionState, formData: FormData)
   if (!caller) return fail("Tento caller neexistuje nebo je deaktivovaný.");
 
   await setSelectedCallerId(callerId);
+  if (campaignId) await claimNextCall(campaignId, callerId);
   redirect(campaignId ? `/volani/${campaignId}` : "/volani");
 }
 
@@ -776,4 +791,21 @@ export async function clearCallerAction(_prev: ActionState, formData: FormData):
   if (holding) await releaseCall(holding);
   await clearSelectedCaller();
   redirect(String(formData.get("campaign_id") ?? "") ? `/volani/${formData.get("campaign_id")}` : "/volani");
+}
+
+/**
+ * Hands the caller the next prospect. The only other place a lease is taken,
+ * and it exists because a lease must come from somebody pressing something -
+ * never from a page rendering or a router prefetching it.
+ */
+export async function nextCallAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  await requireAuth();
+  const campaignId = String(formData.get("campaign_id") ?? "");
+  const callerId = await getSelectedCallerId();
+  if (!campaignId || !callerId) return fail("Nejdřív vyberte, kdo volá.");
+
+  const claimed = await claimNextCall(campaignId, callerId);
+  revalidatePath(`/volani/${campaignId}`);
+  if (!claimed) return { success: "Fronta je prázdná — nikdo další k volání není." };
+  return {};
 }
