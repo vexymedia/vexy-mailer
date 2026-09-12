@@ -42,6 +42,9 @@ export interface CallQueueRow {
   assigned_caller_id: string | null;
   assigned_caller_name: string | null;
   created_at: Date;
+  company_id: string | null;
+  campaign_id: string;
+  campaign_name: string;
 }
 
 /**
@@ -58,7 +61,7 @@ export interface CallQueueRow {
  * unit-tested.
  */
 export async function listCallQueue(
-  campaignId: string,
+  campaignId: string | null,
   options: { limit?: number; callerId?: string | null } = {},
 ): Promise<CallQueueRow[]> {
   const callerId = options.callerId ?? null;
@@ -66,12 +69,16 @@ export async function listCallQueue(
     select cc.id, cc.contact_id, c.email, c.phone, c.first_name, c.last_name,
            c.company, c.website, cc.call_status, cc.call_attempts, cc.last_call_at,
            cc.next_call_at, cc.last_call_outcome, cc.call_note, cc.assigned_caller_id,
-           ca.name as assigned_caller_name, cc.created_at
+           ca.name as assigned_caller_name, cc.created_at,
+           c.company_id, cp.id as campaign_id, cp.name as campaign_name
       from campaign_contacts cc
       join campaigns cp on cp.id = cc.campaign_id
       join contacts c on c.id = cc.contact_id
       left join callers ca on ca.id = cc.assigned_caller_id
-     where cc.campaign_id = ${campaignId}
+     -- null = napříč kampaněmi. Denní fronta se neptá, ze které kampaně
+     -- firma pochází; caller potřebuje vědět, komu volat, ne pod co to spadá.
+     where (${campaignId}::uuid is null or cc.campaign_id = ${campaignId}::uuid)
+       and cp.calling_enabled
        and cc.call_status in ('new', 'in_progress', 'callback')
        and cc.call_attempts < cp.max_call_attempts
        and c.phone is not null and btrim(c.phone) <> ''
@@ -136,7 +143,10 @@ const CALL_LEASE_MINUTES = 5;
  * idempotent for the caller who already holds the lease - it just extends it -
  * so a re-render hands back the same prospect rather than skipping to the next.
  */
-export async function claimNextCall(campaignId: string, callerId: string): Promise<string | null> {
+export async function claimNextCall(
+  campaignId: string | null,
+  callerId: string,
+): Promise<string | null> {
   const [row] = await sql<{ id: string }[]>`
     update campaign_contacts cc
        set call_locked_by = ${callerId}, call_locked_until = now() + interval '${sql.unsafe(String(CALL_LEASE_MINUTES))} minutes'
@@ -145,7 +155,8 @@ export async function claimNextCall(campaignId: string, callerId: string): Promi
          from campaign_contacts inner_cc
          join campaigns cp on cp.id = inner_cc.campaign_id
          join contacts c on c.id = inner_cc.contact_id
-        where inner_cc.campaign_id = ${campaignId}
+        where (${campaignId}::uuid is null or inner_cc.campaign_id = ${campaignId}::uuid)
+          and cp.calling_enabled
           and inner_cc.call_status in ('new', 'in_progress', 'callback')
           and inner_cc.call_attempts < cp.max_call_attempts
           and c.phone is not null and btrim(c.phone) <> ''
@@ -225,12 +236,14 @@ async function callContext(
  * claimNextCall(), and only an explicit action calls it.
  */
 export async function getNextCall(
-  campaignId: string,
+  campaignId: string | null,
   callerId?: string | null,
 ): Promise<NextCall | null> {
   const queue = await listCallQueue(campaignId, { limit: 50, callerId });
   if (queue.length === 0) return null;
-  const context = await callContext(campaignId);
+  // Kontext se bere z kampaně, do které prospekt patří - napříč kampaněmi
+  // by jedno zvolené id ukázalo cizí skript i cizí kritéria.
+  const context = await callContext(queue[0].campaign_id);
   if (!context) return null;
   return { ...context, prospect: queue[0], remaining: queue.length };
 }
@@ -243,19 +256,20 @@ export async function getNextCall(
  * replaced by looking at it.
  */
 export async function getHeldCall(
-  campaignId: string,
+  campaignId: string | null,
   callerId: string,
 ): Promise<NextCall | null> {
   const [prospect] = await sql<CallQueueRow[]>`
     select cc.id, cc.contact_id, c.email, c.phone, c.first_name, c.last_name,
            c.company, c.website, cc.call_status, cc.call_attempts, cc.last_call_at,
            cc.next_call_at, cc.last_call_outcome, cc.call_note, cc.assigned_caller_id,
-           ca.name as assigned_caller_name, cc.created_at
+           ca.name as assigned_caller_name, cc.created_at,
+           c.company_id, cp.id as campaign_id, cp.name as campaign_name
       from campaign_contacts cc
       join campaigns cp on cp.id = cc.campaign_id
       join contacts c on c.id = cc.contact_id
       left join callers ca on ca.id = cc.assigned_caller_id
-     where cc.campaign_id = ${campaignId}
+     where (${campaignId}::uuid is null or cc.campaign_id = ${campaignId}::uuid)
        and cc.call_locked_by = ${callerId}
        and cc.call_locked_until > now()
        -- A lease is not a reason to show somebody who has since been decided,
@@ -266,7 +280,7 @@ export async function getHeldCall(
      limit 1
   `;
   if (!prospect) return null;
-  const context = await callContext(campaignId);
+  const context = await callContext(prospect.campaign_id);
   if (!context) return null;
 
   const queue = await listCallQueue(campaignId, { limit: 50, callerId });

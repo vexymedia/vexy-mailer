@@ -3,6 +3,7 @@ import { sql } from "@/lib/db";
 import { getInboxCounts, listConversations, type InboxFilters } from "@/lib/queries/inbox";
 import { PageHeader, Table, EmptyState, DateTime } from "@/components/ui";
 import { ClassificationBadge } from "@/components/inbox-bits";
+import { KomunikaceTabs } from "@/components/section-tabs";
 
 export const dynamic = "force-dynamic";
 
@@ -44,9 +45,10 @@ export default async function InboxPage({
   return (
     <>
       <PageHeader
-        title="Doručená pošta"
-        description="Odpovědi ze všech schránek na jednom místě."
+        title="Odpovědi"
+        description="Reakce ze všech schránek na jednom místě."
       />
+      <KomunikaceTabs active={"/inbox"} />
 
       <div className="mb-5 flex flex-wrap items-center gap-2">
         {FILTERS.map((f) => {

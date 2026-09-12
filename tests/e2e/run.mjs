@@ -196,10 +196,11 @@ try {
   await shot(page, "campaign-active");
 
   // ---- worker -----------------------------------------------------------
-  await page.goto(`${BASE}/`);
+  // Technická věc: patří do Nastavení, ne mezi hlavní akce na Přehledu.
+  await page.goto(`${BASE}/settings`);
   await page.click('button:has-text("Spustit worker")');
   await expectVisible(page, "text=simulated", "the worker runs and simulates a send in test mode");
-  await shot(page, "dashboard-active");
+  await shot(page, "worker-run");
 
   await page.goto(`${campaignUrl}?tab=aktivita`);
   await expectVisible(page, "text=E-mail krok 1 simulován", "the activity log records the simulated send");
@@ -292,7 +293,7 @@ try {
 
   // ---- inbox ------------------------------------------------------------
   await page.goto(`${BASE}/inbox`);
-  await expectVisible(page, "h1:has-text('Doručená pošta')", "the Inbox page renders");
+  await expectVisible(page, "h1:has-text('Odpovědi')", "the Inbox page renders");
   await expectVisible(page, "text=Zatím žádné odpovědi", "an empty inbox says so");
   for (const label of ["Vše", "Nepřečtené", "Pozitivní", "Vyžaduje akci"]) {
     await expectVisible(page, `a:has-text("${label}")`, `inbox filter "${label}" is present`);
@@ -307,7 +308,7 @@ try {
   await shot(page, "mailboxes");
 
   // ---- other pages render ----------------------------------------------
-  for (const [path, heading] of [["/activity", "Aktivita"], ["/campaigns", "Kampaně"], ["/contacts", "Kontakty"], ["/inbox", "Doručená pošta"], ["/calleri", "Calleři"], ["/volani", "Volání"]]) {
+  for (const [path, heading] of [["/activity", "Aktivita"], ["/campaigns", "Kampaně"], ["/contacts", "Kontakty"], ["/inbox", "Odpovědi"], ["/tym", "Tým"], ["/volani", "Volání"], ["/firmy", "Firmy"], ["/osloveni/fronta", "Fronta"], ["/osloveni/plan", "Plán"]]) {
     await page.goto(BASE + path);
     await expectVisible(page, `h1:has-text("${heading}")`, `${path} renders`);
   }
@@ -315,9 +316,9 @@ try {
   // ---- calling ----------------------------------------------------------
   // The whole caller journey: a caller exists, the campaign is switched on,
   // the queue offers someone, and one logged outcome books a qualified meeting.
-  await page.goto(`${BASE}/calleri`);
+  await page.goto(`${BASE}/tym`);
   await page.fill('input[name="name"]', "Jan Caller");
-  await page.click('button:has-text("Přidat callera")');
+  await page.click('button:has-text("Přidat do týmu")');
   await expectVisible(page, "text=Caller Jan Caller přidán", "a caller can be added");
   await expectVisible(page, "text=aktivní", "a new caller is active");
 
@@ -371,6 +372,55 @@ try {
   await page.goto(`${campaignUrl}?tab=ekonomika`);
   await expectVisible(page, "h2:has-text('Náklad na výsledek')", "the economics tab renders");
   await shot(page, "calling-economics");
+
+  // ---- nová informační architektura --------------------------------------
+  await page.goto(`${BASE}/`);
+  for (const label of ["Přehled", "Firmy", "Oslovení", "Komunikace", "Aktivita", "Tým", "Nastavení"]) {
+    await expectVisible(page, `aside a:has-text("${label}")`, `sidebar má položku "${label}"`);
+  }
+  // Worker ani počty odeslaných e-mailů už nejsou tím hlavním na Přehledu.
+  await expectVisible(page, "text=Připravené firmy", "Přehled vede KPI o firmách");
+  await expectVisible(page, "text=Dnes řešit", "Přehled vede k dnešní práci");
+  const overviewHtml = await page.content();
+  if (!/Spustit worker/.test(overviewHtml)) ok("worker už není CTA na Přehledu");
+  else fail("worker už není CTA na Přehledu", "tlačítko je pořád na dashboardu");
+  await shot(page, "prehled");
+
+  // ---- firmy --------------------------------------------------------------
+  await page.goto(`${BASE}/firmy`);
+  await expectVisible(page, "h1:has-text('Firmy')", "Firmy se vykreslí");
+  await expectVisible(page, "text=Acme", "firma vznikla z importovaných kontaktů");
+  await expectVisible(page, 'a:has-text("Čeká na oslovení")', "Firmy mají jednoduchý filtr");
+  await page.click("table a[href^='/firmy/']");
+  await page.waitForURL(/\/firmy\/[0-9a-f-]+/);
+  await expectVisible(page, "text=Proč ji řešíme", "detail firmy vede důvodem");
+  await expectVisible(page, "text=Koho kontaktovat", "detail firmy ukáže kontaktní osoby");
+  await expectVisible(page, "text=Co se stalo", "detail firmy má historii");
+
+  await page.fill('textarea[name="reason"]', "Výrobní firma, expanduje, nemá vlastní obchodní tým");
+  await page.selectOption('select[name="priority"]', "high");
+  await page.click('button:has-text("Uložit")');
+  await expectVisible(page, "text=Uloženo", "kontext firmy jde uložit");
+  await shot(page, "firma-detail");
+
+  // ---- oslovení -----------------------------------------------------------
+  await page.goto(`${BASE}/osloveni`);
+  await expectVisible(page, "h1:has-text('Oslovení')", "Oslovení se vykreslí");
+  for (const label of ["Dnes", "Fronta", "Plán"]) {
+    await expectVisible(page, `a:has-text("${label}")`, `Oslovení má záložku "${label}"`);
+  }
+
+  await page.goto(`${BASE}/osloveni/plan`);
+  await expectVisible(page, "h1:has-text('Plán')", "týdenní plán se vykreslí");
+  await page.fill('input[name="start"]', "09:00");
+  await page.fill('input[name="end"]', "11:00");
+  await page.selectOption('select[name="activity_type"]', "follow_up");
+  await page.fill('input[name="note"]', "Follow-upy po videu");
+  await page.click('button:has-text("Přidat blok")');
+  await expectVisible(page, "text=Blok naplánován", "do plánu jde přidat blok práce");
+  await expectVisible(page, "text=Follow-upy po videu", "blok je v týdnu vidět");
+  await expectVisible(page, 'a:has-text("Začít")', "z bloku se dá jít rovnou do fronty");
+  await shot(page, "plan");
 
   // ---- unauthenticated cron endpoint ------------------------------------
   const unauth = await page.request.post(`${BASE}/api/cron/tick`);

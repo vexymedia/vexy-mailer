@@ -106,7 +106,7 @@ export async function startCampaign(campaignId: string): Promise<CampaignReadine
   });
 
   await logActivity({
-    action: campaign.started_at ? "Campaign resumed" : "Campaign started",
+    action: campaign.started_at ? "Kampaň obnovena" : "Kampaň spuštěna",
     campaignId,
     detail: `First send window opens ${firstOpening.toISOString()}`,
   });

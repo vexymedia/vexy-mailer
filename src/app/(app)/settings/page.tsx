@@ -1,6 +1,8 @@
 import { getSettings } from "@/lib/settings";
 import { PageHeader } from "@/components/ui";
 import { SettingsForm } from "@/components/settings-form";
+import { RunWorkerButton } from "@/components/run-worker-button";
+import { NastaveniTabs } from "@/components/section-tabs";
 import { appUrl } from "@/lib/unsubscribe";
 
 export const dynamic = "force-dynamic";
@@ -11,6 +13,7 @@ export default async function SettingsPage() {
   return (
     <>
       <PageHeader title="Nastavení" />
+      <NastaveniTabs active={"/settings"} />
       <div className="max-w-2xl space-y-6">
         <SettingsForm
           testMode={settings.test_mode}
@@ -19,7 +22,10 @@ export default async function SettingsPage() {
         />
 
         <div className="card p-6">
-          <h2 className="mb-3 text-sm font-semibold text-zinc-900">Worker</h2>
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+            <h2 className="text-sm font-semibold text-zinc-900">Worker</h2>
+            <RunWorkerButton />
+          </div>
           <p className="text-sm text-zinc-600">
             Odesílací engine běží, když něco zavolá tick endpoint. Je idempotentní, takže volat ho
             častěji, než je potřeba, nic nerozbije.

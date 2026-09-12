@@ -51,7 +51,11 @@ export default async function CallerWorkspacePage({
             action={{ href: "/calleri", label: "Přidat callera" }}
           />
         ) : (
-          <CallerPicker campaignId={id} callers={callers.map((c) => ({ id: c.id, name: c.name }))} />
+          <CallerPicker
+            campaignId={id}
+            next={`/volani/${id}`}
+            callers={callers.map((c) => ({ id: c.id, name: c.name }))}
+          />
         )}
       </>
     );
@@ -144,6 +148,7 @@ export default async function CallerWorkspacePage({
             maxAttempts={next.campaign.max_call_attempts}
             qualificationCriteria={next.script.qualification}
             callerName={caller.name}
+            campaignScope={id}
           />
           <p className="mt-3 text-xs text-zinc-500">
             <Link href={`/kontakt/${next.prospect.id}`} className="underline">

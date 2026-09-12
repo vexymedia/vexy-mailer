@@ -3,6 +3,7 @@ import { sql } from "@/lib/db";
 import { listMailboxes } from "@/lib/queries/mailboxes";
 import { allMailboxCapacity } from "@/lib/engine/allocation";
 import { PageHeader, Table, EmptyState, DateTime } from "@/components/ui";
+import { NastaveniTabs } from "@/components/section-tabs";
 
 export const dynamic = "force-dynamic";
 
@@ -29,6 +30,7 @@ export default async function MailboxesPage() {
         description="Každá schránka má vlastní denní limit, který platí napříč všemi kampaněmi."
         actions={<Link href="/mailboxes/new" className="btn-primary">Přidat schránku</Link>}
       />
+      <NastaveniTabs active={"/mailboxes"} />
 
       {mailboxes.length === 0 ? (
         <EmptyState

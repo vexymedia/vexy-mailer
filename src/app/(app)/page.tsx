@@ -1,113 +1,158 @@
 import Link from "next/link";
-import { describeSenderPool, getGlobalStats, listCampaignStats } from "@/lib/queries/dashboard";
-import { explainNextSend, formatSendDays, minutesToHHMM } from "@/lib/schedule";
-import { PageHeader, Stat, StatusBadge, EmptyState } from "@/components/ui";
-import { RunWorkerButton } from "@/components/run-worker-button";
+import { getOverviewStats, getTodayWork, getWeekSummary } from "@/lib/queries/overview";
+import { listActivity } from "@/lib/queries/dashboard";
+import { PageHeader, StatCard, EmptyState, DateTime } from "@/components/ui";
 
 export const dynamic = "force-dynamic";
 
-function replyRate(replies: number, sent: number): string {
-  if (sent === 0) return "—";
-  return `${((replies / sent) * 100).toFixed(1)} %`;
-}
+/**
+ * Přehled odpovídá na čtyři otázky a nic víc: máme připravenou práci, co
+ * čeká na zpracování, co se tento týden stalo a co potřebuje pozornost.
+ * Technické statistiky odesílání sem nepatří - jsou v Komunikaci.
+ */
+export default async function OverviewPage() {
+  const [stats, week, todo, activity] = await Promise.all([
+    getOverviewStats(),
+    getWeekSummary(),
+    getTodayWork(),
+    listActivity({ limit: 8 }),
+  ]);
 
-export default async function DashboardPage() {
-  const [campaigns, stats] = await Promise.all([listCampaignStats(), getGlobalStats()]);
+  const kindLabel: Record<string, string> = {
+    followup: "Follow-up",
+    reply: "Nová odpověď",
+    queue: "K oslovení",
+  };
 
   return (
     <>
-      <PageHeader
-        title="Přehled"
-        description="Všechny kampaně a jejich aktuální čísla."
-        actions={<RunWorkerButton />}
-      />
+      <PageHeader title="Přehled" description="Co se děje a co dnes potřebuje pozornost." />
 
-      <div className="card mb-8 grid grid-cols-2 gap-6 p-6 sm:grid-cols-3 lg:grid-cols-6">
-        <Stat label="Kampaně" value={stats.campaigns} />
-        <Stat label="Běžící" value={stats.active_campaigns} />
-        <Stat label="Kontakty" value={stats.contacts} />
-        <Stat label="Odeslané e-maily" value={stats.sent_total} />
-        <Stat label="Odpovědi" value={stats.replies_total} tone="good" />
-        <Stat
-          label="K prověření"
-          value={stats.needs_review}
-          tone={stats.needs_review > 0 ? "danger" : undefined}
+      <dl className="mb-8 grid grid-cols-2 gap-4 lg:grid-cols-5">
+        <StatCard label="Připravené firmy" value={stats.companies_ready} hint="mají telefon a nejsou uzavřené" href="/firmy" />
+        <StatCard label="Čeká na oslovení" value={stats.waiting} href="/osloveni/fronta" />
+        <StatCard
+          label="Follow-upy dnes"
+          value={stats.followups_today}
+          tone={stats.followups_today > 0 ? "warn" : undefined}
+          href="/osloveni"
         />
-      </div>
-
-      {stats.needs_review > 0 ? (
-        <div className="mb-8 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
-          <strong>{stats.needs_review} odeslání má neznámý výsledek.</strong> Worker byl přerušen
-          uprostřed odesílání, takže nevíme, jestli e-maily dorazily. Nikdy se neopakují automaticky —
-          duplicita by byla horší než chybějící e-mail. Zkontrolujte je u dané kampaně.
-        </div>
-      ) : null}
-
-      {campaigns.length === 0 ? (
-        <EmptyState
-          title="Zatím žádné kampaně"
-          description="Přidejte schránku, naimportujte kontakty a založte první kampaň."
-          action={{ href: "/campaigns/new", label: "Vytvořit kampaň" }}
+        <StatCard
+          label="Schůzky"
+          value={stats.meetings}
+          tone={stats.meetings > 0 ? "good" : undefined}
+          href="/firmy?status=meeting"
         />
-      ) : (
-        <div className="space-y-4">
-          {campaigns.map((campaign) => (
-            <div key={campaign.id} className="card p-5">
-              <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <Link
-                    href={`/campaigns/${campaign.id}`}
-                    className="text-base font-semibold text-zinc-900 hover:underline"
-                  >
-                    {campaign.name}
+        <StatCard
+          label="Nové odpovědi"
+          value={stats.new_replies}
+          tone={stats.new_replies > 0 ? "good" : undefined}
+          href="/inbox"
+        />
+      </dl>
+
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
+        <section>
+          <div className="mb-3 flex items-baseline justify-between gap-3">
+            <h2 className="section-title">Dnes řešit</h2>
+            <Link href="/osloveni" className="text-sm text-zinc-500 hover:text-zinc-900">
+              Otevřít oslovení
+            </Link>
+          </div>
+
+          {todo.length === 0 ? (
+            <EmptyState
+              title="Na dnešek není nic otevřeného"
+              description="Jakmile připravíme nové firmy, přijde odpověď nebo nastane čas naplánovaného follow-upu, objeví se to tady."
+              action={{ href: "/firmy", label: "Projít firmy" }}
+            />
+          ) : (
+            <ul className="card divide-y divide-zinc-100">
+              {todo.map((item, index) => (
+                <li key={`${item.kind}-${index}`}>
+                  <Link href={item.href} className="flex items-center gap-4 px-5 py-3.5 hover:bg-zinc-50">
+                    <span
+                      className={`badge shrink-0 ${
+                        item.kind === "followup"
+                          ? "bg-amber-50 text-amber-700 ring-amber-200"
+                          : item.kind === "reply"
+                            ? "bg-emerald-50 text-emerald-700 ring-emerald-200"
+                            : "bg-zinc-50 text-zinc-600 ring-zinc-200"
+                      }`}
+                    >
+                      {kindLabel[item.kind]}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-medium text-zinc-900">{item.title}</span>
+                      <span className="block truncate text-xs text-zinc-500">
+                        {[item.subtitle, item.detail].filter(Boolean).join(" · ") || "—"}
+                      </span>
+                    </span>
+                    {item.due_at ? (
+                      <span className="shrink-0 text-xs text-zinc-500">
+                        <DateTime value={item.due_at} />
+                      </span>
+                    ) : null}
                   </Link>
-                  <p className="mt-0.5 text-xs text-zinc-500">
-                    {describeSenderPool(campaign.mailbox_names)} · {formatSendDays(campaign.send_days)}{" "}
-                    {minutesToHHMM(campaign.send_start_minute)}–{minutesToHHMM(campaign.send_end_minute)}{" "}
-                    {campaign.timezone} · dnes využito {campaign.sent_today}/{campaign.daily_limit}
-                  </p>
-                </div>
-                <StatusBadge status={campaign.status} />
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+
+        <aside className="space-y-6">
+          <section className="card p-5">
+            <h2 className="section-title mb-4">Posledních 7 dní</h2>
+            <dl className="grid grid-cols-2 gap-4">
+              <div>
+                <dt className="text-xs text-zinc-500">Hovorů</dt>
+                <dd className="mt-0.5 text-xl font-semibold tabular-nums text-zinc-900">{week.calls}</dd>
               </div>
+              <div>
+                <dt className="text-xs text-zinc-500">Dovolaných</dt>
+                <dd className="mt-0.5 text-xl font-semibold tabular-nums text-zinc-900">{week.connected}</dd>
+              </div>
+              <div>
+                <dt className="text-xs text-zinc-500">Domluvené schůzky</dt>
+                <dd
+                  className={`mt-0.5 text-xl font-semibold tabular-nums ${
+                    week.meetings_booked > 0 ? "text-emerald-600" : "text-zinc-900"
+                  }`}
+                >
+                  {week.meetings_booked}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-xs text-zinc-500">Odeslané e-maily</dt>
+                <dd className="mt-0.5 text-xl font-semibold tabular-nums text-zinc-900">{week.emails_sent}</dd>
+              </div>
+            </dl>
+          </section>
 
-              <dl className="grid grid-cols-3 gap-4 sm:grid-cols-6">
-                <Stat label="Kontakty" value={campaign.contacts} />
-                <Stat label="Odesláno" value={campaign.sent} />
-                <Stat label="Odpovědi" value={campaign.replies} tone={campaign.replies > 0 ? "good" : undefined} />
-                <Stat label="Míra odpovědí" value={replyRate(campaign.replies, campaign.sent)} />
-                <Stat label="Chyby" value={campaign.failed} tone={campaign.failed > 0 ? "danger" : undefined} />
-                <Stat label="Zbývá" value={campaign.remaining} />
-              </dl>
-
-              {campaign.status === "active" ? (() => {
-                // Computed with the dispatcher's own primitives, and rendered in
-                // the campaign's timezone. Showing a bare UTC instant is what
-                // made a cursor left over from an old schedule unrecognisable.
-                const explanation = explainNextSend(
-                  {
-                    sendDays: campaign.send_days,
-                    sendStartMinute: campaign.send_start_minute,
-                    sendEndMinute: campaign.send_end_minute,
-                    timezone: campaign.timezone,
-                  },
-                  campaign.daily_limit,
-                  campaign.sent_today,
-                  campaign.next_slot_at,
-                );
-                return (
-                  <p
-                    className={`mt-4 text-xs ${
-                      explanation.state === "cursor_stale" ? "text-amber-700" : "text-zinc-500"
-                    }`}
-                  >
-                    {explanation.message}
-                  </p>
-                );
-              })() : null}
+          <section>
+            <div className="mb-3 flex items-baseline justify-between gap-3">
+              <h2 className="section-title">Poslední aktivita</h2>
+              <Link href="/activity" className="text-sm text-zinc-500 hover:text-zinc-900">
+                Vše
+              </Link>
             </div>
-          ))}
-        </div>
-      )}
+            {activity.length === 0 ? (
+              <p className="card px-5 py-8 text-center text-sm text-zinc-500">Zatím se nic nestalo.</p>
+            ) : (
+              <ul className="card divide-y divide-zinc-100">
+                {activity.map((row) => (
+                  <li key={row.id} className="px-5 py-3">
+                    <p className="text-sm text-zinc-900">{row.action}</p>
+                    <p className="mt-0.5 truncate text-xs text-zinc-500">
+                      {row.contact_email ?? row.campaign_name ?? "—"} · <DateTime value={row.created_at} />
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        </aside>
+      </div>
     </>
   );
 }

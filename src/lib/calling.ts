@@ -52,6 +52,12 @@ export type OutcomeRequirement = "callback_at" | "meeting_at" | null;
 
 export interface CallOutcomeDefinition {
   value: CallOutcome;
+  /**
+   * Zobrazuje se jako hlavní tlačítko. Pět nejčastějších výsledků pokrývá
+   * drtivou většinu hovorů; zbytek je schválně o klik dál, aby caller
+   * nevybíral z dvanácti možností při každém hovoru.
+   */
+  primary?: boolean;
   /** Czech label shown on the button in the caller's workspace. */
   label: string;
   /** Did we actually speak to the person? This is the billable unit. */
@@ -70,17 +76,17 @@ export interface CallOutcomeDefinition {
  * reach, reached but no, reached and yes.
  */
 export const CALL_OUTCOMES: CallOutcomeDefinition[] = [
-  { value: "no_answer",          label: "Nezvedá",                connected: false, requires: null,         status: null },
+  { value: "no_answer",          label: "Nezvedá",                connected: false, requires: null,         primary: true, status: null },
   { value: "busy",               label: "Obsazeno",               connected: false, requires: null,         status: null },
   { value: "gatekeeper",         label: "Nepustili mě dál",       connected: false, requires: null,         status: null },
   { value: "wrong_number",       label: "Špatné číslo",           connected: false, requires: null,         status: "lost" },
   { value: "not_decision_maker", label: "Není rozhodovatel",      connected: true,  requires: null,         status: null },
-  { value: "send_info",          label: "Poslat informace",       connected: true,  requires: null,         status: null },
-  { value: "callback",           label: "Zavolat později",        connected: true,  requires: "callback_at", status: "callback" },
-  { value: "not_interested",     label: "Nemá zájem",             connected: true,  requires: null,         status: "lost" },
+  { value: "send_info",          label: "Poslat informace",       connected: true,  requires: null,         primary: true, status: null },
+  { value: "callback",           label: "Zavolat později",        connected: true,  requires: "callback_at", primary: true, status: "callback" },
+  { value: "not_interested",     label: "Nemá zájem",             connected: true,  requires: null,         primary: true, status: "lost" },
   { value: "no_budget",          label: "Nemá rozpočet",          connected: true,  requires: null,         status: "lost" },
   { value: "do_not_call",        label: "Nevolat",                connected: true,  requires: null,         status: "do_not_call" },
-  { value: "meeting_booked",     label: "Domluvená schůzka",      connected: true,  requires: "meeting_at", status: "meeting_booked" },
+  { value: "meeting_booked",     label: "Domluvená schůzka",      connected: true,  requires: "meeting_at", primary: true, status: "meeting_booked" },
   { value: "won",                label: "Získaný klient",         connected: true,  requires: null,         status: "won" },
 ];
 

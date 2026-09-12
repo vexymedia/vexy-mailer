@@ -316,3 +316,14 @@ describe("campaign economics", () => {
     expect(economics.gross_margin).toBeNull();
   });
 });
+
+describe("české skloňování v UI", () => {
+  it("skloňuje počty podle českých pravidel, ne anglických", async () => {
+    const { plural } = await import("@/lib/plan");
+    expect(plural(0, "kontakt", "kontakty", "kontaktů")).toBe("0 kontaktů");
+    expect(plural(1, "kontakt", "kontakty", "kontaktů")).toBe("1 kontakt");
+    expect(plural(3, "kontakt", "kontakty", "kontaktů")).toBe("3 kontakty");
+    expect(plural(5, "kontakt", "kontakty", "kontaktů")).toBe("5 kontaktů");
+    expect(plural(21, "firma", "firmy", "firem")).toBe("21 firem");
+  });
+});

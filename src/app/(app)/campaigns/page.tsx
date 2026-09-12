@@ -2,6 +2,7 @@ import Link from "next/link";
 import { describeSenderPool, listCampaignStats } from "@/lib/queries/dashboard";
 import { formatSendDays, minutesToHHMM } from "@/lib/schedule";
 import { PageHeader, StatusBadge, Table, EmptyState } from "@/components/ui";
+import { KomunikaceTabs } from "@/components/section-tabs";
 
 export const dynamic = "force-dynamic";
 
@@ -18,6 +19,7 @@ export default async function CampaignsPage() {
           </Link>
         }
       />
+      <KomunikaceTabs active={"/campaigns"} />
 
       {campaigns.length === 0 ? (
         <EmptyState

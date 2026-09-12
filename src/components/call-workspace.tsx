@@ -55,14 +55,20 @@ function defaultMeeting(): string {
 function OutcomeButtons({
   onPick,
   selected,
+  showAll,
+  onShowAll,
 }: {
   onPick: (outcome: CallOutcome, requires: "callback_at" | "meeting_at" | null) => void;
   selected: CallOutcome | null;
+  showAll: boolean;
+  onShowAll: () => void;
 }) {
   const { pending } = useFormStatus();
+  // Pět nejčastějších výsledků je vidět hned; zbytek až na vyžádání.
+  const visible = CALL_OUTCOMES.filter((o) => showAll || o.primary || o.value === selected);
   return (
     <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-      {CALL_OUTCOMES.map((outcome) => {
+      {visible.map((outcome) => {
         const active = selected === outcome.value;
         const twoStep = outcome.requires !== null || outcome.value === "won";
         return (
@@ -85,6 +91,16 @@ function OutcomeButtons({
           </button>
         );
       })}
+      {!showAll ? (
+        <button
+          type="button"
+          onClick={onShowAll}
+          disabled={pending}
+          className="btn justify-start border border-dashed border-zinc-300 text-left text-zinc-500 hover:bg-zinc-50"
+        >
+          Další výsledky…
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -109,22 +125,30 @@ export function CallWorkspace({
   maxAttempts,
   qualificationCriteria,
   callerName,
+  campaignScope = "",
+  context,
 }: {
   prospect: CallProspect;
   remaining: number;
   maxAttempts: number;
   qualificationCriteria: string | null;
   callerName: string;
+  /** Prázdné = po zápisu se bere další kontakt napříč kampaněmi. */
+  campaignScope?: string;
+  /** Proč firmu řešíme - čte se těsně před hovorem. */
+  context?: { reason: string | null; companyHref: string | null; campaignName: string | null };
 }) {
   // Outcomes that need one more piece of information before they can be saved.
   type Step = "callback_at" | "meeting_at" | "deal_value";
   const [pending, setPending] = useState<{ outcome: CallOutcome; requires: Step } | null>(null);
+  const [showAllOutcomes, setShowAllOutcomes] = useState(false);
 
   const name = [prospect.first_name, prospect.last_name].filter(Boolean).join(" ") || prospect.email;
 
   return (
     <ActionForm action={logCallAction} className="space-y-4">
       <input type="hidden" name="campaign_contact_id" value={prospect.id} />
+      <input type="hidden" name="campaign_scope" value={campaignScope} />
 
       <div className="card p-6">
         <div className="flex flex-wrap items-start justify-between gap-4">
@@ -134,7 +158,15 @@ export function CallWorkspace({
               {prospect.company ?? "—"}
               {prospect.website ? ` · ${prospect.website}` : ""}
             </p>
-            <p className="mt-0.5 text-xs text-zinc-500">{prospect.email}</p>
+            <p className="mt-0.5 text-xs text-zinc-500">
+              {prospect.email}
+              {context?.campaignName ? ` · ${context.campaignName}` : ""}
+            </p>
+            {context?.companyHref ? (
+              <a href={context.companyHref} className="mt-1 inline-block text-xs text-zinc-500 underline">
+                Otevřít firmu
+              </a>
+            ) : null}
           </div>
           <div className="text-right">
             <div className="text-xs text-zinc-500">
@@ -150,6 +182,12 @@ export function CallWorkspace({
           </div>
         </div>
 
+        {context?.reason ? (
+          <p className="mt-4 rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-800">
+            <span className="font-medium">Proč ji řešíme:</span> {context.reason}
+          </p>
+        ) : null}
+
         {prospect.call_note ? (
           <p className="mt-4 rounded-md bg-zinc-50 px-3 py-2 text-sm text-zinc-700">
             <span className="font-medium">Poslední poznámka:</span> {prospect.call_note}
@@ -160,6 +198,8 @@ export function CallWorkspace({
       <div className="card p-6">
         <h3 className="mb-3 text-sm font-semibold text-zinc-900">Zapsat výsledek</h3>
         <OutcomeButtons
+          showAll={showAllOutcomes}
+          onShowAll={() => setShowAllOutcomes(true)}
           selected={pending?.outcome ?? null}
           onPick={(outcome, requires) => {
             // "won" is the one outcome the domain does not force extra input
