@@ -221,7 +221,7 @@ describe("meetings and qualification", () => {
     // A booked prospect leaves the queue - nobody re-dials a won meeting.
     expect(await calling.listCallQueue(campaignId)).toHaveLength(0);
 
-    await calling.updateMeeting(ids[0], { held: true });
+    await calling.updateMeeting(ids[0], { outcome: "held" });
     expect((await row(ids[0])).meeting_held).toBe(true);
     // Marking it held must not disturb the qualification judgement.
     expect((await row(ids[0])).meeting_qualified).toBe(true);

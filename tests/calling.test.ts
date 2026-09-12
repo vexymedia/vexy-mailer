@@ -167,6 +167,15 @@ describe("the calling queue order", () => {
     );
   });
 
+  it("settles a tie on id, so a batch sharing one timestamp has one order", () => {
+    const same = { ...base, call_status: "new" as const, call_attempts: 0, next_call_at: null };
+    const queue = orderCallQueue(
+      [{ ...same, id: "ccc" }, { ...same, id: "aaa" }, { ...same, id: "bbb" }],
+      NOW,
+    );
+    expect(queue.map((row) => row.id)).toEqual(["aaa", "bbb", "ccc"]);
+  });
+
   it("dials the least-attempted prospect first within the same state", () => {
     const queue = orderCallQueue(
       [
@@ -187,6 +196,7 @@ const COUNTS: CallCounts = {
   meetings_booked: 20,
   meetings_qualified: 15,
   meetings_held: 12,
+  meetings_no_show: 4,
   clients_won: 3,
 };
 
@@ -217,6 +227,7 @@ describe("the funnel", () => {
       meetings_booked: 0,
       meetings_qualified: 0,
       meetings_held: 0,
+      meetings_no_show: 0,
       clients_won: 0,
     });
     expect(empty.every((s) => s.conversion === null || s.conversion === 0)).toBe(true);
@@ -294,6 +305,7 @@ describe("campaign economics", () => {
         meetings_booked: 0,
         meetings_qualified: 0,
         meetings_held: 0,
+        meetings_no_show: 0,
         clients_won: 0,
       },
       revenue_won: 0,

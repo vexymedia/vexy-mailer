@@ -23,6 +23,20 @@ export type CallOutcome =
   | "won"
   | "do_not_call";
 
+/**
+ * What became of a booked meeting. A boolean could not tell "not yet" from
+ * "they never turned up", and a pilot billed on held meetings has to know
+ * which of the two it is looking at.
+ */
+export type MeetingOutcome = "scheduled" | "held" | "no_show" | "cancelled";
+
+export const MEETING_OUTCOME_LABELS: Record<MeetingOutcome, string> = {
+  scheduled: "Naplánovaná",
+  held: "Uskutečněná",
+  no_show: "Nedorazil",
+  cancelled: "Zrušená",
+};
+
 export type CallStatus =
   | "new"
   | "in_progress"
@@ -71,6 +85,10 @@ export const CALL_OUTCOMES: CallOutcomeDefinition[] = [
 ];
 
 const OUTCOME_BY_VALUE = new Map(CALL_OUTCOMES.map((o) => [o.value, o]));
+
+export function isMeetingOutcome(value: string): value is MeetingOutcome {
+  return value in MEETING_OUTCOME_LABELS;
+}
 
 export function isCallOutcome(value: string): value is CallOutcome {
   return OUTCOME_BY_VALUE.has(value as CallOutcome);
@@ -215,7 +233,12 @@ export function orderCallQueue<T extends QueueCandidate>(candidates: T[], now: D
     const aDue = a.next_call_at?.getTime() ?? Number.MAX_SAFE_INTEGER;
     const bDue = b.next_call_at?.getTime() ?? Number.MAX_SAFE_INTEGER;
     if (aDue !== bDue) return aDue - bDue;
-    return a.created_at.getTime() - b.created_at.getTime();
+    const byAge = a.created_at.getTime() - b.created_at.getTime();
+    if (byAge !== 0) return byAge;
+    // The unique tiebreak, matching the ORDER BY in listCallQueue. A batch
+    // added by one INSERT ... SELECT shares a created_at, so without this the
+    // order of those rows is whatever the storage engine feels like.
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
   });
 }
 
@@ -230,6 +253,8 @@ export interface CallCounts {
   /** Booked meetings the caller judged to meet the campaign's criteria. */
   meetings_qualified: number;
   meetings_held: number;
+  /** Booked, the date passed, nobody turned up. Not a held meeting. */
+  meetings_no_show: number;
   clients_won: number;
 }
 

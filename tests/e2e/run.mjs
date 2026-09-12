@@ -334,12 +334,18 @@ try {
   await expectVisible(page, "text=E2E campaign", "the campaign appears in the calling list");
   await page.click('a:has-text("Volat")');
   await page.waitForURL(/\/volani\/[0-9a-f-]+/);
+
+  // Who is at this workstation is asked once per shift, before any prospect is
+  // handed out - a leased prospect needs an owner.
+  await expectVisible(page, "text=Kdo dnes volá?", "the workspace asks who is calling before dialling");
+  await page.click('label:has(input[name="caller_id"])');
+  await page.click('button:has-text("Začít volat")');
   await expectVisible(page, "text=VOLAT +420777000", "the workspace offers a dialable number");
+  await expectVisible(page, "text=Volá Jan Caller", "the chosen caller is shown and can be swapped");
   await expectVisible(page, "text=Dobrý den, tady Jan z VEXY.", "the script panel shows the opening");
   await expectVisible(page, "text=Pokus 1 z 4", "the workspace shows the attempt count");
   await shot(page, "calling-workspace");
 
-  await page.selectOption("#caller", { label: "Jan Caller" });
   await page.click('button:has-text("Domluvená schůzka")');
   await expectVisible(page, 'input[name="meeting_at"]', "booking a meeting asks for a date");
   await expectVisible(page, "text=Rozhoduje o marketingu", "the qualification criteria are shown at the decision");
@@ -349,6 +355,19 @@ try {
 
   await page.goto(`${campaignUrl}?tab=volani`);
   await expectVisible(page, "text=kvalifikovaná", "the booked meeting is recorded as qualified");
+
+  // A meeting in the diary is not a meeting that happened, and a no-show is
+  // neither. The lifecycle is set on the contact's own page.
+  await page.goto(`${campaignUrl}?tab=volani&filter=meetings_booked`);
+  await page.locator("table a[href^='/kontakt/']").first().click();
+  await page.waitForURL(/\/kontakt\/[0-9a-f-]+/);
+  await expectVisible(page, "text=Naplánovaná", "a booked meeting starts as merely scheduled");
+  await page.click('button:has-text("Nedorazil")');
+  // The control deliberately shows no banner, so assert the state itself: the
+  // meeting's own status line, not one of the four buttons offering to set it.
+  await expectVisible(page, "aside dd:has-text('Nedorazil')", "the meeting can be marked a no-show");
+  await page.goto(`${campaignUrl}?tab=volani`);
+  await expectVisible(page, "text=Nedorazil", "the no-show shows on the campaign");
   await page.goto(`${campaignUrl}?tab=ekonomika`);
   await expectVisible(page, "h2:has-text('Náklad na výsledek')", "the economics tab renders");
   await shot(page, "calling-economics");

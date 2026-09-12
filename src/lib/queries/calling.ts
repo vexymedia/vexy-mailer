@@ -10,6 +10,7 @@ import {
   type CallStatus,
   type Economics,
   type FunnelStage,
+  type MeetingOutcome,
 } from "../calling";
 import type { Campaign } from "../types";
 
@@ -74,17 +75,27 @@ export async function listCallQueue(
        and cc.call_status in ('new', 'in_progress', 'callback')
        and cc.call_attempts < cp.max_call_attempts
        and c.phone is not null and btrim(c.phone) <> ''
+       -- Do-not-call is global. Somebody who asked not to be phoned is out of
+       -- every campaign's queue, not just the one they said it on.
+       and not exists (select 1 from call_suppression cs where cs.contact_id = cc.contact_id)
        -- A caller sees their own assignments plus everything unassigned;
        -- never someone else's named prospect.
        and (${callerId}::uuid is null or cc.assigned_caller_id is null
             or cc.assigned_caller_id = ${callerId}::uuid)
+       -- ...nor anyone another caller is on the phone to right now.
+       and (${callerId}::uuid is null or cc.call_locked_until is null
+            or cc.call_locked_until < now() or cc.call_locked_by = ${callerId}::uuid)
        -- A callback in the future is not work yet.
        and (cc.call_status <> 'callback' or cc.next_call_at is null or cc.next_call_at <= now())
      order by
        case cc.call_status when 'callback' then 0 when 'in_progress' then 1 else 2 end,
        cc.call_attempts,
        cc.next_call_at nulls last,
-       cc.created_at
+       cc.created_at,
+       -- The unique tiebreak. Without it a batch added by one
+       -- INSERT ... SELECT shares a created_at and their order is undefined,
+       -- so two reads of the same queue could hand out different prospects.
+       cc.id
      limit ${options.limit ?? 50}
   `;
 }
@@ -109,10 +120,74 @@ export interface NextCall {
  * the whole caller screen so the workspace is CALL -> LOG -> next with nothing
  * in between.
  */
+/**
+ * How long a prospect is held for the caller who was handed them. Long enough
+ * for a call and writing the outcome, short enough that a closed tab frees
+ * them again without anyone having to intervene.
+ */
+const CALL_LEASE_MINUTES = 5;
+
+/**
+ * Atomically hands the head of the queue to one caller.
+ *
+ * Same mechanism the send worker already uses: pick a row with FOR UPDATE
+ * SKIP LOCKED and stamp an expiring lease on it, so two callers working the
+ * same campaign cannot both be given the same person to dial. Re-claiming is
+ * idempotent for the caller who already holds the lease - it just extends it -
+ * so a re-render hands back the same prospect rather than skipping to the next.
+ */
+export async function claimNextCall(campaignId: string, callerId: string): Promise<string | null> {
+  const [row] = await sql<{ id: string }[]>`
+    update campaign_contacts cc
+       set call_locked_by = ${callerId}, call_locked_until = now() + interval '${sql.unsafe(String(CALL_LEASE_MINUTES))} minutes'
+     where cc.id = (
+       select inner_cc.id
+         from campaign_contacts inner_cc
+         join campaigns cp on cp.id = inner_cc.campaign_id
+         join contacts c on c.id = inner_cc.contact_id
+        where inner_cc.campaign_id = ${campaignId}
+          and inner_cc.call_status in ('new', 'in_progress', 'callback')
+          and inner_cc.call_attempts < cp.max_call_attempts
+          and c.phone is not null and btrim(c.phone) <> ''
+          and not exists (select 1 from call_suppression cs where cs.contact_id = inner_cc.contact_id)
+          and (inner_cc.assigned_caller_id is null or inner_cc.assigned_caller_id = ${callerId})
+          and (inner_cc.call_locked_until is null or inner_cc.call_locked_until < now()
+               or inner_cc.call_locked_by = ${callerId})
+          and (inner_cc.call_status <> 'callback' or inner_cc.next_call_at is null
+               or inner_cc.next_call_at <= now())
+        order by
+          case inner_cc.call_status when 'callback' then 0 when 'in_progress' then 1 else 2 end,
+          inner_cc.call_attempts,
+          inner_cc.next_call_at nulls last,
+          inner_cc.created_at,
+          inner_cc.id
+        limit 1
+        for update of inner_cc skip locked
+     )
+    returning cc.id
+  `;
+  return row?.id ?? null;
+}
+
+/** Frees a leased prospect, so closing the workspace does not park them. */
+export async function releaseCall(campaignContactId: string): Promise<void> {
+  await sql`
+    update campaign_contacts
+       set call_locked_until = null, call_locked_by = null
+     where id = ${campaignContactId}
+  `;
+}
+
 export async function getNextCall(
   campaignId: string,
   callerId?: string | null,
 ): Promise<NextCall | null> {
+  // With a known caller the prospect is leased, so nobody else is handed the
+  // same person. Without one (a read-only preview) the queue is only read.
+  if (callerId) {
+    const claimed = await claimNextCall(campaignId, callerId);
+    if (!claimed) return null;
+  }
   const queue = await listCallQueue(campaignId, { limit: 50, callerId });
   if (queue.length === 0) return null;
 
@@ -212,6 +287,14 @@ export async function logCall(input: LogCallInput): Promise<LogCallResult> {
     `;
     if (!row) return null;
 
+    // The queue already excludes a prospect at the limit, but the limit has to
+    // hold here too: this is the only writer of call_attempts, and anything
+    // that reaches it directly - a stale tab, a double submit, a script -
+    // would otherwise push a "max 4 attempts" campaign to five.
+    if (row.call_attempts >= row.max_call_attempts) {
+      return { exhausted: true as const, maxAttempts: row.max_call_attempts };
+    }
+
     const applied = applyCallOutcome({
       outcome: outcomeValue,
       attemptsBefore: row.call_attempts,
@@ -250,6 +333,23 @@ export async function logCall(input: LogCallInput): Promise<LogCallResult> {
        where id = ${row.id}
     `;
 
+    // "Nevolat" is a decision about the person, not about this campaign, so it
+    // goes on the global list the queue checks. Deliberately not the e-mail
+    // suppression list: phone and e-mail are separate consents.
+    if (applied.status === "do_not_call") {
+      await tx`
+        insert into call_suppression (contact_id, reason)
+        values (${row.contact_id}, 'do_not_call')
+        on conflict (contact_id) do nothing
+      `;
+    }
+
+    // The call is over, so the prospect is no longer held for this caller.
+    await tx`
+      update campaign_contacts set call_locked_until = null, call_locked_by = null
+       where id = ${row.id}
+    `;
+
     return {
       campaignId: row.campaign_id,
       contactId: row.contact_id,
@@ -260,6 +360,12 @@ export async function logCall(input: LogCallInput): Promise<LogCallResult> {
   });
 
   if (!result) return { ok: false, error: "Kontakt nebyl nalezen." };
+  if ("exhausted" in result) {
+    return {
+      ok: false,
+      error: `Kontakt už vyčerpal všechny pokusy (${result.maxAttempts}). Další hovor se nezapíše.`,
+    };
+  }
 
   await logActivity({
     action: "Hovor zaznamenán",
@@ -279,7 +385,7 @@ export async function logCall(input: LogCallInput): Promise<LogCallResult> {
  */
 export async function updateMeeting(
   campaignContactId: string,
-  patch: { held?: boolean; qualified?: boolean | null; meetingAt?: Date | null },
+  patch: { outcome?: MeetingOutcome; qualified?: boolean | null; meetingAt?: Date | null },
 ): Promise<{ ok: boolean; campaignId?: string }> {
   const [row] = await sql<{ campaign_id: string; meeting_booked: boolean }[]>`
     select campaign_id, meeting_booked from campaign_contacts where id = ${campaignContactId}
@@ -289,7 +395,7 @@ export async function updateMeeting(
 
   await sql`
     update campaign_contacts
-       set meeting_held      = coalesce(${patch.held ?? null}, meeting_held),
+       set meeting_outcome   = coalesce(${patch.outcome ?? null}, meeting_outcome),
            meeting_qualified = ${patch.qualified === undefined ? sql`meeting_qualified` : patch.qualified},
            meeting_at        = coalesce(${patch.meetingAt ?? null}, meeting_at),
            updated_at        = now()
@@ -326,6 +432,8 @@ export async function getCallCounts(campaignId: string): Promise<CallCounts> {
       (select count(*)::int from campaign_contacts
         where campaign_id = ${campaignId} and meeting_held) as meetings_held,
       (select count(*)::int from campaign_contacts
+        where campaign_id = ${campaignId} and meeting_outcome = 'no_show') as meetings_no_show,
+      (select count(*)::int from campaign_contacts
         where campaign_id = ${campaignId} and call_status = 'won') as clients_won
   `;
   return row;
@@ -339,6 +447,14 @@ export interface CampaignCallingReport {
   meetings_unjudged: number;
   callbacks_due: number;
   queue_size: number;
+  /**
+   * Open on the calling side but impossible to call: no phone number. They are
+   * not in the queue and never will be, so without this they are simply
+   * invisible - an active contact with no next action.
+   */
+  stranded: number;
+  /** Contacts on the global do-not-call list. */
+  do_not_call: number;
 }
 
 /** The calling dashboard for one campaign: counters, funnel and money. */
@@ -347,7 +463,16 @@ export async function getCampaignCallingReport(campaignId: string): Promise<Camp
 
   const [counts, [extra]] = await Promise.all([
     getCallCounts(campaignId),
-    sql<{ revenue_won: number; meetings_unjudged: number; callbacks_due: number; queue_size: number }[]>`
+    sql<
+      {
+        revenue_won: number;
+        meetings_unjudged: number;
+        callbacks_due: number;
+        queue_size: number;
+        stranded: number;
+        do_not_call: number;
+      }[]
+    >`
       select
         coalesce((select sum(deal_value) from campaign_contacts
                    where campaign_id = ${campaignId} and call_status = 'won'), 0)::float8
@@ -365,8 +490,19 @@ export async function getCampaignCallingReport(campaignId: string): Promise<Camp
             and cc.call_status in ('new', 'in_progress', 'callback')
             and cc.call_attempts < ${campaign.max_call_attempts}
             and c.phone is not null and btrim(c.phone) <> ''
+            and not exists (select 1 from call_suppression cs where cs.contact_id = cc.contact_id)
             and (cc.call_status <> 'callback' or cc.next_call_at is null or cc.next_call_at <= now()))
-          as queue_size
+          as queue_size,
+        (select count(*)::int
+           from campaign_contacts cc
+           join contacts c on c.id = cc.contact_id
+          where cc.campaign_id = ${campaignId}
+            and cc.call_status in ('new', 'in_progress', 'callback')
+            and (c.phone is null or btrim(c.phone) = '')) as stranded,
+        (select count(*)::int
+           from campaign_contacts cc
+           join call_suppression cs on cs.contact_id = cc.contact_id
+          where cc.campaign_id = ${campaignId}) as do_not_call
     `,
   ]);
 
@@ -386,6 +522,8 @@ export async function getCampaignCallingReport(campaignId: string): Promise<Camp
     meetings_unjudged: extra.meetings_unjudged,
     callbacks_due: extra.callbacks_due,
     queue_size: extra.queue_size,
+    stranded: extra.stranded,
+    do_not_call: extra.do_not_call,
   };
 }
 
@@ -420,6 +558,7 @@ export interface CallContactRow extends CallQueueRow {
   meeting_at: Date | null;
   meeting_qualified: boolean | null;
   meeting_held: boolean;
+  meeting_outcome: MeetingOutcome;
   deal_value: number | null;
   connected_calls: number;
 }
@@ -434,7 +573,7 @@ export async function listCallContacts(
            cc.next_call_at, cc.last_call_outcome, cc.call_note, cc.assigned_caller_id,
            ca.name as assigned_caller_name,
            cc.created_at, cc.meeting_booked, cc.meeting_at, cc.meeting_qualified,
-           cc.meeting_held, cc.deal_value::float8 as deal_value,
+           cc.meeting_held, cc.meeting_outcome, cc.deal_value::float8 as deal_value,
            (select count(*)::int from call_activities a
              where a.campaign_contact_id = cc.id and a.connected) as connected_calls
       from campaign_contacts cc
@@ -447,6 +586,8 @@ export async function listCallContacts(
                cc.call_status in ('new', 'in_progress', 'callback')
                and cc.call_attempts < cp.max_call_attempts
                and c.phone is not null and btrim(c.phone) <> ''
+               and not exists (select 1 from call_suppression cs
+                                where cs.contact_id = cc.contact_id)
              when 'called' then cc.call_attempts > 0
              when 'connected' then
                exists (select 1 from call_activities ca
@@ -537,7 +678,7 @@ export async function getCallContact(campaignContactId: string): Promise<CallCon
            cc.next_call_at, cc.last_call_outcome, cc.call_note, cc.assigned_caller_id,
            cl.name as assigned_caller_name,
            cc.created_at, cc.meeting_booked, cc.meeting_at, cc.meeting_qualified,
-           cc.meeting_held, cc.deal_value::float8 as deal_value,
+           cc.meeting_held, cc.meeting_outcome, cc.deal_value::float8 as deal_value,
            cc.status as email_status,
            cp.id as campaign_id, cp.name as campaign_name, cp.max_call_attempts,
            cp.qualification_criteria,

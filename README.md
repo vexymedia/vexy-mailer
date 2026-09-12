@@ -75,7 +75,15 @@ the sticky sender.
   the call history and the campaign's economics reference them.
 - **The queue** is ordered: callbacks that are due now, then prospects already
   started but still under the attempt limit (fewest attempts first), then
-  contacts nobody has called. Anyone without a phone number is never offered.
+  contacts nobody has called. Anyone without a phone number is never offered,
+  and the order is fully deterministic - it ends on the row id, because a batch
+  added by one `INSERT ... SELECT` shares a timestamp and would otherwise come
+  back in whatever order the storage engine felt like.
+- **One caller at a time.** A caller says who they are once per shift, and the
+  prospect they are handed is leased to them for five minutes - the same
+  mechanism the send worker uses for its own lock. Two callers on one campaign
+  cannot be given the same person to dial, and a closed tab frees the prospect
+  on its own.
 - **The workspace** (`/volani/<campaign>`) is two clicks per call: dial the
   `tel:` link, press an outcome. Only a callback and a booked meeting open a
   second step, for the date — and a booked meeting also asks the question the
@@ -86,7 +94,17 @@ the sticky sender.
   read time, so the number cannot move under an invoice.
 - **The attempt limit** (4 by default, per campaign) only ever retires a
   prospect whose outcome left them open. A meeting booked on the fourth attempt
-  is a meeting, not a prospect who ran out of attempts.
+  is a meeting, not a prospect who ran out of attempts. The limit is enforced
+  where attempts are written, not only where the queue is read, so a stale tab
+  cannot push a "max 4" campaign to five.
+- **Do not call** is global. "Nevolat" is a decision about the person, so it
+  goes on `call_suppression` and removes them from every campaign's queue.
+  Deliberately not the e-mail suppression list: phone and e-mail are separate
+  consents, and merging them would let a call outcome stop a campaign's e-mail.
+- **The meeting lifecycle** is `scheduled → held / no_show / cancelled`, not a
+  boolean. A meeting in the diary and one the prospect never turned up to are
+  different things, and only one of them is billable. `meeting_held` is derived
+  from that column in the database, so the two can never disagree.
 - **The funnel**: contacts → called → connected → meetings booked → qualified →
   held → clients, each rate against the stage above it.
 - **Economics**: revenue per campaign, per booked or qualified or held meeting,
@@ -228,6 +246,11 @@ Separate from the e-mail statuses above, on the same row, and never mixed.
 | `do_not_call` | Asked us not to phone again (this does **not** stop e-mails) |
 | `max_attempts` | Ran out of attempts without ever deciding anything |
 
+Invariants enforced by the database, not by the application: a prospect in
+`callback` must have a `next_call_at` (no active contact without a next
+action), a booked meeting must have a date, only a booked meeting can carry a
+qualification judgement or a meeting outcome, and attempts cannot go negative.
+
 ## Test mode
 
 On by default, and applied globally rather than per campaign — one switch, in
@@ -255,7 +278,7 @@ npm run db:migrate  # apply supabase/migrations
 
 ### Tests
 
-`npm test` runs 293 tests. Most are ordinary unit tests, but the interesting
+`npm test` runs 313 tests. Most are ordinary unit tests, but the interesting
 ones need a real database:
 
 ```bash
@@ -286,10 +309,11 @@ npm run build && npm start &
 SMTP_PORT=2525 SESSION_SECRET=... DATABASE_URL=... npm run test:e2e
 ```
 
-70 checks driving the real UI: sign-in, mailbox setup and connection test, CSV
+75 checks driving the real UI: sign-in, mailbox setup and connection test, CSV
 import, sequence editing, campaign start, a worker tick, suppression, the
 unsubscribe link under every HTTP method, the calling workspace through to a
-booked and qualified meeting, and the cron endpoint's authorisation. It writes to whichever database the server points at, so aim it
+booked, qualified meeting and on to a no-show, and the cron endpoint's
+authorisation. It writes to whichever database the server points at, so aim it
 at a scratch database.
 
 `SESSION_SECRET` and `DATABASE_URL` must match what the server is running with.

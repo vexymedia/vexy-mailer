@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getCallContact, getContactTimeline } from "@/lib/queries/calling";
-import { callOutcomeLabel, callStatusLabel, formatCzk } from "@/lib/calling";
+import { MEETING_OUTCOME_LABELS, callOutcomeLabel, callStatusLabel, formatCzk } from "@/lib/calling";
 import { PageHeader, Stat, StatusBadge, DateTime } from "@/components/ui";
 import { MeetingActions } from "@/components/meeting-actions";
 
@@ -107,8 +107,8 @@ export default async function ContactTimelinePage({ params }: { params: Promise<
                   </dd>
                 </div>
                 <div>
-                  <dt className="text-zinc-500">Uskutečněná</dt>
-                  <dd className="text-zinc-900">{contact.meeting_held ? "ano" : "zatím ne"}</dd>
+                  <dt className="text-zinc-500">Stav</dt>
+                  <dd className="text-zinc-900">{MEETING_OUTCOME_LABELS[contact.meeting_outcome]}</dd>
                 </div>
                 {contact.deal_value !== null ? (
                   <div>
@@ -125,7 +125,7 @@ export default async function ContactTimelinePage({ params }: { params: Promise<
               <MeetingActions
                 campaignContactId={contact.id}
                 qualified={contact.meeting_qualified}
-                held={contact.meeting_held}
+                outcome={contact.meeting_outcome}
               />
             </div>
           ) : (

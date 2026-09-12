@@ -219,3 +219,24 @@ select call_status, count(*) from campaign_contacts
 only: it does not add anyone to the do-not-contact list and does not pause the
 sequence. If someone asks for both, suppress them under **Nekontaktovat** as
 well — that is the switch that stops e-mail.
+
+### Two more numbers to look at before the pilot
+
+**Stranded contacts.** The Volání tab shows them in an amber banner. They are
+open on the calling side but have no phone number, so they are not in the queue
+and never will be — while still counting as unfinished work in every tile above:
+
+```sql
+select count(*) from campaign_contacts cc join contacts c on c.id = cc.contact_id
+ where cc.campaign_id = '...' and cc.call_status in ('new','in_progress','callback')
+   and (c.phone is null or btrim(c.phone) = '');
+```
+
+**Meetings that did not happen.** A booked meeting stays `scheduled` until
+somebody says what became of it. Billing on held meetings with everything still
+`scheduled` means nobody has closed the loop:
+
+```sql
+select meeting_outcome, count(*) from campaign_contacts
+ where campaign_id = '...' and meeting_booked group by 1;
+```

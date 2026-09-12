@@ -1,6 +1,10 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getNextCall, getCampaignCallingReport, listCallers } from "@/lib/queries/calling";
+import { getSelectedCallerId } from "@/lib/caller-session";
+import { CallerPicker } from "@/components/caller-picker";
+import { ActionForm, SubmitButton } from "@/components/action-form";
+import { clearCallerAction } from "@/lib/actions";
 import { PageHeader, EmptyState, Stat } from "@/components/ui";
 import { CallWorkspace } from "@/components/call-workspace";
 
@@ -18,12 +22,44 @@ export default async function CallerWorkspacePage({
   searchParams: Promise<{ caller?: string }>;
 }) {
   const { id } = await params;
-  const { caller } = await searchParams;
+  await searchParams;
 
-  const [next, report, callers] = await Promise.all([
-    getNextCall(id, caller ?? null),
-    getCampaignCallingReport(id),
+  const [selectedCallerId, callers] = await Promise.all([
+    getSelectedCallerId(),
     listCallers({ activeOnly: true }),
+  ]);
+  const caller = callers.find((c) => c.id === selectedCallerId) ?? null;
+
+  // Nobody can be handed a prospect until we know who is holding them, so the
+  // caller is asked first and the queue is not touched before that.
+  if (!caller) {
+    const [campaign] = await import("@/lib/db").then(({ sql }) =>
+      sql<{ name: string }[]>`select name from campaigns where id = ${id}`,
+    );
+    if (!campaign) notFound();
+    return (
+      <>
+        <PageHeader
+          title={campaign.name}
+          description="Fronta volání"
+          actions={<Link href={`/campaigns/${id}?tab=volani`} className="btn-secondary">Přehled kampaně</Link>}
+        />
+        {callers.length === 0 ? (
+          <EmptyState
+            title="Není zadaný žádný caller"
+            description="Volání se zapisuje na konkrétního callera. Nejdřív někoho přidejte."
+            action={{ href: "/calleri", label: "Přidat callera" }}
+          />
+        ) : (
+          <CallerPicker campaignId={id} callers={callers.map((c) => ({ id: c.id, name: c.name }))} />
+        )}
+      </>
+    );
+  }
+
+  const [next, report] = await Promise.all([
+    getNextCall(id, caller.id),
+    getCampaignCallingReport(id),
   ]);
 
   if (!next) {
@@ -54,6 +90,11 @@ export default async function CallerWorkspacePage({
         description="Vytočit číslo, zapsat výsledek, další kontakt se načte sám."
         actions={
           <>
+            <ActionForm action={clearCallerAction} hideMessages>
+              <input type="hidden" name="campaign_id" value={id} />
+              <input type="hidden" name="campaign_contact_id" value={next.prospect.id} />
+              <SubmitButton className="btn-secondary">Volá {caller.name} — změnit</SubmitButton>
+            </ActionForm>
             <Link href={`/campaigns/${id}?tab=volani`} className="btn-secondary">Přehled kampaně</Link>
             <Link href="/volani" className="btn-secondary">Jiná kampaň</Link>
           </>
@@ -80,15 +121,8 @@ export default async function CallerWorkspacePage({
             remaining={next.remaining}
             maxAttempts={next.campaign.max_call_attempts}
             qualificationCriteria={next.script.qualification}
-            callers={callers.map((c) => ({ id: c.id, name: c.name }))}
+            callerName={caller.name}
           />
-          {callers.length === 0 ? (
-            <p className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-              Není zadaný žádný caller. Hovory se uloží bez přiřazení — přidejte callera v sekci{" "}
-              <Link href="/calleri" className="underline">Calleři</Link>.
-            </p>
-          ) : null}
-
           <p className="mt-3 text-xs text-zinc-500">
             <Link href={`/kontakt/${next.prospect.id}`} className="underline">
               Historie tohoto kontaktu

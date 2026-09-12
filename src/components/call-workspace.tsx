@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useFormStatus } from "react-dom";
 import { logCallAction } from "@/lib/actions";
 import { ActionForm } from "./action-form";
@@ -108,47 +108,23 @@ export function CallWorkspace({
   remaining,
   maxAttempts,
   qualificationCriteria,
-  callers,
+  callerName,
 }: {
   prospect: CallProspect;
   remaining: number;
   maxAttempts: number;
   qualificationCriteria: string | null;
-  callers: { id: string; name: string }[];
+  callerName: string;
 }) {
-  const [callerId, setCallerId] = useState("");
   // Outcomes that need one more piece of information before they can be saved.
   type Step = "callback_at" | "meeting_at" | "deal_value";
   const [pending, setPending] = useState<{ outcome: CallOutcome; requires: Step } | null>(null);
-
-  // The caller picks themselves once per browser, not once per call. The id
-  // is only remembered if it still names an active caller, so a retired one
-  // cannot keep being attributed calls from a stale browser.
-  useEffect(() => {
-    try {
-      const stored = window.localStorage.getItem("vexy.caller_id") ?? "";
-      if (callers.some((c) => c.id === stored)) setCallerId(stored);
-      else if (callers.length === 1) setCallerId(callers[0].id);
-    } catch {
-      /* private window: the choice is simply not remembered */
-    }
-  }, [callers]);
-
-  function rememberCaller(value: string) {
-    setCallerId(value);
-    try {
-      window.localStorage.setItem("vexy.caller_id", value);
-    } catch {
-      /* ignore */
-    }
-  }
 
   const name = [prospect.first_name, prospect.last_name].filter(Boolean).join(" ") || prospect.email;
 
   return (
     <ActionForm action={logCallAction} className="space-y-4">
       <input type="hidden" name="campaign_contact_id" value={prospect.id} />
-      <input type="hidden" name="caller_id" value={callerId} />
 
       <div className="card p-6">
         <div className="flex flex-wrap items-start justify-between gap-4">
@@ -277,19 +253,9 @@ export function CallWorkspace({
             <textarea id="note" name="note" rows={2} className="input" placeholder="Co bylo domluveno…" />
           </div>
           <div>
-            <label className="label" htmlFor="caller">Kdo volá</label>
-            <select
-              id="caller"
-              value={callerId}
-              onChange={(event) => rememberCaller(event.target.value)}
-              className="input"
-            >
-              <option value="">— nevybráno —</option>
-              {callers.map((c) => (
-                <option key={c.id} value={c.id}>{c.name}</option>
-              ))}
-            </select>
-            <p className="hint">Zapamatuje se v prohlížeči.</p>
+            <span className="label">Kdo volá</span>
+            <p className="text-sm font-medium text-zinc-900">{callerName}</p>
+            <p className="hint">Platí pro celou směnu.</p>
           </div>
         </div>
       </div>

@@ -27,8 +27,9 @@ import {
   sendManualReply,
   setClassification,
 } from "@/lib/queries/inbox";
-import { createCaller, logCall, setCallerActive, updateMeeting } from "@/lib/queries/calling";
-import { callOutcomeLabel, isCallOutcome } from "@/lib/calling";
+import { createCaller, logCall, releaseCall, setCallerActive, updateMeeting } from "@/lib/queries/calling";
+import { clearSelectedCaller, getSelectedCallerId, setSelectedCallerId } from "@/lib/caller-session";
+import { callOutcomeLabel, isCallOutcome, isMeetingOutcome, type MeetingOutcome } from "@/lib/calling";
 import type { Classification } from "@/lib/types";
 
 export interface ActionState {
@@ -596,7 +597,9 @@ export async function logCallAction(_prev: ActionState, formData: FormData): Pro
   const result = await logCall({
     campaignContactId,
     outcome,
-    callerId: String(formData.get("caller_id") ?? "") || null,
+    // From the session, not the form: an outcome is attributed to whoever is
+    // actually at this workstation, and a stale tab cannot credit someone else.
+    callerId: await getSelectedCallerId(),
     note: String(formData.get("note") ?? "") || null,
     callbackAt,
     meetingAt,
@@ -614,11 +617,13 @@ export async function logCallAction(_prev: ActionState, formData: FormData): Pro
 export async function updateMeetingAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
   await requireAuth();
   const campaignContactId = String(formData.get("campaign_contact_id") ?? "");
-  const rawHeld = String(formData.get("held") ?? "");
+  const rawOutcome = String(formData.get("meeting_outcome") ?? "");
   const rawQualified = String(formData.get("qualified") ?? "");
 
+  if (rawOutcome !== "" && !isMeetingOutcome(rawOutcome)) return fail("Neplatný stav schůzky.");
+
   const result = await updateMeeting(campaignContactId, {
-    held: rawHeld === "" ? undefined : rawHeld === "yes",
+    outcome: rawOutcome === "" ? undefined : (rawOutcome as MeetingOutcome),
     qualified: rawQualified === "" ? undefined : rawQualified === "yes",
   });
   if (!result.ok) return fail("Schůzka nebyla nalezena — nejprve ji domluvte přes výsledek hovoru.");
@@ -743,4 +748,32 @@ export async function toggleCallerAction(_prev: ActionState, formData: FormData)
   revalidatePath("/calleri");
   revalidatePath("/volani", "layout");
   return { success: active ? "Caller je znovu aktivní." : "Caller deaktivován." };
+}
+
+/** Records who is at this workstation, for the rest of the shift. */
+export async function selectCallerAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  await requireAuth();
+  const callerId = String(formData.get("caller_id") ?? "");
+  const campaignId = String(formData.get("campaign_id") ?? "");
+  if (!callerId) return fail("Vyberte, kdo volá.");
+
+  const [caller] = await sql<{ id: string }[]>`
+    select id from callers where id = ${callerId} and active
+  `;
+  if (!caller) return fail("Tento caller neexistuje nebo je deaktivovaný.");
+
+  await setSelectedCallerId(callerId);
+  redirect(campaignId ? `/volani/${campaignId}` : "/volani");
+}
+
+/**
+ * Hands the workstation back. The prospect currently held is released rather
+ * than left leased, so the next caller is offered them immediately.
+ */
+export async function clearCallerAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  await requireAuth();
+  const holding = String(formData.get("campaign_contact_id") ?? "");
+  if (holding) await releaseCall(holding);
+  await clearSelectedCaller();
+  redirect(String(formData.get("campaign_id") ?? "") ? `/volani/${formData.get("campaign_id")}` : "/volani");
 }

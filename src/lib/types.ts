@@ -1,6 +1,12 @@
-import type { CallOutcome, CallStatus, CallerCostModel, RevenueModel } from "./calling";
+import type {
+  CallOutcome,
+  CallStatus,
+  CallerCostModel,
+  MeetingOutcome,
+  RevenueModel,
+} from "./calling";
 
-export type { CallOutcome, CallStatus, CallerCostModel, RevenueModel };
+export type { CallOutcome, CallStatus, CallerCostModel, MeetingOutcome, RevenueModel };
 
 export type CampaignStatus = "draft" | "active" | "paused" | "completed";
 
@@ -138,7 +144,11 @@ export interface CampaignContact {
   meeting_at: Date | null;
   /** null = not judged yet. */
   meeting_qualified: boolean | null;
+  /** Derived in the database from meeting_outcome; never written directly. */
   meeting_held: boolean;
+  meeting_outcome: MeetingOutcome;
+  call_locked_until: Date | null;
+  call_locked_by: string | null;
   deal_value: number | null;
 }
 

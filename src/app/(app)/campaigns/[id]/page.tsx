@@ -10,6 +10,7 @@ import {
   type CallFilter,
 } from "@/lib/queries/calling";
 import {
+  MEETING_OUTCOME_LABELS,
   callOutcomeLabel,
   callStatusLabel,
   formatCzk,
@@ -243,6 +244,32 @@ async function CallingTab({ campaign, filter: rawFilter }: { campaign: Campaign;
         {tile("won", "Klienti", report.counts.clients_won, report.counts.clients_won ? "good" : undefined)}
       </div>
 
+      <div className="card grid grid-cols-2 gap-4 p-5 sm:grid-cols-4">
+        <Stat label="Uskutečněné schůzky" value={report.counts.meetings_held} />
+        <Stat
+          label="Nedorazili"
+          value={report.counts.meetings_no_show}
+          tone={report.counts.meetings_no_show > 0 ? "danger" : undefined}
+        />
+        <Stat label="Nevolat (globálně)" value={report.do_not_call} />
+        <Stat
+          label="Bez telefonu"
+          value={report.stranded}
+          tone={report.stranded > 0 ? "danger" : undefined}
+        />
+      </div>
+
+      {report.stranded > 0 ? (
+        <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          <strong>{report.stranded} kontaktů nelze volat — chybí telefonní číslo.</strong> Nejsou ve
+          frontě a nikdy se v ní neobjeví, takže v číslech výše vypadají jako nevyřízená práce.{" "}
+          <Link href={`/campaigns/${campaign.id}?tab=volani&filter=no_phone`} className="underline">
+            Zobrazit je
+          </Link>
+          .
+        </div>
+      ) : null}
+
       {report.meetings_unjudged > 0 ? (
         <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
           <strong>{report.meetings_unjudged} schůzek zatím nemá posouzenou kvalifikaci.</strong>{" "}
@@ -359,8 +386,16 @@ async function CallingTab({ campaign, filter: rawFilter }: { campaign: Campaign;
                               ? "nekvalifikovaná"
                               : "neposouzeno"}
                         </span>
-                        {row.meeting_held ? (
-                          <span className="badge bg-blue-50 text-blue-700 ring-blue-200">uskutečněná</span>
+                        {row.meeting_outcome !== "scheduled" ? (
+                          <span
+                            className={`badge ${
+                              row.meeting_outcome === "held"
+                                ? "bg-blue-50 text-blue-700 ring-blue-200"
+                                : "bg-red-50 text-red-700 ring-red-200"
+                            }`}
+                          >
+                            {MEETING_OUTCOME_LABELS[row.meeting_outcome]}
+                          </span>
                         ) : null}
                       </div>
                     </>
