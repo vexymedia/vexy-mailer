@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useEffect, useRef } from "react";
 import { useFormStatus } from "react-dom";
 import type { ReactNode } from "react";
 import type { ActionState } from "@/lib/actions";
@@ -14,13 +14,27 @@ export function ActionForm({
   children,
   className,
   hideMessages,
+  onSuccess,
 }: {
   action: (prev: ActionState, formData: FormData) => Promise<ActionState>;
   children: ReactNode | ((state: ActionState) => ReactNode);
   className?: string;
   hideMessages?: boolean;
+  /** Zavolá se jednou po každém úspěšném odeslání. */
+  onSuccess?: (state: ActionState) => void;
 }) {
   const [state, formAction] = useActionState(action, {});
+  const handled = useRef<ActionState | null>(null);
+
+  useEffect(() => {
+    if (!onSuccess) return;
+    // Porovnává se identita stavu, ne jeho obsah: dvě po sobě jdoucí
+    // uložení vrátí stejný text, ale jiný objekt.
+    if (state === handled.current) return;
+    handled.current = state;
+    if (state.success && !state.error) onSuccess(state);
+  }, [state, onSuccess]);
+
   return (
     <form action={formAction} className={className}>
       {!hideMessages ? <Messages state={state} /> : null}

@@ -2,6 +2,7 @@ import { sql } from "@/lib/db";
 import { unsuppressEmailAction, suppressEmailAction } from "@/lib/actions";
 import { PageHeader, Table, DateTime } from "@/components/ui";
 import { ActionForm, SubmitButton } from "@/components/action-form";
+import { NastaveniTabs } from "@/components/section-tabs";
 
 export const dynamic = "force-dynamic";
 
@@ -24,6 +25,7 @@ export default async function SuppressionPage() {
         title="Nekontaktovat"
         description="Globální blokační seznam. Tyto adresy se odstraní ze všech kampaní a databáze je do žádné nové nepustí."
       />
+      <NastaveniTabs active={"/suppression"} />
 
       <div className="mb-6 max-w-xl">
         <ActionForm action={suppressEmailAction} className="card p-5">

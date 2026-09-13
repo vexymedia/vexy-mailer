@@ -280,6 +280,12 @@ describe("the queue", () => {
     const mine = await calling.listCallQueue(campaignId, { callerId });
     expect(mine.map((q) => q.id).sort()).toEqual([ids[1], ids[2]].sort());
 
+    // "Nezastižen" naplánoval další pokus na příští pracovní den, takže dnes
+    // ids[0] nevidí nikdo. Až bude follow-up splatný, patří tomu, kdo volal.
+    expect(await calling.listCallQueue(campaignId, { callerId: other })).toHaveLength(2);
+    await sql`update campaign_contacts set next_call_at = now() - interval '1 minute'
+               where id = ${ids[0]}`;
+
     const theirs = await calling.listCallQueue(campaignId, { callerId: other });
     expect(theirs.map((q) => q.id)).toContain(ids[0]);
   });

@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { formatDateTime } from "@/lib/datetime";
 import type { ReactNode } from "react";
 
 export function PageHeader({
@@ -103,13 +104,16 @@ export function Stat({ label, value, tone }: { label: string; value: ReactNode; 
   );
 }
 
-/** Renders a timestamp in the browser's locale, with a stable server fallback. */
+/**
+ * Časový údaj v české podobě a v pražské zóně. Zóna je pevná schválně -
+ * viz lib/datetime.ts.
+ */
 export function DateTime({ value, fallback = "—" }: { value: Date | string | null; fallback?: string }) {
   if (!value) return <span className="text-zinc-400">{fallback}</span>;
   const date = typeof value === "string" ? new Date(value) : value;
   return (
     <time dateTime={date.toISOString()} title={date.toISOString()} className="tabular-nums">
-      {date.toISOString().slice(0, 16).replace("T", " ")}
+      {formatDateTime(date)}
     </time>
   );
 }
@@ -125,4 +129,100 @@ export function Table({ head, children }: { head: ReactNode; children: ReactNode
       </div>
     </div>
   );
+}
+
+/**
+ * KPI dlaždice na Přehledu. Vždy vede někam dál - číslo, na které se nedá
+ * kliknout, je jen dekorace.
+ */
+export function StatCard({
+  label,
+  value,
+  hint,
+  href,
+  tone,
+}: {
+  label: string;
+  value: ReactNode;
+  hint?: string;
+  href?: string;
+  tone?: "danger" | "good" | "warn";
+}) {
+  const valueTone =
+    tone === "danger"
+      ? "text-red-600"
+      : tone === "good"
+        ? "text-emerald-600"
+        : tone === "warn"
+          ? "text-amber-600"
+          : "text-zinc-900";
+
+  const body = (
+    <>
+      <dt className="text-xs font-medium uppercase tracking-wide text-zinc-500">{label}</dt>
+      <dd className={`mt-2 text-3xl font-semibold tabular-nums ${valueTone}`}>{value}</dd>
+      {hint ? <p className="mt-1 text-xs text-zinc-500">{hint}</p> : null}
+    </>
+  );
+
+  if (!href) return <div className="card p-5">{body}</div>;
+  return (
+    <Link href={href} className="card p-5 transition-colors hover:border-zinc-300 hover:bg-zinc-50/60">
+      {body}
+    </Link>
+  );
+}
+
+/** Podnavigace sekce. Jeden vzhled pro Oslovení, Komunikaci i Nastavení. */
+export function Tabs({ items, active }: { items: { href: string; label: string }[]; active: string }) {
+  return (
+    <div className="tabs mb-6">
+      {items.map((item) => (
+        <Link
+          key={item.href}
+          href={item.href}
+          className={`tab ${item.href === active ? "tab-active" : ""}`}
+          aria-current={item.href === active ? "page" : undefined}
+        >
+          {item.label}
+        </Link>
+      ))}
+    </div>
+  );
+}
+
+/** Priorita firmy. Barva nese význam, ne dekoraci. */
+export function PriorityBadge({ value }: { value: string }) {
+  const styles: Record<string, string> = {
+    high: "bg-red-50 text-red-700 ring-red-200",
+    normal: "bg-zinc-50 text-zinc-600 ring-zinc-200",
+    low: "bg-zinc-50 text-zinc-400 ring-zinc-200",
+  };
+  const labels: Record<string, string> = { high: "Vysoká", normal: "Běžná", low: "Nízká" };
+  return <span className={`badge ${styles[value] ?? styles.normal}`}>{labels[value] ?? value}</span>;
+}
+
+/** Stav firmy v procesu. */
+export function CompanyStatusBadge({ value }: { value: string }) {
+  const styles: Record<string, string> = {
+    new: "bg-zinc-50 text-zinc-600 ring-zinc-200",
+    ready: "bg-sky-50 text-sky-700 ring-sky-200",
+    in_progress: "bg-indigo-50 text-indigo-700 ring-indigo-200",
+    interested: "bg-emerald-50 text-emerald-700 ring-emerald-200",
+    meeting: "bg-emerald-50 text-emerald-700 ring-emerald-200",
+    won: "bg-emerald-100 text-emerald-800 ring-emerald-300",
+    lost: "bg-zinc-50 text-zinc-400 ring-zinc-200",
+    excluded: "bg-orange-50 text-orange-700 ring-orange-200",
+  };
+  const labels: Record<string, string> = {
+    new: "Nová",
+    ready: "Připravená",
+    in_progress: "Oslovujeme",
+    interested: "Zájem",
+    meeting: "Schůzka",
+    won: "Klient",
+    lost: "Nerelevantní",
+    excluded: "Vyloučená",
+  };
+  return <span className={`badge ${styles[value] ?? styles.new}`}>{labels[value] ?? value}</span>;
 }

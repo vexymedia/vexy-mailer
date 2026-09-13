@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { listContactOverview } from "@/lib/queries/contacts";
 import { PageHeader, StatusBadge, Table, DateTime } from "@/components/ui";
 import { ImportForm } from "@/components/import-form";
@@ -22,7 +23,11 @@ export default async function ContactsPage({
 
   return (
     <>
-      <PageHeader title="Kontakty" description={`${total} řádků. Kontakt se objeví jednou za každou kampaň, ve které je.`} />
+      <PageHeader
+        title="Všechny kontakty"
+        description={`${total} řádků. Kontakt je člověk uvnitř firmy — rozhodujeme se o firmě.`}
+        actions={<Link href="/firmy" className="btn-secondary">Zobrazit po firmách</Link>}
+      />
 
       <div className="mb-6 space-y-4">
         <ImportForm />

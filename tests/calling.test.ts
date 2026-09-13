@@ -4,10 +4,15 @@ import {
   buildFunnel,
   computeEconomics,
   CALL_OUTCOMES,
+  nextAttemptAt,
   orderCallQueue,
+  PRIMARY_CALL_OUTCOMES,
   queuePriority,
+  SECONDARY_CALL_OUTCOMES,
   type CallCounts,
 } from "@/lib/calling";
+import { nextCompanyStatus } from "@/lib/companies";
+import { formatTime, pragueDay } from "@/lib/datetime";
 
 /**
  * The calling rules that decide persistence and money, tested without a
@@ -17,10 +22,25 @@ import {
 
 const NOW = new Date("2026-09-11T09:00:00Z");
 
-describe("the twelve call outcomes", () => {
-  it("has exactly twelve, each with a unique value", () => {
-    expect(CALL_OUTCOMES).toHaveLength(12);
-    expect(new Set(CALL_OUTCOMES.map((o) => o.value)).size).toBe(12);
+describe("the call outcomes", () => {
+  it("has a unique value and a company status for each", () => {
+    expect(new Set(CALL_OUTCOMES.map((o) => o.value)).size).toBe(CALL_OUTCOMES.length);
+    for (const outcome of CALL_OUTCOMES) {
+      expect(outcome.companyStatus, outcome.value).toBeTruthy();
+    }
+  });
+
+  it("keeps the primary buttons down to the handful a caller uses all day", () => {
+    expect(PRIMARY_CALL_OUTCOMES.map((o) => o.value)).toEqual([
+      "meeting_booked",
+      "callback",
+      "no_answer",
+      "not_interested",
+      "send_info",
+    ]);
+    expect(PRIMARY_CALL_OUTCOMES.length + SECONDARY_CALL_OUTCOMES.length).toBe(
+      CALL_OUTCOMES.length,
+    );
   });
 
   it("only asks for a date on the two outcomes that schedule something", () => {
@@ -94,8 +114,9 @@ describe("callbacks", () => {
     expect(result.nextCallAt).toEqual(when);
   });
 
-  it("does not leave a next action behind on any other outcome", () => {
-    for (const outcome of CALL_OUTCOMES.filter((o) => o.value !== "callback")) {
+  it("leaves no next action behind on an outcome that closed the prospect", () => {
+    const closed = CALL_OUTCOMES.filter((o) => o.status !== null && o.value !== "callback");
+    for (const outcome of closed) {
       const result = applyCallOutcome({
         outcome: outcome.value,
         attemptsBefore: 0,
@@ -105,6 +126,113 @@ describe("callbacks", () => {
       });
       expect(result.nextCallAt, outcome.value).toBeNull();
     }
+  });
+});
+
+/**
+ * Tohle je jádro produktu: firma, kterou dál řešíme, musí mít termín dalšího
+ * kroku. Bez toho se "nezvedá" ztratí a nikdo si toho nevšimne.
+ */
+describe("no open prospect without a next step", () => {
+  it("schedules the next attempt for every outcome that leaves the prospect open", () => {
+    const open = CALL_OUTCOMES.filter((o) => o.status === null);
+    expect(open.length).toBeGreaterThan(0);
+    for (const outcome of open) {
+      const result = applyCallOutcome({
+        outcome: outcome.value,
+        attemptsBefore: 0,
+        maxAttempts: 4,
+        now: NOW,
+      });
+      expect(result.status, outcome.value).toBe("in_progress");
+      expect(result.nextCallAt, outcome.value).not.toBeNull();
+      expect(result.nextCallAt!.getTime(), outcome.value).toBeGreaterThan(NOW.getTime());
+    }
+  });
+
+  it("counts the delay in working days, so Friday leads to Monday", () => {
+    // Pátek 11. 9. 2026 odpoledne.
+    const friday = new Date("2026-09-11T15:00:00Z");
+    expect(nextAttemptAt(friday, 1)).toEqual(new Date("2026-09-13T22:00:00Z"));
+    // Začátek pondělka v Praze, ne "za 24 hodin": jinak by follow-up naskočil
+    // callerovi až odpoledne. V UI se to čte jako pondělí 00:00.
+    expect(pragueDay(nextAttemptAt(friday, 1))).toBe("2026-09-14");
+    expect(formatTime(nextAttemptAt(friday, 1))).toBe("00:00");
+  });
+
+  it("skips the whole weekend when the delay spans it", () => {
+    // Čtvrtek + 3 pracovní dny = úterý.
+    const thursday = new Date("2026-09-10T09:00:00Z");
+    expect(pragueDay(nextAttemptAt(thursday, 3))).toBe("2026-09-15");
+  });
+
+  it("leaves the weekend itself pointing at Monday", () => {
+    const saturday = new Date("2026-09-12T09:00:00Z");
+    expect(pragueDay(nextAttemptAt(saturday, 1))).toBe("2026-09-14");
+  });
+
+  it("lands on a real Prague midnight across the autumn clock change", () => {
+    // Letní čas končí v neděli 25. 10. 2026. Pátek 23. 10. + 1 pracovní den
+    // je pondělí 26. 10., kdy už platí posun +1, ne +2.
+    const before = new Date("2026-10-23T15:00:00Z");
+    const next = nextAttemptAt(before, 1);
+    expect(pragueDay(next)).toBe("2026-10-26");
+    expect(formatTime(next)).toBe("00:00");
+    expect(next.toISOString()).toBe("2026-10-25T23:00:00.000Z");
+  });
+
+  it("plans nothing once the attempts run out", () => {
+    const spent = applyCallOutcome({
+      outcome: "no_answer",
+      attemptsBefore: 3,
+      maxAttempts: 4,
+      now: NOW,
+    });
+    expect(spent.status).toBe("max_attempts");
+    expect(spent.nextCallAt).toBeNull();
+    // A prospect nobody will dial again must not sit in the company list as
+    // work in progress.
+    expect(spent.companyStatus).toBe("lost");
+  });
+});
+
+describe("what a call does to the company", () => {
+  it("moves the company forward but never backwards", () => {
+    expect(nextCompanyStatus("new", "in_progress")).toBe("in_progress");
+    expect(nextCompanyStatus("in_progress", "interested")).toBe("interested");
+    expect(nextCompanyStatus("interested", "meeting")).toBe("meeting");
+    // Špatné číslo u druhého kontaktu nesmí shodit firmu se schůzkou zpět
+    // na "oslovujeme".
+    expect(nextCompanyStatus("meeting", "in_progress")).toBe("meeting");
+  });
+
+  it("records a negative answer even when the company was further along", () => {
+    expect(nextCompanyStatus("interested", "lost")).toBe("lost");
+    expect(nextCompanyStatus("meeting", "lost")).toBe("lost");
+  });
+
+  it("lets a new conversation reopen a company that was written off", () => {
+    expect(nextCompanyStatus("lost", "in_progress")).toBe("in_progress");
+  });
+
+  it("treats do-not-call and a won client as final", () => {
+    expect(nextCompanyStatus("meeting", "excluded")).toBe("excluded");
+    expect(nextCompanyStatus("excluded", "in_progress")).toBe("excluded");
+    expect(nextCompanyStatus("won", "lost")).toBe("won");
+  });
+
+  it("maps each outcome onto the status a person would expect", () => {
+    const status = (outcome: Parameters<typeof applyCallOutcome>[0]["outcome"]) =>
+      applyCallOutcome({ outcome, attemptsBefore: 0, maxAttempts: 4, now: NOW,
+        callbackAt: NOW, meetingAt: NOW }).companyStatus;
+    expect(status("meeting_booked")).toBe("meeting");
+    expect(status("send_info")).toBe("interested");
+    expect(status("not_interested")).toBe("lost");
+    expect(status("not_icp")).toBe("lost");
+    expect(status("existing_customer")).toBe("won");
+    expect(status("do_not_call")).toBe("excluded");
+    // Špatné číslo vyřazuje člověka, ne firmu - ta má typicky další kontakt.
+    expect(status("wrong_number")).toBe("in_progress");
   });
 });
 
@@ -314,5 +442,16 @@ describe("campaign economics", () => {
     expect(economics.cac).toBeNull();
     expect(economics.roas).toBeNull();
     expect(economics.gross_margin).toBeNull();
+  });
+});
+
+describe("české skloňování v UI", () => {
+  it("skloňuje počty podle českých pravidel, ne anglických", async () => {
+    const { plural } = await import("@/lib/plan");
+    expect(plural(0, "kontakt", "kontakty", "kontaktů")).toBe("0 kontaktů");
+    expect(plural(1, "kontakt", "kontakty", "kontaktů")).toBe("1 kontakt");
+    expect(plural(3, "kontakt", "kontakty", "kontaktů")).toBe("3 kontakty");
+    expect(plural(5, "kontakt", "kontakty", "kontaktů")).toBe("5 kontaktů");
+    expect(plural(21, "firma", "firmy", "firem")).toBe("21 firem");
   });
 });

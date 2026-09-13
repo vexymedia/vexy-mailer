@@ -1,14 +1,16 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { dispatchTick } from "@/lib/engine/dispatch";
 import { pollReplies } from "@/lib/engine/replies";
+import { processCallPipeline } from "@/lib/telephony/pipeline";
 import { safeEqual } from "@/lib/crypto";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 /**
- * The worker tick. One call does one dispatcher pass and, at most every
- * REPLY_POLL_INTERVAL_MS per mailbox, one IMAP poll.
+ * The worker tick. One call does one dispatcher pass, at most every
+ * REPLY_POLL_INTERVAL_MS per mailbox one IMAP poll, and one pass over
+ * hovory čekající na přepis a analýzu.
  *
  * Designed to be driven by anything that can make an HTTP request once a
  * minute: Vercel Cron, cron-job.org, a GitHub Actions schedule, or a shell
@@ -39,11 +41,16 @@ async function handle(request: NextRequest) {
     // Dispatch first: sending is time-sensitive, reply polling is not.
     const dispatch = await dispatchTick();
     const replies = await pollReplies();
+    // Nahrávky a přepisy jsou na řadě poslední: e-mail i odpovědi jsou
+    // časově citlivé. Dostanou, co ze šedesátivteřinového limitu funkce
+    // zbylo, s rezervou na dokončení odpovědi.
+    const calls = await processCallPipeline({ deadline: started + 50_000 });
     return NextResponse.json({
       ok: true,
       durationMs: Date.now() - started,
       dispatch,
       replies,
+      calls,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

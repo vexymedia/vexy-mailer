@@ -55,6 +55,9 @@ async function shot(page, name) {
   if (OUT) await page.screenshot({ path: `${OUT}/${String(++stepNo).padStart(2, "0")}-${name}.png`, fullPage: true });
 }
 
+/** Čtecí spojení pro kontroly, které se z UI spolehlivě přečíst nedají. */
+const checkDb = postgres(DATABASE_URL, { max: 1, prepare: false });
+
 const browser = await chromium.launch(CHROMIUM ? { executablePath: CHROMIUM } : {});
 const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
 
@@ -196,10 +199,11 @@ try {
   await shot(page, "campaign-active");
 
   // ---- worker -----------------------------------------------------------
-  await page.goto(`${BASE}/`);
+  // Technická věc: patří do Nastavení, ne mezi hlavní akce na Přehledu.
+  await page.goto(`${BASE}/settings`);
   await page.click('button:has-text("Spustit worker")');
   await expectVisible(page, "text=simulated", "the worker runs and simulates a send in test mode");
-  await shot(page, "dashboard-active");
+  await shot(page, "worker-run");
 
   await page.goto(`${campaignUrl}?tab=aktivita`);
   await expectVisible(page, "text=E-mail krok 1 simulován", "the activity log records the simulated send");
@@ -292,7 +296,7 @@ try {
 
   // ---- inbox ------------------------------------------------------------
   await page.goto(`${BASE}/inbox`);
-  await expectVisible(page, "h1:has-text('Doručená pošta')", "the Inbox page renders");
+  await expectVisible(page, "h1:has-text('Odpovědi')", "the Inbox page renders");
   await expectVisible(page, "text=Zatím žádné odpovědi", "an empty inbox says so");
   for (const label of ["Vše", "Nepřečtené", "Pozitivní", "Vyžaduje akci"]) {
     await expectVisible(page, `a:has-text("${label}")`, `inbox filter "${label}" is present`);
@@ -307,7 +311,7 @@ try {
   await shot(page, "mailboxes");
 
   // ---- other pages render ----------------------------------------------
-  for (const [path, heading] of [["/activity", "Aktivita"], ["/campaigns", "Kampaně"], ["/contacts", "Kontakty"], ["/inbox", "Doručená pošta"], ["/calleri", "Calleři"], ["/volani", "Volání"]]) {
+  for (const [path, heading] of [["/activity", "Aktivita"], ["/campaigns", "Kampaně"], ["/contacts", "Kontakty"], ["/inbox", "Odpovědi"], ["/tym", "Tým"], ["/volani", "Volání"], ["/firmy", "Firmy"], ["/osloveni/fronta", "Fronta"], ["/osloveni/plan", "Plán"]]) {
     await page.goto(BASE + path);
     await expectVisible(page, `h1:has-text("${heading}")`, `${path} renders`);
   }
@@ -315,9 +319,9 @@ try {
   // ---- calling ----------------------------------------------------------
   // The whole caller journey: a caller exists, the campaign is switched on,
   // the queue offers someone, and one logged outcome books a qualified meeting.
-  await page.goto(`${BASE}/calleri`);
+  await page.goto(`${BASE}/tym`);
   await page.fill('input[name="name"]', "Jan Caller");
-  await page.click('button:has-text("Přidat callera")');
+  await page.click('button:has-text("Přidat do týmu")');
   await expectVisible(page, "text=Caller Jan Caller přidán", "a caller can be added");
   await expectVisible(page, "text=aktivní", "a new caller is active");
 
@@ -340,17 +344,17 @@ try {
   await expectVisible(page, "text=Kdo dnes volá?", "the workspace asks who is calling before dialling");
   await page.click('label:has(input[name="caller_id"])');
   await page.click('button:has-text("Začít volat")');
-  await expectVisible(page, "text=VOLAT +420777000", "the workspace offers a dialable number");
+  await expectVisible(page, "text=Zavolat +420777000", "the workspace offers a dialable number");
   await expectVisible(page, "text=Volá Jan Caller", "the chosen caller is shown and can be swapped");
   await expectVisible(page, "text=Dobrý den, tady Jan z VEXY.", "the script panel shows the opening");
   await expectVisible(page, "text=Pokus 1 z 4", "the workspace shows the attempt count");
   await shot(page, "calling-workspace");
 
-  await page.click('button:has-text("Domluvená schůzka")');
+  await page.click('button:has-text("Schůzka sjednána")');
   await expectVisible(page, 'input[name="meeting_at"]', "booking a meeting asks for a date");
   await expectVisible(page, "text=Rozhoduje o marketingu", "the qualification criteria are shown at the decision");
   await page.click('button:has-text("Uložit schůzku")');
-  await expectVisible(page, "text=Uloženo: Domluvená schůzka", "the meeting is logged");
+  await expectVisible(page, "text=Uloženo: Schůzka sjednána", "the meeting is logged");
   await shot(page, "calling-logged");
 
   await page.goto(`${campaignUrl}?tab=volani`);
@@ -371,6 +375,203 @@ try {
   await page.goto(`${campaignUrl}?tab=ekonomika`);
   await expectVisible(page, "h2:has-text('Náklad na výsledek')", "the economics tab renders");
   await shot(page, "calling-economics");
+
+  // ---- nová informační architektura --------------------------------------
+  await page.goto(`${BASE}/`);
+  for (const label of ["Přehled", "Firmy", "Oslovení", "Komunikace", "Aktivita", "Tým", "Nastavení"]) {
+    await expectVisible(page, `aside a:has-text("${label}")`, `sidebar má položku "${label}"`);
+  }
+  // Worker ani počty odeslaných e-mailů už nejsou tím hlavním na Přehledu.
+  await expectVisible(page, "text=Připravené firmy", "Přehled vede KPI o firmách");
+  await expectVisible(page, "text=Dnes řešit", "Přehled vede k dnešní práci");
+  await expectVisible(page, 'a:has-text("Začít oslovovat")', "Přehled má jedno hlavní CTA");
+  await expectVisible(page, "text=Pokusů o volání", "sedmidenní metriky jsou pojmenované podle dat");
+  await expectVisible(page, "text=Dovolatelnost", "Přehled ukáže dovolatelnost");
+  const overviewHtml = await page.content();
+  if (!/Spustit worker/.test(overviewHtml)) ok("worker už není CTA na Přehledu");
+  else fail("worker už není CTA na Přehledu", "tlačítko je pořád na dashboardu");
+  await shot(page, "prehled");
+
+  // ---- firmy --------------------------------------------------------------
+  await page.goto(`${BASE}/firmy`);
+  await expectVisible(page, "h1:has-text('Firmy')", "Firmy se vykreslí");
+  await expectVisible(page, "text=Acme", "firma vznikla z importovaných kontaktů");
+  for (const view of ["Dnes řešit", "Follow-up dnes", "Bez dalšího kroku", "High priority", "3+ pokusy", "Schůzky"]) {
+    await expectVisible(page, `a:has-text("${view}")`, `Firmy mají rychlý pohled "${view}"`);
+  }
+  for (const filterName of ["status", "priority", "owner", "krok", "aktivita"]) {
+    await expectVisible(page, `select[name="${filterName}"]`, `Firmy filtrují podle "${filterName}"`);
+  }
+  await expectVisible(page, "th:has-text('Pokusy')", "seznam firem ukáže počet pokusů");
+  await expectVisible(page, "th:has-text('Další krok')", "seznam firem ukáže další krok");
+
+  // Rychlý pohled skutečně filtruje, ne jen zvýrazní chip.
+  await page.goto(`${BASE}/firmy?krok=none`);
+  await expectVisible(page, "h1:has-text('Firmy')", "pohled Bez dalšího kroku se vykreslí");
+
+  await page.goto(`${BASE}/firmy`);
+  await page.click("table a[href^='/firmy/']");
+  await page.waitForURL(/\/firmy\/[0-9a-f-]+/);
+  await expectVisible(page, "text=Proč ji řešíme", "detail firmy vede důvodem");
+  await expectVisible(page, "text=Další krok", "detail firmy ukáže konkrétní další krok");
+  await expectVisible(page, "text=Koho kontaktovat", "detail firmy ukáže kontaktní osoby");
+  await expectVisible(page, 'a:has-text("Historie")', "kontakt má pracovní kartu s akcemi");
+  await expectVisible(page, "text=Co se stalo", "detail firmy má historii");
+
+  await page.fill('textarea[name="reason"]', "Výrobní firma, expanduje, nemá vlastní obchodní tým");
+  await page.selectOption('select[name="priority"]', "high");
+  await page.click('button:has-text("Uložit")');
+  await expectVisible(page, "text=Uloženo", "kontext firmy jde uložit");
+  await shot(page, "firma-detail");
+
+  // ---- oslovení -----------------------------------------------------------
+  await page.goto(`${BASE}/osloveni`);
+  await expectVisible(page, "h1:has-text('Dnes')", "Oslovení > Dnes se vykreslí jako pracovní režim");
+  for (const label of ["Dnes", "Fronta", "Plán"]) {
+    await expectVisible(page, `a:has-text("${label}")`, `Oslovení má záložku "${label}"`);
+  }
+  await expectVisible(page, "text=zpracováno", "pracovní režim ukáže postup dne");
+  // Po zápisu výsledku si workspace kampaně rovnou rezervoval další firmu,
+  // takže tady už může být rozdělaná práce. Obojí je správně - ověřuje se,
+  // že se člověk k hovoru dostane, ne kolik kliknutí zrovna zbývá.
+  const startCta = page.locator('button:has-text("Začít oslovovat")');
+  if ((await startCta.count()) > 0) {
+    ok("pracovní režim má jedno hlavní CTA");
+    await startCta.first().click();
+  } else {
+    ok("pracovní režim rovnou pokračuje na drženou firmu");
+  }
+  await expectVisible(page, "text=Jak hovor dopadl?", "po vytočení následuje panel s výsledky");
+  await expectVisible(page, "text=Hlavní kontakt", "pracovní karta ukáže správného člověka");
+  await expectVisible(page, "text=Další krok", "pracovní karta ukáže další krok");
+  for (const label of ["Schůzka sjednána", "Volat jindy", "Nezastižen", "Nemá zájem"]) {
+    await expectVisible(page, `button:has-text("${label}")`, `hlavní výsledek "${label}" je na jeden klik`);
+  }
+  await shot(page, "osloveni-dnes");
+
+  // Nezastižen musí vytvořit další krok, ne nechat firmu viset. Ověřuje se
+  // to na datech: když byla tahle firma v dnešní frontě poslední, formulář
+  // se po zápisu odmontuje a s ním i potvrzovací hláška.
+  await page.click('button:has-text("Nezastižen")');
+  await page.waitForTimeout(1500);
+  const logged = await checkDb`
+    select ca.outcome, cc.call_attempts, cc.next_call_at
+      from call_activities ca join campaign_contacts cc on cc.id = ca.campaign_contact_id
+     where ca.outcome = 'no_answer'
+     order by ca.called_at desc limit 1
+  `;
+  if (logged.length === 1 && logged[0].call_attempts >= 1 && logged[0].next_call_at) {
+    ok("Nezastižen zvýší pokus a naplánuje další krok");
+  } else {
+    fail("Nezastižen zvýší pokus a naplánuje další krok", JSON.stringify(logged[0] ?? null));
+  }
+  const stillOpen = await checkDb`
+    select count(*)::int as count from campaign_contacts
+     where call_status in ('new', 'in_progress', 'callback') and next_call_at is null
+  `;
+  if (stillOpen[0].count === 0) ok("žádná otevřená firma nezůstala bez dalšího kroku");
+  else fail("žádná otevřená firma nezůstala bez dalšího kroku", `${stillOpen[0].count} bez termínu`);
+
+  await page.goto(`${BASE}/osloveni/plan`);
+  await expectVisible(page, "h1:has-text('Plán')", "týdenní plán se vykreslí");
+  await page.fill('input[name="start"]', "09:00");
+  await page.fill('input[name="end"]', "11:00");
+  await page.selectOption('select[name="activity_type"]', "follow_up");
+  await page.fill('input[name="note"]', "Follow-upy po videu");
+  await page.click('button:has-text("Přidat blok")');
+  await expectVisible(page, "text=Blok naplánován", "do plánu jde přidat blok práce");
+  await expectVisible(page, "text=Follow-upy po videu", "blok je v týdnu vidět");
+  const startLink = page.locator('a:has-text("Začít")');
+  if ((await startLink.count()) > 0) {
+    const href = await startLink.first().getAttribute("href");
+    if (href === "/osloveni?rezim=followup") ok("z follow-up bloku vede Začít do follow-up fronty");
+    else fail("z follow-up bloku vede Začít do follow-up fronty", `href=${href}`);
+  } else {
+    // Prázdná follow-up fronta je legitimní stav; karta to musí říct.
+    await expectVisible(page, "text=nic k práci", "prázdný blok to řekne místo mrtvého tlačítka");
+  }
+  await page.goto(`${BASE}/osloveni?rezim=followup`);
+  await expectVisible(page, "h1:has-text('Follow-up')", "režim fronty je z hlavičky poznat");
+  await page.goto(`${BASE}/osloveni?rezim=prvni`);
+  await expectVisible(page, "h1:has-text('První oslovení')", "režim prvního oslovení se vykreslí");
+  await shot(page, "plan");
+
+  // ---- volání bez Twilia --------------------------------------------------
+  // Server běží bez TWILIO_* proměnných, takže se tu ověřuje ten stav, ve
+  // kterém aplikace je hned po nasazení: volání z prohlížeče vypnuté,
+  // a tlačítko Zavolat pořád k něčemu je.
+  await page.goto(`${BASE}/settings`);
+  await expectVisible(page, 'h2:has-text("Volání")', "nastavení má sekci Volání");
+  await expectVisible(page, "text=není nastaveno", "chybějící telefonie se hlásí, ne skrývá");
+  await expectVisible(page, "text=TWILIO_ACCOUNT_SID", "nastavení vypíše, které proměnné chybí");
+  await expectVisible(page, 'text=Nahrávat hovory', "nahrávání jde vypnout");
+  await shot(page, "nastaveni-volani");
+
+  await page.goto(`${BASE}/firmy`);
+  await page.click("table a[href^='/firmy/']");
+  await page.waitForURL(/\/firmy\/[0-9a-f-]+/);
+  const dialLink = page.locator('a[href^="tel:"]').first();
+  if ((await dialLink.count()) > 0) {
+    ok("bez Twilia zůstane Zavolat odkazem tel:");
+  } else {
+    fail("bez Twilia zůstane Zavolat odkazem tel:", "žádný tel: odkaz na detailu firmy");
+  }
+  // A hlavně: nesmí vzniknout hovor, který nikdo nezaložil.
+  const callRows = await checkDb`select count(*)::int as count from calls`;
+  if (callRows[0].count === 0) ok("samotné otevření stránky nezaloží hovor");
+  else fail("samotné otevření stránky nezaloží hovor", `${callRows[0].count} řádků v calls`);
+
+  // ---- responsive ---------------------------------------------------------
+  // Desktop je hlavní pracovní prostředí, ale hlavní obrazovky musí zůstat
+  // použitelné na telefonu. Kontroluje se to, co se skutečně rozbíjí:
+  // vodorovný přetok celé stránky a zmizelé hlavní CTA.
+  const screens = [
+    ["/", "Přehled"],
+    ["/firmy", "Firmy"],
+    ["/osloveni", "Dnes"],
+    ["/osloveni/plan", "Plán"],
+  ];
+  for (const [width, height] of [[400, 900], [820, 1000], [1280, 900]]) {
+    await page.setViewportSize({ width, height });
+    for (const [path, heading] of screens) {
+      await page.goto(BASE + path);
+      await expectVisible(page, `h1:has-text("${heading}")`, `${path} se vykreslí na ${width} px`);
+      const overflow = await page.evaluate(
+        () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      );
+      // Jeden pixel je zaokrouhlení, ne chyba layoutu.
+      if (overflow <= 1) ok(`${path} nepřetéká do strany na ${width} px`);
+      else fail(`${path} nepřetéká do strany na ${width} px`, `přetok ${overflow} px`);
+    }
+    if (width === 400) {
+      await page.goto(`${BASE}/firmy`);
+      await expectVisible(page, "ul.space-y-2 li.card", "na mobilu jsou firmy jako karty, ne tabulka");
+      await shot(page, "mobil-firmy");
+      // Hamburger je client component - klikat jde až po hydrataci.
+      const burger = page.locator('button[aria-label="Navigace"]');
+      await burger.waitFor({ state: "visible", timeout: 8000 });
+      await burger.click();
+      // Desktopový sidebar je ve stejném DOM, jen skrytý; ověřuje se odkaz
+      // ve vysunuté zásuvce, ne ten první v pořadí.
+      await expectVisible(
+        page,
+        "div.fixed nav a:has-text('Firmy')",
+        "na mobilu funguje navigace za hamburgerem",
+      );
+      // Zavření kliknutím do zásuvky, ne do překryvu: střed překryvu leží na
+      // 400 px pod samotnou zásuvkou, takže by to byl test Playwrightu,
+      // ne aplikace. Odkaz je navíc to, co uživatel reálně mačká.
+      await page.locator("div.fixed nav a:has-text('Přehled')").click();
+      await page.waitForURL(`${BASE}/`);
+      const drawerGone = (await page.locator("div.fixed nav").count()) === 0;
+      if (drawerGone) ok("mobilní navigace se po výběru zavře");
+      else fail("mobilní navigace se po výběru zavře", "zásuvka zůstala otevřená");
+      await shot(page, "mobil-firmy");
+      await expectVisible(page, 'a:has-text("Začít oslovovat")', "hlavní CTA zůstává na mobilu viditelné");
+      await shot(page, "mobil-prehled");
+    }
+  }
+  await page.setViewportSize({ width: 1280, height: 900 });
 
   // ---- unauthenticated cron endpoint ------------------------------------
   const unauth = await page.request.post(`${BASE}/api/cron/tick`);
@@ -397,6 +598,7 @@ try {
   await shot(page, "crash");
 } finally {
   await browser.close();
+  await checkDb.end({ timeout: 5 });
   if (OUT) writeFileSync(`${OUT}/results.txt`, steps.join("\n"));
   const failures = steps.filter((s) => s.startsWith("  FAIL")).length;
   console.log(`\n${steps.length - failures}/${steps.length} checks passed`);

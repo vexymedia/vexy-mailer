@@ -7,7 +7,7 @@ import { z } from "zod";
 import { sql } from "@/lib/db";
 import { requireAuth, checkPassword, createSessionToken, SESSION_COOKIE, sessionCookieOptions } from "@/lib/auth";
 import { logActivity } from "@/lib/activity";
-import { updateSettings } from "@/lib/settings";
+import { setCallRecordingEnabled, updateSettings } from "@/lib/settings";
 import { parseContactsCsv } from "@/lib/csv";
 import { hhmmToMinutes, assertValidTimezone } from "@/lib/schedule";
 import { findUnknownVariables } from "@/lib/template";
@@ -29,6 +29,8 @@ import {
 } from "@/lib/queries/inbox";
 import {
   claimNextCall,
+  scheduleNextStep,
+  type QueueMode,
   createCaller,
   logCall,
   releaseCall,
@@ -36,6 +38,15 @@ import {
   updateMeeting,
 } from "@/lib/queries/calling";
 import { clearSelectedCaller, getSelectedCallerId, setSelectedCallerId } from "@/lib/caller-session";
+import { updateCompany } from "@/lib/queries/companies";
+import {
+  COMPANY_PRIORITY_LABELS,
+  COMPANY_STATUS_LABELS,
+  type CompanyPriority,
+  type CompanyStatus,
+} from "@/lib/companies";
+import { createWorkBlock, deleteWorkBlock } from "@/lib/queries/plan";
+import { isActivityType, plural } from "@/lib/plan";
 import { callOutcomeLabel, isCallOutcome, isMeetingOutcome, type MeetingOutcome } from "@/lib/calling";
 import type { Classification } from "@/lib/types";
 
@@ -427,7 +438,7 @@ export async function saveStepsAction(_prev: ActionState, formData: FormData): P
     }
   });
 
-  await logActivity({ action: "Sekvence upravena", detail: `${steps.length} kroků`, campaignId });
+  await logActivity({ action: "Sekvence upravena", detail: plural(steps.length, "krok", "kroky", "kroků"), campaignId });
   revalidatePath(`/campaigns/${campaignId}`);
   return { success: `Sekvence uložena: ${steps.length} kroků.` };
 }
@@ -605,10 +616,15 @@ export async function logCallAction(_prev: ActionState, formData: FormData): Pro
   // actually at this workstation, and a stale tab cannot credit someone else.
   const callerId = await getSelectedCallerId();
 
+  // Telefonát, ze kterého výsledek vzešel. Nepovinné: zápis z mobilu
+  // žádný nemá a musí jít uložit stejně.
+  const rawCallId = String(formData.get("call_id") ?? "").trim();
+
   const result = await logCall({
     campaignContactId,
     outcome,
     callerId,
+    callId: rawCallId || null,
     note: String(formData.get("note") ?? "") || null,
     callbackAt,
     meetingAt,
@@ -620,9 +636,18 @@ export async function logCallAction(_prev: ActionState, formData: FormData): Pro
   // Submitting an outcome is the caller asking for the next number, so the
   // next prospect is reserved here - by an action - and not by the render that
   // follows it. Nothing else in the workspace ever takes a lease.
-  if (result.campaignId && callerId) await claimNextCall(result.campaignId, callerId);
+  //
+  // Prázdný scope znamená denní frontu napříč kampaněmi; vyplněný drží
+  // callera v jedné kampani, jak to dělá workspace kampaně.
+  if (callerId) {
+    const scope = String(formData.get("campaign_scope") ?? "") || null;
+    // Režim se přenáší z formuláře, aby blok "follow-up" nepodstrčil
+    // callerovi po prvním zápisu úplně nevolanou firmu.
+    await claimNextCall(scope, callerId, readMode(formData));
+  }
 
   revalidatePath("/volani", "layout");
+  revalidatePath("/osloveni", "layout");
   if (result.campaignId) revalidatePath(`/campaigns/${result.campaignId}`);
   return { success: `Uloženo: ${callOutcomeLabel(outcome)}.` };
 }
@@ -745,7 +770,7 @@ export async function saveCallerAction(_prev: ActionState, formData: FormData): 
     email: String(formData.get("email") ?? "").trim().toLowerCase() || null,
     phone: String(formData.get("phone") ?? "").trim() || null,
   });
-  revalidatePath("/calleri");
+  revalidatePath("/tym");
   revalidatePath("/volani", "layout");
   return { success: `Caller ${name} přidán.` };
 }
@@ -759,7 +784,7 @@ export async function toggleCallerAction(_prev: ActionState, formData: FormData)
   const id = String(formData.get("id") ?? "");
   const active = String(formData.get("active") ?? "") === "yes";
   await setCallerActive(id, active);
-  revalidatePath("/calleri");
+  revalidatePath("/tym");
   revalidatePath("/volani", "layout");
   return { success: active ? "Caller je znovu aktivní." : "Caller deaktivován." };
 }
@@ -777,8 +802,9 @@ export async function selectCallerAction(_prev: ActionState, formData: FormData)
   if (!caller) return fail("Tento caller neexistuje nebo je deaktivovaný.");
 
   await setSelectedCallerId(callerId);
-  if (campaignId) await claimNextCall(campaignId, callerId);
-  redirect(campaignId ? `/volani/${campaignId}` : "/volani");
+  await claimNextCall(campaignId || null, callerId);
+  const next = String(formData.get("next") ?? "");
+  redirect(next.startsWith("/") ? next : campaignId ? `/volani/${campaignId}` : "/osloveni");
 }
 
 /**
@@ -790,7 +816,15 @@ export async function clearCallerAction(_prev: ActionState, formData: FormData):
   const holding = String(formData.get("campaign_contact_id") ?? "");
   if (holding) await releaseCall(holding);
   await clearSelectedCaller();
-  redirect(String(formData.get("campaign_id") ?? "") ? `/volani/${formData.get("campaign_id")}` : "/volani");
+  const next = String(formData.get("next") ?? "");
+  const campaignId = String(formData.get("campaign_id") ?? "");
+  redirect(next.startsWith("/") ? next : campaignId ? `/volani/${campaignId}` : "/osloveni");
+}
+
+/** Pracovní režim z formuláře - viz QueueMode v queries/calling.ts. */
+function readMode(formData: FormData): QueueMode | null {
+  const raw = String(formData.get("mode") ?? "");
+  return raw === "first" || raw === "followup" ? raw : null;
 }
 
 /**
@@ -800,12 +834,124 @@ export async function clearCallerAction(_prev: ActionState, formData: FormData):
  */
 export async function nextCallAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
   await requireAuth();
-  const campaignId = String(formData.get("campaign_id") ?? "");
+  const campaignId = String(formData.get("campaign_id") ?? "") || null;
   const callerId = await getSelectedCallerId();
-  if (!campaignId || !callerId) return fail("Nejdřív vyberte, kdo volá.");
+  if (!callerId) return fail("Nejdřív vyberte, kdo volá.");
 
-  const claimed = await claimNextCall(campaignId, callerId);
-  revalidatePath(`/volani/${campaignId}`);
+  const claimed = await claimNextCall(campaignId, callerId, readMode(formData));
+  if (campaignId) revalidatePath(`/volani/${campaignId}`);
+  revalidatePath("/osloveni");
   if (!claimed) return { success: "Fronta je prázdná — nikdo další k volání není." };
   return {};
+}
+
+// ---------------------------------------------------------------- firmy
+
+export async function saveCompanyAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  await requireAuth();
+  const id = String(formData.get("company_id") ?? "");
+  if (!id) return fail("Chybí firma.");
+
+  const priority = String(formData.get("priority") ?? "");
+  const status = String(formData.get("status") ?? "");
+  if (priority && !(priority in COMPANY_PRIORITY_LABELS)) return fail("Neplatná priorita.");
+  if (status && !(status in COMPANY_STATUS_LABELS)) return fail("Neplatný stav firmy.");
+
+  const text = (key: string) => {
+    const raw = formData.get(key);
+    if (raw === null) return undefined;
+    return String(raw).trim() || null;
+  };
+
+  const ok = await updateCompany(id, {
+    reason: text("reason"),
+    note: text("note"),
+    priority: priority ? (priority as CompanyPriority) : undefined,
+    status: status ? (status as CompanyStatus) : undefined,
+    ownerId: formData.get("owner_id") === null ? undefined : String(formData.get("owner_id") ?? "") || null,
+  });
+  if (!ok) return fail("Firma nebyla nalezena.");
+
+  revalidatePath("/firmy");
+  revalidatePath(`/firmy/${id}`);
+  revalidatePath("/");
+  return { success: "Uloženo." };
+}
+
+/**
+ * Oprava firmy, která zůstala bez dalšího kroku. Není to zápis hovoru,
+ * takže se nedotkne počtu pokusů ani timeline hovorů.
+ */
+export async function scheduleNextStepAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  await requireAuth();
+  const campaignContactId = String(formData.get("campaign_contact_id") ?? "");
+  if (!campaignContactId) return fail("Vyberte kontakt.");
+
+  const raw = String(formData.get("next_call_at") ?? "").trim();
+  if (!raw) return fail("Zadejte datum a čas dalšího kroku.");
+  const at = new Date(raw);
+  if (Number.isNaN(at.getTime())) return fail("Zadané datum není platné.");
+
+  const result = await scheduleNextStep(campaignContactId, at);
+  if (!result.ok) return fail(result.error ?? "Další krok se nepodařilo naplánovat.");
+
+  revalidatePath("/firmy");
+  if (result.companyId) revalidatePath(`/firmy/${result.companyId}`);
+  revalidatePath("/");
+  revalidatePath("/osloveni", "layout");
+  return { success: "Další krok naplánován." };
+}
+
+/** Nahrávání hovorů je samostatný přepínač, ne součást testovacího režimu. */
+export async function setCallRecordingAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  await requireAuth();
+  await setCallRecordingEnabled(formData.get("call_recording_enabled") !== null);
+  revalidatePath("/settings");
+  return { success: "Uloženo." };
+}
+
+// ----------------------------------------------------------- týdenní plán
+
+export async function createWorkBlockAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  await requireAuth();
+  const date = String(formData.get("block_date") ?? "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return fail("Zadejte datum bloku.");
+
+  let startMinute: number;
+  let endMinute: number;
+  try {
+    startMinute = hhmmToMinutes(String(formData.get("start") ?? "09:00"));
+    endMinute = hhmmToMinutes(String(formData.get("end") ?? "11:00"));
+  } catch {
+    return fail("Časy musí být ve tvaru 09:00.");
+  }
+  if (endMinute <= startMinute) return fail("Blok musí končit později, než začíná.");
+
+  const activityType = String(formData.get("activity_type") ?? "calling");
+  if (!isActivityType(activityType)) return fail("Neplatný typ aktivity.");
+
+  await createWorkBlock({
+    date,
+    startMinute,
+    endMinute,
+    callerId: String(formData.get("caller_id") ?? "") || null,
+    activityType,
+    note: String(formData.get("note") ?? "").trim() || null,
+  });
+
+  revalidatePath("/osloveni/plan");
+  return { success: "Blok naplánován." };
+}
+
+export async function deleteWorkBlockAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  await requireAuth();
+  await deleteWorkBlock(String(formData.get("id") ?? ""));
+  revalidatePath("/osloveni/plan");
+  return { success: "Blok smazán." };
 }

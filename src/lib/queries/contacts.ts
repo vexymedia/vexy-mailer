@@ -40,14 +40,15 @@ export async function importContacts(
   for (const row of rows) {
     // `xmax = 0` distinguishes a fresh INSERT from an ON CONFLICT UPDATE.
     const [contact] = await sql<{ id: string; inserted: boolean }[]>`
-      insert into contacts (email, first_name, last_name, company, website, phone)
+      insert into contacts (email, first_name, last_name, company, website, phone, position)
       values (${row.email}, ${row.first_name}, ${row.last_name}, ${row.company},
-              ${row.website}, ${row.phone})
+              ${row.website}, ${row.phone}, ${row.position ?? null})
       on conflict (email) do update
          set first_name = coalesce(contacts.first_name, excluded.first_name),
              last_name  = coalesce(contacts.last_name,  excluded.last_name),
              company    = coalesce(contacts.company,    excluded.company),
              website    = coalesce(contacts.website,    excluded.website),
+             position   = coalesce(contacts.position,   excluded.position),
              -- A re-import is the normal way a phone number arrives later, so
              -- fill a blank one in; never overwrite a number already there.
              phone      = coalesce(contacts.phone,      excluded.phone),
@@ -195,7 +196,15 @@ export async function suppressEmail(email: string, reason: string, note?: string
          and cc.status not in ('unsubscribed')
     `;
   });
-  await logActivity({ action: "Kontakt odhlášen", detail: `${normalised} added to the suppression list (${reason})` });
+  const [existing] = await sql<{ id: string }[]>`
+    select id from contacts where email = ${normalised}
+  `;
+  await logActivity({
+    action: "Kontakt odhlášen",
+    detail: `${normalised} — důvod: ${reason}`,
+    // Bez contactId by se odhlášení v Aktivitě zobrazilo bez toho, koho se týká.
+    contactId: existing?.id ?? null,
+  });
 }
 
 export async function unsuppressEmail(email: string): Promise<void> {

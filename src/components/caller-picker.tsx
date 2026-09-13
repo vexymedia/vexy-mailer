@@ -11,13 +11,17 @@ import { ActionForm, SubmitButton } from "./action-form";
 export function CallerPicker({
   campaignId,
   callers,
+  next,
 }: {
+  /** Prázdné = denní fronta napříč kampaněmi. */
   campaignId: string;
   callers: { id: string; name: string }[];
+  next: string;
 }) {
   return (
     <ActionForm action={selectCallerAction} className="card max-w-md p-6">
       <input type="hidden" name="campaign_id" value={campaignId} />
+      <input type="hidden" name="next" value={next} />
       <h2 className="mb-1 text-sm font-semibold text-zinc-900">Kdo dnes volá?</h2>
       <p className="mb-4 text-xs text-zinc-500">
         Vybere se jednou na celou směnu. Podle toho se zapisují hovory a drží se
