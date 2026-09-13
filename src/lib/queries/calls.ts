@@ -62,7 +62,11 @@ export interface CallTarget {
 
 export type StartCallResult =
   | { ok: true; call: CallTarget }
-  | { ok: false; error: string; code: "not_found" | "no_phone" | "suppressed" | "closed" };
+  | {
+      ok: false;
+      error: string;
+      code: "not_found" | "no_phone" | "suppressed" | "closed" | "already_calling";
+    };
 
 /**
  * Založí hovor a vrátí jeho id.
@@ -151,6 +155,42 @@ export async function startCall(input: {
       error: "Firma je uzavřená — pokud jí chcete volat, nejdřív ji znovu otevřete.",
       code: "closed",
     };
+  }
+
+  // Jeden člověk, jeden hovor. Druhá záložka nebo zapomenutá stará nesmí
+  // vytočit druhou linku - platí se obě.
+  if (input.callerId) {
+    const [active] = await sql<{ id: string }[]>`
+      select id from calls
+       where caller_id = ${input.callerId}
+         and status in ('ringing', 'in_progress')
+         and started_at > now() - interval '2 hours'
+       limit 1
+    `;
+    if (active) {
+      return {
+        ok: false,
+        error: "Už máte rozjednaný hovor. Nejdřív ho ukončete.",
+        code: "already_calling",
+      };
+    }
+
+    // Hovor, který se k providerovi nikdy nedostal, blokovat nemá co:
+    // uzavře se jako neúspěšný a jde se dál. Tím se zároveň zajistí, že
+    // ho TwiML endpoint už nevytočí, kdyby se ozval opožděně.
+    await sql`
+      update calls
+         set status = 'failed',
+             ended_at = coalesce(ended_at, now()),
+             error_message = coalesce(error_message, 'Nahrazeno novým hovorem.'),
+             recording_status = case when recording_status = 'pending' then 'disabled' else recording_status end,
+             transcript_status = case when transcript_status = 'pending' then 'skipped' else transcript_status end,
+             analysis_status = case when analysis_status = 'pending' then 'skipped' else analysis_status end,
+             updated_at = now()
+       where caller_id = ${input.callerId}
+         and status = 'queued'
+         and provider_call_sid is null
+    `;
   }
 
   const name = [row.first_name, row.last_name].filter(Boolean).join(" ").trim() || row.email;
@@ -339,15 +379,18 @@ export async function resetStalePipeline(olderThanMs = 10 * 60 * 1000): Promise<
 }
 
 /**
- * Hovory, které se nikdy nespojily s providerem.
+ * Úklid hovorů, na které se zapomnělo.
  *
- * Vzniknou, když prohlížeč založí hovor a pak selže připojení, nebo když
- * caller zavře záložku dřív, než Twilio zavolá TwiML endpoint. Nedorazí
- * k nim žádný webhook, takže by navždy zůstaly "vytáčím" a v historii by
- * hlásily "nahrávka se zpracovává".
+ * Tři situace, všechny z jednoho důvodu: událost od providera nedorazila.
+ * Bez úklidu by takový hovor navždy hlásil "vytáčím" nebo "nahrávka se
+ * zpracovává" - tedy lhal o stavu, ve kterém dávno není.
  */
 export async function reapAbandonedCalls(olderThanMs = 15 * 60 * 1000): Promise<number> {
-  const rows = await sql<{ id: string }[]>`
+  const seconds = `${Math.round(olderThanMs / 1000)} seconds`;
+
+  // 1. Hovor, který se nikdy nespojil s providerem. Vzniká, když selže
+  //    připojení nebo caller zavře záložku dřív, než Twilio stáhne TwiML.
+  const abandoned = await sql<{ id: string }[]>`
     update calls
        set status = 'failed',
            ended_at = coalesce(ended_at, now()),
@@ -358,10 +401,43 @@ export async function reapAbandonedCalls(olderThanMs = 15 * 60 * 1000): Promise<
            updated_at = now()
      where status = 'queued'
        and provider_call_sid is null
-       and started_at < now() - ${`${Math.round(olderThanMs / 1000)} seconds`}::interval
+       and started_at < now() - ${seconds}::interval
     returning id
   `;
-  return rows.length;
+
+  // 2. Hovor, který se rozjel, ale nikdy nedostal ukončovací událost.
+  //    Dvě hodiny jsou schválně hodně: nechceme uzavřít hovor, který
+  //    opravdu běží. Jde o to, aby nezůstal viset navždy.
+  const stuck = await sql<{ id: string }[]>`
+    update calls
+       set status = 'failed',
+           ended_at = coalesce(ended_at, now()),
+           error_message = coalesce(error_message, 'Od providera nepřišlo ukončení hovoru.'),
+           recording_status = case when recording_status = 'pending' then 'disabled' else recording_status end,
+           transcript_status = case when transcript_status = 'pending' then 'skipped' else transcript_status end,
+           analysis_status = case when analysis_status = 'pending' then 'skipped' else analysis_status end,
+           updated_at = now()
+     where status in ('ringing', 'in_progress')
+       and started_at < now() - interval '2 hours'
+    returning id
+  `;
+
+  // 3. Hovor doběhl, ale nahrávka nikdy nedorazila. Bez tohohle by
+  //    v historii navždy svítilo "nahrávka se zpracovává".
+  const noRecording = await sql<{ id: string }[]>`
+    update calls
+       set recording_status = 'failed',
+           recording_error = coalesce(recording_error, 'Nahrávka od providera nedorazila.'),
+           transcript_status = case when transcript_status = 'pending' then 'skipped' else transcript_status end,
+           analysis_status = case when analysis_status = 'pending' then 'skipped' else analysis_status end,
+           updated_at = now()
+     where status = 'completed'
+       and recording_status = 'pending'
+       and ended_at < now() - interval '30 minutes'
+    returning id
+  `;
+
+  return abandoned.length + stuck.length + noRecording.length;
 }
 
 export async function markTranscriptProcessing(callId: string): Promise<boolean> {

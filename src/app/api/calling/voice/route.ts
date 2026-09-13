@@ -35,8 +35,19 @@ export async function POST(request: NextRequest) {
     return twiml(rejectTwiml("Hovor nebyl nalezen."), 404);
   }
 
-  const config = twilioConfig();
   const providerCallSid = webhook.params.CallSid ?? null;
+
+  // Vytočit se smí jen hovor, který na vytočení čeká. Chrání to dvě věci:
+  // hovor nahrazený novějším (druhá záložka) se už nevytočí, a opožděné
+  // doručení téhle události nevyrobí druhý telefonát.
+  if (call.status !== "queued") {
+    return twiml(rejectTwiml("Tento hovor už neplatí."), 409);
+  }
+  if (call.provider_call_sid && call.provider_call_sid !== providerCallSid) {
+    return twiml(rejectTwiml("Tento hovor už neplatí."), 409);
+  }
+
+  const config = twilioConfig();
   if (providerCallSid) {
     await attachProviderCall(call.id, providerCallSid, config.callerId);
   }

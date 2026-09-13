@@ -248,6 +248,127 @@ describe("nahrávka", () => {
   });
 });
 
+// ------------------------------------------------ souběžné pokusy o hovor
+describe("jeden caller, jeden hovor", () => {
+  it("odmítne druhý hovor, dokud ten první opravdu běží", async () => {
+    const seeded = await seed();
+    const first = await calls.startCall({
+      campaignContactId: seeded.campaignContactId,
+      callerId: seeded.callerId,
+    });
+    if (!first.ok) throw new Error(first.error);
+    await calls.attachProviderCall(first.call.callId, "CA-live", null);
+    await calls.recordCallStatus({ providerCallSid: "CA-live", status: "in_progress" });
+
+    const second = await calls.startCall({
+      campaignContactId: seeded.campaignContactId,
+      callerId: seeded.callerId,
+    });
+    expect(second.ok).toBe(false);
+    if (!second.ok) expect(second.code).toBe("already_calling");
+
+    // Po ukončení jde volat zase.
+    await calls.recordCallStatus({ providerCallSid: "CA-live", status: "completed" });
+    const third = await calls.startCall({
+      campaignContactId: seeded.campaignContactId,
+      callerId: seeded.callerId,
+    });
+    expect(third.ok).toBe(true);
+  });
+
+  it("hovor, který se k providerovi nedostal, další volání neblokuje", async () => {
+    const seeded = await seed();
+    const abandoned = await calls.startCall({
+      campaignContactId: seeded.campaignContactId,
+      callerId: seeded.callerId,
+    });
+    if (!abandoned.ok) throw new Error(abandoned.error);
+
+    // Druhá záložka. Zaseknutý pokus se nesmí stát patnáctiminutovou
+    // blokádou - uzavře se a jde se dál.
+    const next = await calls.startCall({
+      campaignContactId: seeded.campaignContactId,
+      callerId: seeded.callerId,
+    });
+    expect(next.ok).toBe(true);
+
+    const superseded = await calls.getCall(abandoned.call.callId);
+    expect(superseded?.status).toBe("failed");
+    expect(superseded?.recording_status).toBe("disabled");
+  });
+
+  it("nahrazený hovor už TwiML endpoint nevytočí", async () => {
+    const seeded = await seed();
+    const first = await calls.startCall({
+      campaignContactId: seeded.campaignContactId,
+      callerId: seeded.callerId,
+    });
+    if (!first.ok) throw new Error(first.error);
+    await calls.startCall({
+      campaignContactId: seeded.campaignContactId,
+      callerId: seeded.callerId,
+    });
+
+    // Tenhle stav čte /api/calling/voice, než cokoli vytočí.
+    const stale = await calls.getCallForDial(first.call.callId);
+    expect(stale?.status).not.toBe("queued");
+  });
+});
+
+// ----------------------------------------- ztracené události od providera
+describe("když webhook nedorazí", () => {
+  it("uzavře hovor, který se rozjel a nikdy neskončil", async () => {
+    const seeded = await seed();
+    const started = await calls.startCall({
+      campaignContactId: seeded.campaignContactId,
+      callerId: seeded.callerId,
+    });
+    if (!started.ok) throw new Error(started.error);
+    await calls.attachProviderCall(started.call.callId, "CA-stuck", null);
+    await calls.recordCallStatus({ providerCallSid: "CA-stuck", status: "in_progress" });
+
+    // Běžící hovor se uklidit nesmí.
+    expect(await calls.reapAbandonedCalls()).toBe(0);
+    expect((await calls.getCall(started.call.callId))?.status).toBe("in_progress");
+
+    await sql`
+      update calls set started_at = now() - interval '3 hours' where id = ${started.call.callId}
+    `;
+    expect(await calls.reapAbandonedCalls()).toBe(1);
+    expect((await calls.getCall(started.call.callId))?.status).toBe("failed");
+  });
+
+  it("přestane slibovat nahrávku, která nedorazila", async () => {
+    const seeded = await seed();
+    const started = await calls.startCall({
+      campaignContactId: seeded.campaignContactId,
+      callerId: seeded.callerId,
+    });
+    if (!started.ok) throw new Error(started.error);
+    await calls.attachProviderCall(started.call.callId, "CA-norec", null);
+    await calls.recordCallStatus({
+      providerCallSid: "CA-norec",
+      status: "completed",
+      durationSeconds: 90,
+    });
+    expect((await calls.getCall(started.call.callId))?.recording_status).toBe("pending");
+
+    // Čerstvě ukončený hovor na nahrávku právem čeká.
+    expect(await calls.reapAbandonedCalls()).toBe(0);
+
+    await sql`
+      update calls set ended_at = now() - interval '45 minutes' where id = ${started.call.callId}
+    `;
+    expect(await calls.reapAbandonedCalls()).toBe(1);
+    const row = await calls.getCall(started.call.callId);
+    expect(row?.recording_status).toBe("failed");
+    expect(row?.transcript_status).toBe("skipped");
+    // Hovor sám zůstává platný: proběhl a trval devadesát vteřin.
+    expect(row?.status).toBe("completed");
+    expect(row?.duration_seconds).toBe(90);
+  });
+});
+
 // -------------------------------------------------------------- pipeline
 const ANALYSIS: CallAnalysis = {
   summary: "Firma expanduje, zajímá je nábor.",
@@ -399,6 +520,45 @@ describe("přepis a analýza", () => {
     expect(row?.transcript).toBe("Dobrý den, tady Jan.");
     expect(row?.analysis_status).toBe("failed");
     expect(row?.analysis_error).toContain("model selhal");
+  });
+
+  it("dva ticky naráz přepíšou hovor jen jednou", async () => {
+    const seeded = await seed();
+    const call = await completedCall(seeded);
+    let transcribeCalls = 0;
+    let analyseCalls = 0;
+    const providers = fakeProviders({
+      transcribe: async () => {
+        transcribeCalls++;
+        return {
+          ok: true as const,
+          result: { text: "Dobrý den.", language: "cs", provider: "test" },
+        };
+      },
+      analyse: async () => {
+        analyseCalls++;
+        return { ok: true as const, analysis: ANALYSIS };
+      },
+    });
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(new Uint8Array([1]), { status: 200, headers: { "content-type": "audio/mpeg" } })) as typeof fetch;
+    try {
+      // Cron může tick spustit znovu dřív, než doběhne ten předchozí.
+      await Promise.all([
+        pipeline.processCallPipeline(providers),
+        pipeline.processCallPipeline(providers),
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(transcribeCalls).toBe(1);
+    expect(analyseCalls).toBe(1);
+    const row = await calls.getCall(call.callId);
+    expect(row?.transcript_status).toBe("done");
+    expect(row?.analysis_status).toBe("done");
   });
 
   it("zaseknuté zpracování se vrátí do fronty", async () => {

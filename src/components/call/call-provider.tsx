@@ -144,6 +144,10 @@ export function CallProvider({ children }: { children: ReactNode }) {
   const [muted, setMuted] = useState(false);
   // Poslední cíl, aby šlo po neúspěchu zkusit znovu bez hledání kontaktu.
   const lastTarget = useRef<{ contactId?: string; campaignContactId?: string } | null>(null);
+  // Zámek proti dvojímu spuštění. Musí to být ref, ne stav: dvě kliknutí
+  // ve stejném ticku vidí obě tu samou starou hodnotu stavu a obě by
+  // prošla - a na účtu by skončily dva vytočené hovory.
+  const starting = useRef(false);
   const [configured, setConfigured] = useState<boolean | null>(null);
   const [missingEnv, setMissingEnv] = useState<string[]>([]);
   const [cockpitOpen, setCockpitOpen] = useState(false);
@@ -209,28 +213,30 @@ export function CallProvider({ children }: { children: ReactNode }) {
 
   const start = useCallback(
     async (input: { contactId?: string; campaignContactId?: string }) => {
-      if (state === "connecting" || state === "ringing" || state === "active") return;
+      if (starting.current) return;
+      if (state === "permission" || state === "connecting" || state === "ringing" || state === "active") {
+        return;
+      }
+      starting.current = true;
       lastTarget.current = input;
       setError(null);
       setErrorCode(null);
       setMuted(false);
       setState("permission");
 
-      const microphone = await requestMicrophone();
-      if (!microphone.ok) {
-        setError(microphone.error);
+      const fail = (message?: string) => {
+        if (message) setError(message);
         setState("failed");
         setCockpitOpen(true);
-        return;
-      }
+        starting.current = false;
+      };
+
+      const microphone = await requestMicrophone();
+      if (!microphone.ok) return fail(microphone.error);
 
       setState("connecting");
       const device = await ensureDevice();
-      if (!device) {
-        setState("failed");
-        setCockpitOpen(true);
-        return;
-      }
+      if (!device) return fail();
 
       // Server si číslo dohledá sám; klient posílá jen identifikátor.
       const created = await fetch("/api/calling/calls", {
@@ -242,10 +248,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
         | ({ call: CallTarget; briefing: CallBriefing | null })
         | { error: string };
       if (!created.ok || !("call" in payload)) {
-        setError("error" in payload ? payload.error : "Hovor se nepodařilo založit.");
-        setState("failed");
-        setCockpitOpen(true);
-        return;
+        return fail("error" in payload ? payload.error : "Hovor se nepodařilo založit.");
       }
 
       setCall({ target: payload.call, briefing: payload.briefing, answeredAt: null, durationSeconds: null });
@@ -254,8 +257,16 @@ export function CallProvider({ children }: { children: ReactNode }) {
       try {
         const connection = await device.connect({ params: { callId: payload.call.callId } });
         connectionRef.current = connection;
+        // Od téhle chvíle hlídá další spuštění stav hovoru.
+        starting.current = false;
 
         connection.on("ringing", () => setState("ringing"));
+        // Krátký výpadek sítě SDK řeší samo. Caller ale musí vědět, že
+        // druhá strana ho teď neslyší - jinak mluví do prázdna.
+        connection.on("reconnecting", () => {
+          setError("Spojení vypadlo, obnovuji… Druhá strana vás teď nemusí slyšet.");
+        });
+        connection.on("reconnected", () => setError(null));
         connection.on("accept", () => {
           setState("active");
           setCall((current) => (current ? { ...current, answeredAt: Date.now() } : current));
@@ -289,9 +300,8 @@ export function CallProvider({ children }: { children: ReactNode }) {
           setState("failed");
         });
       } catch (connectError) {
-        setError(callErrorMessage(connectError));
         setErrorCode(callErrorCode(connectError));
-        setState("failed");
+        fail(callErrorMessage(connectError));
       }
     },
     [ensureDevice, state],
@@ -318,6 +328,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
   const retry = useCallback(() => {
     const target = lastTarget.current;
     if (!target) return;
+    starting.current = false;
     setCall(null);
     setState("idle");
     setError(null);
@@ -328,6 +339,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
   const dismiss = useCallback(() => {
     connectionRef.current?.disconnect();
     connectionRef.current = null;
+    starting.current = false;
     setCall(null);
     setState("idle");
     setError(null);

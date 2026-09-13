@@ -502,6 +502,67 @@ describe("párování webhooků na správný hovor", () => {
   });
 });
 
+// ------------------------------------------------------ jak hovor dopadl
+describe("konce hovoru, jak je hlásí Twilio", () => {
+  async function endWith(sid: string, params: Record<string, string>) {
+    const seeded = await seed();
+    const started = await calls.startCall({
+      campaignContactId: seeded.campaignContactId,
+      callerId: null,
+    });
+    if (!started.ok) throw new Error(started.error);
+    await calls.attachProviderCall(started.call.callId, sid, null);
+    const { POST } = await import("@/app/api/calling/status/route");
+    await POST(
+      signedRequest("/api/calling/status", {
+        CallSid: `${sid}-child`,
+        ParentCallSid: sid,
+        ...params,
+      }),
+    );
+    return calls.getCall(started.call.callId);
+  }
+
+  it("nikdo to nezvedl", async () => {
+    const row = await endWith("CA-a", { CallStatus: "no-answer", CallDuration: "0" });
+    expect(row?.status).toBe("no_answer");
+    expect(row?.answered_at).toBeNull();
+    // Na nahrávku se nečeká, není co nahrát.
+    expect(row?.recording_status).toBe("disabled");
+  });
+
+  it("obsazeno", async () => {
+    const row = await endWith("CA-b", { CallStatus: "busy" });
+    expect(row?.status).toBe("busy");
+    expect(row?.answered_at).toBeNull();
+    expect(row?.transcript_status).toBe("skipped");
+  });
+
+  it("odmítnuto (Twilio to hlásí jako canceled)", async () => {
+    const row = await endWith("CA-c", { CallStatus: "canceled" });
+    expect(row?.status).toBe("canceled");
+    expect(row?.answered_at).toBeNull();
+  });
+
+  it("hlasová schránka nebo krátké zvednutí a zavěšení", async () => {
+    // Záznamník se tváří jako zvednutý hovor a rozlišit ho neumíme.
+    // Důležité je, že se chová jako spojený a nahrávka se čeká.
+    const row = await endWith("CA-d", { CallStatus: "completed", CallDuration: "6" });
+    expect(row?.status).toBe("completed");
+    expect(row?.answered_at).not.toBeNull();
+    expect(row?.duration_seconds).toBe(6);
+    expect(row?.recording_status).toBe("pending");
+  });
+
+  it("normální spojený hovor", async () => {
+    const row = await endWith("CA-e", { CallStatus: "completed", CallDuration: "245" });
+    expect(row?.status).toBe("completed");
+    expect(row?.answered_at).not.toBeNull();
+    expect(row?.duration_seconds).toBe(245);
+    expect(row?.recording_status).toBe("pending");
+  });
+});
+
 // ------------------------------------------------------------ stav hovoru
 describe("čtení stavu hovoru", () => {
   it("nepustí nepřihlášeného a neprozradí odkaz na nahrávku", async () => {

@@ -312,7 +312,61 @@ dlouhou práci ve funkci, kterou platí Twilio svým timeoutem — a hlavně by
 pak neexistovalo místo, kde se znovu zkusí, co selhalo. Minuta čekání za
 spolehlivost stojí.
 
-## 8. Nahrávání
+## 8. Co musí ověřit živý hovor
+
+Tohle se automaticky nasimulovat nedá — chce to jeden skutečný hovor
+s headsetem. Projděte po řadě, zabere to pár minut.
+
+**Zvuk a zařízení**
+
+- [ ] Zavolat bez povoleného mikrofonu → hláška „Mikrofon je zakázaný.
+      Povolte ho v adresním řádku prohlížeče.“, ne technická chyba.
+- [ ] Zavolat s odpojeným headsetem → „Nenašel jsem mikrofon.“
+- [ ] Během hovoru vytáhnout headset z USB → hovor běží dál, zvuk se
+      přepne na zabudovaný mikrofon a reproduktor.
+- [ ] Slyší se obě strany. Ztlumit skutečně ztlumí.
+- [ ] Klávesnice: tón se na druhé straně ozve (otestujte na hlasové
+      rozcestí, např. infolinku operátora).
+
+**Průběh hovoru**
+
+- [ ] Stavy jdou po sobě: Vytáčím → Vyzvání → běžící čas.
+- [ ] Zavěšení z prohlížeče hovor opravdu ukončí.
+- [ ] Zavěšení druhou stranou ukončí hovor i ve VEXY.
+- [ ] Během hovoru přejít na jinou stránku ve VEXY → dole zůstane lišta
+      s časem; kliknutí na ni vrátí celý cockpit i s kontextem.
+- [ ] Vypnout na pár vteřin wi-fi → objeví se „Spojení vypadlo,
+      obnovuji…“ a po obnovení hláška zmizí.
+- [ ] Refresh (F5) během hovoru → hovor skončí (jinak to nejde), aplikace
+      se nezasekne a jde hned volat znovu.
+
+**Konce hovoru**
+
+- [ ] Nezvednutý hovor → stav „Nezvedá“, žádná nahrávka.
+- [ ] Obsazeno → stav „Obsazeno“.
+- [ ] Odmítnutý hovor → hovor korektně skončí.
+- [ ] Krátké zvednutí a zavěšení → délka sedí.
+- [ ] Normální hovor → délka ve VEXY odpovídá délce v Twilio Console.
+
+**Po hovoru**
+
+- [ ] Panel „Jak hovor dopadl?“ se objeví hned po zavěšení.
+- [ ] Výsledek jde zapsat dřív, než doběhne AI.
+- [ ] Firma dostane správný další krok podle kadence.
+- [ ] Do dvou minut přibude přepis a shrnutí v sekci Telefonáty.
+- [ ] Přepis dává smysl česky.
+- [ ] Zavřít prohlížeč hned po zavěšení, bez zápisu výsledku → hovor je
+      v historii firmy, kontakt zůstal ve frontě, nic se neztratilo.
+
+**Účet**
+
+- [ ] V Twilio Console sedí počet hovorů s počtem, který jste vytočili —
+      žádné hovory navíc.
+- [ ] Volanému se zobrazilo číslo z `TWILIO_CALLER_ID`.
+
+---
+
+## 9. Nahrávání
 
 Přepínač je v *Nastavení → Volání*. Když je vypnutý, hovory fungují dál,
 jen z nich nevzniká nahrávka — a tedy ani přepis a analýza.
