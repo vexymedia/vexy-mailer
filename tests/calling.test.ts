@@ -12,6 +12,7 @@ import {
   type CallCounts,
 } from "@/lib/calling";
 import { nextCompanyStatus } from "@/lib/companies";
+import { formatTime, pragueDay } from "@/lib/datetime";
 
 /**
  * The calling rules that decide persistence and money, tested without a
@@ -150,30 +151,34 @@ describe("no open prospect without a next step", () => {
   });
 
   it("counts the delay in working days, so Friday leads to Monday", () => {
-    const friday = new Date("2026-09-11T15:00:00");
-    expect(friday.getDay()).toBe(5);
-    const next = nextAttemptAt(friday, 1);
-    expect(next.getDay()).toBe(1);
-    expect(next.getDate()).toBe(14);
-    // Půlnoc cílového dne, ne "za 24 hodin" - jinak by follow-up naskočil
-    // callerovi až odpoledne.
-    expect(next.getHours()).toBe(0);
-    expect(next.getMinutes()).toBe(0);
+    // Pátek 11. 9. 2026 odpoledne.
+    const friday = new Date("2026-09-11T15:00:00Z");
+    expect(nextAttemptAt(friday, 1)).toEqual(new Date("2026-09-13T22:00:00Z"));
+    // Začátek pondělka v Praze, ne "za 24 hodin": jinak by follow-up naskočil
+    // callerovi až odpoledne. V UI se to čte jako pondělí 00:00.
+    expect(pragueDay(nextAttemptAt(friday, 1))).toBe("2026-09-14");
+    expect(formatTime(nextAttemptAt(friday, 1))).toBe("00:00");
   });
 
   it("skips the whole weekend when the delay spans it", () => {
-    const thursday = new Date("2026-09-10T09:00:00");
-    expect(thursday.getDay()).toBe(4);
     // Čtvrtek + 3 pracovní dny = úterý.
-    const next = nextAttemptAt(thursday, 3);
-    expect(next.getDay()).toBe(2);
-    expect(next.getDate()).toBe(15);
+    const thursday = new Date("2026-09-10T09:00:00Z");
+    expect(pragueDay(nextAttemptAt(thursday, 3))).toBe("2026-09-15");
   });
 
   it("leaves the weekend itself pointing at Monday", () => {
-    const saturday = new Date("2026-09-12T09:00:00");
-    expect(saturday.getDay()).toBe(6);
-    expect(nextAttemptAt(saturday, 1).getDay()).toBe(1);
+    const saturday = new Date("2026-09-12T09:00:00Z");
+    expect(pragueDay(nextAttemptAt(saturday, 1))).toBe("2026-09-14");
+  });
+
+  it("lands on a real Prague midnight across the autumn clock change", () => {
+    // Letní čas končí v neděli 25. 10. 2026. Pátek 23. 10. + 1 pracovní den
+    // je pondělí 26. 10., kdy už platí posun +1, ne +2.
+    const before = new Date("2026-10-23T15:00:00Z");
+    const next = nextAttemptAt(before, 1);
+    expect(pragueDay(next)).toBe("2026-10-26");
+    expect(formatTime(next)).toBe("00:00");
+    expect(next.toISOString()).toBe("2026-10-25T23:00:00.000Z");
   });
 
   it("plans nothing once the attempts run out", () => {

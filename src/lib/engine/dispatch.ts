@@ -101,7 +101,7 @@ export async function reapStuckSends(): Promise<number> {
     await logActivity({
       level: "error",
       action: `E-mail krok ${row.step_number} — neznámý výsledek`,
-      detail: "Worker interrupted mid-send. Not retried to avoid a possible duplicate. Review manually.",
+      detail: "Worker byl přerušen během odesílání. Opakovaně se neposílá, aby nevznikl duplikát — zkontrolujte ručně.",
       campaignId: row.campaign_id,
       campaignContactId: row.campaign_contact_id,
     });
@@ -470,7 +470,7 @@ async function processCampaign(campaign: Campaign, settings: AppSettings): Promi
     await advanceContact(campaign, candidate, step, steps, new Date(), null);
     await logActivity({
       action: `E-mail krok ${step.step_number} simulován`,
-      detail: `TEST MODE: would have gone to ${candidate.email} - "${subject}"`,
+      detail: `TESTOVACÍ REŽIM: e-mail by šel na ${candidate.email} — „${subject}“`,
       campaignId: campaign.id,
       contactId: candidate.contact_id,
       campaignContactId: candidate.campaign_contact_id,

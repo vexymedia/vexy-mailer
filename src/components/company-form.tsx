@@ -19,6 +19,11 @@ import {
  * původní hodnotu, protože React zachová DOM uzel a defaultValue se znovu
  * nepoužije - uživatel by pak viděl štítek "Vysoká" nad polem "Běžná".
  * Remount přes key by to sice srovnal, ale zahodil by hlášku o uložení.
+ *
+ * Řízená pole se ale musí srovnat, když hodnotu změní něco jiného než tenhle
+ * formulář - typicky výsledek hovoru, který firmu posune na "Schůzka".
+ * Bez toho by select dál ukazoval starý stav a další uložení by ten nový
+ * přepsalo zpátky.
  */
 export function CompanyForm({
   companyId,
@@ -41,6 +46,17 @@ export function CompanyForm({
   const [statusValue, setStatusValue] = useState(status);
   const [ownerValue, setOwnerValue] = useState(ownerId);
 
+  // Poslední hodnoty, které přišly ze serveru. Když se liší od těch, podle
+  // kterých se řídí select, přepíšou ho - to je doporučený způsob, jak
+  // srovnat řízený stav se změněnými props bez remountu.
+  const [server, setServer] = useState({ priority, status, ownerId });
+  if (server.priority !== priority || server.status !== status || server.ownerId !== ownerId) {
+    setServer({ priority, status, ownerId });
+    setPriorityValue(priority);
+    setStatusValue(status);
+    setOwnerValue(ownerId);
+  }
+
   return (
     <ActionForm action={saveCompanyAction} className="card p-5">
       <input type="hidden" name="company_id" value={companyId} />
@@ -58,7 +74,9 @@ export function CompanyForm({
         <p className="hint">Krátce a konkrétně. Tohle čte caller těsně před hovorem.</p>
       </div>
 
-      <div className="mt-5 grid gap-4 sm:grid-cols-3">
+      {/* Dvě úzká pole vedle sebe, odpovědná osoba přes celou šířku: jména
+          se do třetiny panelu nevejdou a select je uřízne. */}
+      <div className="mt-5 grid gap-4 sm:grid-cols-2">
         <div>
           <label className="label" htmlFor="priority">Priorita</label>
           <select
@@ -87,7 +105,7 @@ export function CompanyForm({
             ))}
           </select>
         </div>
-        <div>
+        <div className="sm:col-span-2">
           <label className="label" htmlFor="owner_id">Odpovědná osoba</label>
           <select
             id="owner_id"

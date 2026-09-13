@@ -3,10 +3,12 @@ import { logActivity } from "../activity";
 import {
   applyCallOutcome,
   callOutcome,
+  callRates,
   computeEconomics,
   buildFunnel,
   type CallCounts,
   type CallOutcome,
+  type CallRates,
   type CallStatus,
   type Economics,
   type FunnelStage,
@@ -62,11 +64,20 @@ export interface CallQueueRow {
  * Mirrors orderCallQueue() in lib/calling.ts, which is where the ordering is
  * unit-tested.
  */
+/**
+ * Pracovní režim bloku v plánu: "první oslovení" jsou firmy, které jsme
+ * ještě nevolali, "follow-up" ty, kde už nějaký pokus byl. Bez tohohle
+ * rozdělení by tlačítko Začít u follow-up bloku otevřelo úplně jinou práci,
+ * než na jakou si člověk vyhradil čas.
+ */
+export type QueueMode = "first" | "followup";
+
 export async function listCallQueue(
   campaignId: string | null,
-  options: { limit?: number; callerId?: string | null } = {},
+  options: { limit?: number; callerId?: string | null; mode?: QueueMode | null } = {},
 ): Promise<CallQueueRow[]> {
   const callerId = options.callerId ?? null;
+  const mode = options.mode ?? null;
   return sql<CallQueueRow[]>`
     select cc.id, cc.contact_id, c.email, c.phone, c.first_name, c.last_name,
            c.position, c.company, c.website, cc.call_status, cc.call_attempts, cc.last_call_at,
@@ -101,6 +112,9 @@ export async function listCallQueue(
        -- jít do prospectingu ani přes svůj druhý kontakt.
        and not exists (select 1 from companies qco where qco.id = c.company_id
                         and qco.status in ('won', 'lost', 'excluded'))
+       and (${mode}::text is null
+            or (${mode} = 'first' and cc.call_attempts = 0)
+            or (${mode} = 'followup' and cc.call_attempts > 0))
      order by
        case cc.call_status when 'callback' then 0 when 'in_progress' then 1 else 2 end,
        cc.call_attempts,
@@ -153,6 +167,7 @@ const CALL_LEASE_MINUTES = 5;
 export async function claimNextCall(
   campaignId: string | null,
   callerId: string,
+  mode: QueueMode | null = null,
 ): Promise<string | null> {
   const [row] = await sql<{ id: string }[]>`
     update campaign_contacts cc
@@ -174,6 +189,9 @@ export async function claimNextCall(
           and (inner_cc.next_call_at is null or inner_cc.next_call_at <= now())
           and not exists (select 1 from companies qco where qco.id = c.company_id
                            and qco.status in ('won', 'lost', 'excluded'))
+          and (${mode}::text is null
+               or (${mode} = 'first' and inner_cc.call_attempts = 0)
+               or (${mode} = 'followup' and inner_cc.call_attempts > 0))
         order by
           case inner_cc.call_status when 'callback' then 0 when 'in_progress' then 1 else 2 end,
           inner_cc.call_attempts,
@@ -285,6 +303,9 @@ export async function getHeldCall(
        and cc.call_status in ('new', 'in_progress', 'callback')
        and cc.call_attempts < cp.max_call_attempts
        and not exists (select 1 from call_suppression cs where cs.contact_id = cc.contact_id)
+       -- ...ani firmu, kterou mezitím někdo uzavřel.
+       and not exists (select 1 from companies qco where qco.id = c.company_id
+                        and qco.status in ('won', 'lost', 'excluded'))
      limit 1
   `;
   if (!prospect) return null;
@@ -305,6 +326,7 @@ export async function getHeldCall(
 export async function getCallerDayProgress(
   callerId: string,
   campaignId: string | null = null,
+  mode: QueueMode | null = null,
 ): Promise<{ processed: number; remaining: number; total: number }> {
   const [row] = await sql<{ processed: number }[]>`
     select count(distinct ca.campaign_contact_id)::int as processed
@@ -313,7 +335,7 @@ export async function getCallerDayProgress(
        and ca.called_at >= date_trunc('day', now())
        and (${campaignId}::uuid is null or ca.campaign_id = ${campaignId}::uuid)
   `;
-  const queue = await listCallQueue(campaignId, { limit: 500, callerId });
+  const queue = await listCallQueue(campaignId, { limit: 500, callerId, mode });
   const processed = row?.processed ?? 0;
   return { processed, remaining: queue.length, total: processed + queue.length };
 }
@@ -642,6 +664,9 @@ export interface CampaignCallingReport {
   stranded: number;
   /** Contacts on the global do-not-call list. */
   do_not_call: number;
+  /** Skutečné pokusy o volání - jmenovatel dovolatelnosti. */
+  attempts: number;
+  rates: CallRates;
 }
 
 /** The calling dashboard for one campaign: counters, funnel and money. */
@@ -658,6 +683,7 @@ export async function getCampaignCallingReport(campaignId: string): Promise<Camp
         queue_size: number;
         stranded: number;
         do_not_call: number;
+        attempts: number;
       }[]
     >`
       select
@@ -690,7 +716,9 @@ export async function getCampaignCallingReport(campaignId: string): Promise<Camp
         (select count(*)::int
            from campaign_contacts cc
            join call_suppression cs on cs.contact_id = cc.contact_id
-          where cc.campaign_id = ${campaignId}) as do_not_call
+          where cc.campaign_id = ${campaignId}) as do_not_call,
+        (select count(*)::int from call_activities
+          where campaign_id = ${campaignId}) as attempts
     `,
   ]);
 
@@ -712,6 +740,12 @@ export async function getCampaignCallingReport(campaignId: string): Promise<Camp
     queue_size: extra.queue_size,
     stranded: extra.stranded,
     do_not_call: extra.do_not_call,
+    attempts: extra.attempts,
+    rates: callRates({
+      attempts: extra.attempts,
+      connected: counts.connected_calls,
+      meetings: counts.meetings_booked,
+    }),
   };
 }
 

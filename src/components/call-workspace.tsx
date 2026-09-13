@@ -159,6 +159,7 @@ export function CallWorkspace({
   qualificationCriteria,
   callerName,
   campaignScope = "",
+  mode = null,
   briefing,
 }: {
   prospect: CallProspect;
@@ -168,6 +169,8 @@ export function CallWorkspace({
   callerName: string;
   /** Prázdné = po zápisu se bere další kontakt napříč kampaněmi. */
   campaignScope?: string;
+  /** Pracovní režim z plánu: první oslovení, nebo follow-up. */
+  mode?: "first" | "followup" | null;
   briefing?: CallBriefing;
 }) {
   // Outcomes that need one more piece of information before they can be saved.
@@ -191,6 +194,7 @@ export function CallWorkspace({
     <ActionForm action={logCallAction} className="space-y-4">
       <input type="hidden" name="campaign_contact_id" value={prospect.id} />
       <input type="hidden" name="campaign_scope" value={campaignScope} />
+      {mode ? <input type="hidden" name="mode" value={mode} /> : null}
 
       {/* ---------------------------------------------- firma a proč ji řešíme */}
       <div className="card p-6">

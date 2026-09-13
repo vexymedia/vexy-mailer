@@ -11,6 +11,25 @@ import { WorkBlockForm } from "@/components/work-block-form";
 
 export const dynamic = "force-dynamic";
 
+/**
+ * Kolik firem čeká právě na tenhle typ bloku. Počítá se ze stejné fronty,
+ * kterou caller uvidí po kliknutí na Začít - jinak by karta slibovala práci,
+ * která tam není.
+ */
+function countFor(
+  queue: { call_attempts: number; assigned_caller_id: string | null }[],
+  activityType: string,
+  callerId: string | null,
+): number {
+  return queue.filter((row) => {
+    if (activityType === "calling" && row.call_attempts !== 0) return false;
+    if (activityType === "follow_up" && row.call_attempts === 0) return false;
+    // Přiřazený blok ukazuje jen to, co daný člověk smí zpracovat.
+    if (callerId && row.assigned_caller_id && row.assigned_caller_id !== callerId) return false;
+    return true;
+  }).length;
+}
+
 const DAY_NAMES = ["Pondělí", "Úterý", "Středa", "Čtvrtek", "Pátek", "Sobota", "Neděle"];
 
 /**
@@ -65,7 +84,9 @@ export default async function PlanPage({
       <OsloveniTabs active="/osloveni/plan" />
 
       <p className="mb-4 text-sm text-zinc-500">
-        Týden {weekLabel} · ve frontě {plural(queue.length, "kontakt", "kontakty", "kontaktů")}
+        Týden {weekLabel} · ve frontě {plural(queue.length, "firma", "firmy", "firem")}
+        {" "}({countFor(queue, "calling", null)} k prvnímu oslovení,{" "}
+        {countFor(queue, "follow_up", null)} k follow-upu)
       </p>
 
       <div className="mb-6 grid gap-3 lg:grid-cols-7">
@@ -103,10 +124,27 @@ export default async function PlanPage({
                       {block.note ? <p className="mt-1 text-xs text-zinc-500">{block.note}</p> : null}
 
                       {block.activity_type === "calling" || block.activity_type === "follow_up" ? (
-                        <div className="mt-2 flex items-center justify-between gap-2">
-                          <span className="text-xs text-zinc-500">{queue.length} ve frontě</span>
-                          <Link href="/osloveni" className="btn-go !px-2 !py-1 text-xs">Začít</Link>
-                        </div>
+                        (() => {
+                          // Blok "první oslovení" a blok "follow-up" jsou jiná
+                          // práce. Tlačítko proto vede do fronty zúžené přesně
+                          // na to, na co si člověk vyhradil čas.
+                          const rezim = block.activity_type === "calling" ? "prvni" : "followup";
+                          const waiting = countFor(queue, block.activity_type, block.caller_id);
+                          return (
+                            <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                              <span className="text-xs text-zinc-500">
+                                {plural(waiting, "firma", "firmy", "firem")} ve frontě
+                              </span>
+                              {waiting > 0 ? (
+                                <Link href={`/osloveni?rezim=${rezim}`} className="btn-go !px-2 !py-1 text-xs">
+                                  Začít
+                                </Link>
+                              ) : (
+                                <span className="text-xs text-zinc-400">nic k práci</span>
+                              )}
+                            </div>
+                          );
+                        })()
                       ) : null}
 
                       <ActionForm action={deleteWorkBlockAction} hideMessages className="mt-2">

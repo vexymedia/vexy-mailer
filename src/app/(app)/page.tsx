@@ -4,6 +4,7 @@ import { listActivity } from "@/lib/queries/dashboard";
 import { plural } from "@/lib/plan";
 import { PageHeader, StatCard, EmptyState, DateTime } from "@/components/ui";
 import { formatWhen } from "@/lib/datetime";
+import { callRates, formatPercent } from "@/lib/calling";
 
 export const dynamic = "force-dynamic";
 
@@ -19,6 +20,13 @@ export default async function OverviewPage() {
     getTodayWork(),
     listActivity({ limit: 8 }),
   ]);
+
+  // Dovolatelnost a meeting rate z reálných zápisů hovorů za 7 dní.
+  const rates = callRates({
+    attempts: week.calls,
+    connected: week.connected,
+    meetings: week.meetings_booked,
+  });
 
   const kindLabel: Record<string, string> = {
     overdue: "Po termínu",
@@ -103,8 +111,13 @@ export default async function OverviewPage() {
             <ul className="card divide-y divide-zinc-100">
               {todo.map((item, index) => (
                 <li key={`${item.kind}-${index}`}>
-                  <Link href={item.href} className="flex items-center gap-4 px-5 py-3.5 hover:bg-zinc-50">
-                    <span className={`badge shrink-0 ${kindStyle[item.kind]}`}>
+                  {/* Na mobilu štítek nad textem: vedle sebe by se nevešly
+                      a stránka by přetékala do strany. */}
+                  <Link
+                    href={item.href}
+                    className="flex flex-col gap-1.5 px-5 py-3.5 hover:bg-zinc-50 sm:flex-row sm:items-center sm:gap-4"
+                  >
+                    <span className={`badge w-fit shrink-0 ${kindStyle[item.kind]}`}>
                       {kindLabel[item.kind]}
                     </span>
                     <span className="min-w-0 flex-1">
@@ -156,6 +169,20 @@ export default async function OverviewPage() {
                 <dd className="mt-0.5 text-xl font-semibold tabular-nums text-zinc-900">{week.emails_sent}</dd>
               </div>
             </dl>
+            <dl className="mt-4 grid grid-cols-2 gap-4 border-t border-zinc-100 pt-4">
+              <div>
+                <dt className="text-xs text-zinc-500">Dovolatelnost</dt>
+                <dd className="mt-0.5 text-lg font-semibold tabular-nums text-zinc-900">
+                  {formatPercent(rates.reach_rate)}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-xs text-zinc-500">Meeting rate</dt>
+                <dd className="mt-0.5 text-lg font-semibold tabular-nums text-zinc-900">
+                  {formatPercent(rates.meeting_rate)}
+                </dd>
+              </div>
+            </dl>
           </section>
 
           <section>
@@ -173,7 +200,7 @@ export default async function OverviewPage() {
                   <li key={row.id} className="px-5 py-3">
                     <p className="text-sm text-zinc-900">{row.action}</p>
                     <p className="mt-0.5 truncate text-xs text-zinc-500">
-                      {row.contact_email ?? row.campaign_name ?? "—"} · <DateTime value={row.created_at} />
+                      {row.contact_email ?? row.campaign_name ?? row.detail ?? "—"} · <DateTime value={row.created_at} />
                     </p>
                   </li>
                 ))}

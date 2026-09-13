@@ -24,7 +24,18 @@ export const dynamic = "force-dynamic";
  * výsledku), nikdy ze samotného renderu - jinak by prefetch zablokoval
  * firmu, kterou nikdo neviděl.
  */
-export default async function OsloveniPage() {
+export default async function OsloveniPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ rezim?: string }>;
+}) {
+  const { rezim } = await searchParams;
+  // Pracovní režim přichází z bloku v plánu. Neznámá hodnota = celá fronta.
+  const mode = rezim === "prvni" ? "first" : rezim === "followup" ? "followup" : null;
+  const backHref = mode ? `/osloveni?rezim=${rezim}` : "/osloveni";
+  const modeLabel =
+    mode === "first" ? "První oslovení" : mode === "followup" ? "Follow-up" : null;
+
   const [selectedCallerId, team] = await Promise.all([
     getSelectedCallerId(),
     listCallers({ activeOnly: true }),
@@ -43,7 +54,7 @@ export default async function OsloveniPage() {
             action={{ href: "/tym", label: "Přidat do týmu" }}
           />
         ) : (
-          <CallerPicker campaignId="" next="/osloveni" callers={team.map((c) => ({ id: c.id, name: c.name }))} />
+          <CallerPicker campaignId="" next={backHref} callers={team.map((c) => ({ id: c.id, name: c.name }))} />
         )}
       </>
     );
@@ -51,18 +62,18 @@ export default async function OsloveniPage() {
 
   const [held, progress] = await Promise.all([
     getHeldCall(null, caller.id),
-    getCallerDayProgress(caller.id),
+    getCallerDayProgress(caller.id, null, mode),
   ]);
   const briefing = held ? await buildCallBriefing(held.prospect, held.campaign.name) : null;
 
   return (
     <>
       <PageHeader
-        title="Dnes"
+        title={modeLabel ? `Dnes · ${modeLabel}` : "Dnes"}
         description={`Zpracovává ${caller.name}.`}
         actions={
           <ActionForm action={clearCallerAction} hideMessages>
-            <input type="hidden" name="next" value="/osloveni" />
+            <input type="hidden" name="next" value={backHref} />
             {held ? <input type="hidden" name="campaign_contact_id" value={held.prospect.id} /> : null}
             <SubmitButton className="btn-secondary">Změnit osobu</SubmitButton>
           </ActionForm>
@@ -81,6 +92,7 @@ export default async function OsloveniPage() {
           />
         ) : (
           <ActionForm action={nextCallAction} className="card max-w-md p-6">
+            {mode ? <input type="hidden" name="mode" value={mode} /> : null}
             <h2 className="section-title mb-1">
               Ve frontě čeká {plural(progress.remaining, "firma", "firmy", "firem")}
             </h2>
@@ -101,6 +113,7 @@ export default async function OsloveniPage() {
               qualificationCriteria={held.script.qualification}
               callerName={caller.name}
               campaignScope=""
+              mode={mode}
               briefing={briefing ?? undefined}
             />
             <p className="mt-3 text-xs text-zinc-500">

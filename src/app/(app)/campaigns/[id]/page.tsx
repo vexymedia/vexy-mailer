@@ -244,6 +244,19 @@ async function CallingTab({ campaign, filter: rawFilter }: { campaign: Campaign;
         {tile("won", "Klienti", report.counts.clients_won, report.counts.clients_won ? "good" : undefined)}
       </div>
 
+      {/* Provozní čísla call-centra: kolik pokusů se proměnilo v rozhovor
+          a kolik rozhovorů ve schůzku. Obojí z reálných zápisů hovorů. */}
+      <div className="card mb-6 grid grid-cols-2 gap-4 p-5 sm:grid-cols-4">
+        <Stat label="Pokusů o volání" value={report.attempts} />
+        <Stat label="Spojených hovorů" value={report.counts.connected_calls} />
+        <Stat label="Dovolatelnost" value={formatPercent(report.rates.reach_rate)} />
+        <Stat
+          label="Meeting rate"
+          value={formatPercent(report.rates.meeting_rate)}
+          tone={report.rates.meeting_rate ? "good" : undefined}
+        />
+      </div>
+
       <div className="card grid grid-cols-2 gap-4 p-5 sm:grid-cols-4">
         <Stat label="Uskutečněné schůzky" value={report.counts.meetings_held} />
         <Stat

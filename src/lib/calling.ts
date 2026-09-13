@@ -10,6 +10,7 @@
  */
 
 import type { CompanyStatus } from "./companies";
+import { isPragueWeekend, startOfPragueDay } from "./datetime";
 
 export type CallOutcome =
   | "no_answer"
@@ -201,29 +202,24 @@ export function isClosedCallStatus(status: CallStatus): boolean {
 
 // ------------------------------------------------------- applying an outcome
 
-const MS_PER_DAY = 86_400_000;
-
-function isWeekend(date: Date): boolean {
-  const day = date.getDay();
-  return day === 0 || day === 6;
-}
-
 /**
  * Kdy zkusit znovu, počítáno v pracovních dnech.
  *
- * Vrací půlnoc cílového dne, ne "za 24 hodin". Hovor v 16:00 s odkladem
- * jeden pracovní den má být ve frontě hned ráno druhý den, ne až odpoledne -
- * jinak by callerovi ráno fronta vypadala prázdně a odpoledne by mu naskočilo
- * třicet firem naráz.
+ * Vrací začátek cílového dne v pražské zóně, ne "za 24 hodin". Hovor v 16:00
+ * s odkladem jeden pracovní den má být ve frontě hned ráno druhý den, ne až
+ * odpoledne - jinak by callerovi ráno fronta vypadala prázdně a odpoledne by
+ * mu naskočilo třicet firem naráz. A protože server běží v UTC, musí se den
+ * počítat v pražském kalendáři: půlnoc UTC je v Praze 2:00 a follow-up by se
+ * v UI hlásil jako "Zítra 02:00".
  */
 export function nextAttemptAt(from: Date, workingDays: number): Date {
-  const date = new Date(from.getTime());
-  date.setHours(0, 0, 0, 0);
+  let date = startOfPragueDay(from);
   let remaining = Math.max(1, Math.round(workingDays));
   while (remaining > 0) {
-    date.setTime(date.getTime() + MS_PER_DAY);
-    date.setHours(0, 0, 0, 0); // přechod letního času nesmí posunout půlnoc
-    if (!isWeekend(date)) remaining -= 1;
+    // 36 hodin a zpět na začátek dne: posune se přesně o jeden kalendářní
+    // den i přes přechod letního času.
+    date = startOfPragueDay(new Date(date.getTime() + 36 * 3_600_000));
+    if (!isPragueWeekend(date)) remaining -= 1;
   }
   return date;
 }
@@ -412,6 +408,33 @@ export function buildFunnel(counts: CallCounts): FunnelStage[] {
       conversion: previous === null ? null : previous > 0 ? stage.value / previous : 0,
     };
   });
+}
+
+/**
+ * Dvě provozní čísla, na která se v call-centru ptá každý:
+ *
+ *   dovolatelnost = spojené hovory / pokusy o volání
+ *   meeting rate  = domluvené schůzky / spojené hovory
+ *
+ * Obojí z reálných zápisů hovorů. Když chybí jmenovatel, vrací se null -
+ * "0 %" u nuly pokusů je lež, ne metrika.
+ */
+export interface CallRates {
+  /** Podíl pokusů, kde jsme se dovolali. */
+  reach_rate: number | null;
+  /** Podíl spojených hovorů, ze kterých vznikla schůzka. */
+  meeting_rate: number | null;
+}
+
+export function callRates(input: {
+  attempts: number;
+  connected: number;
+  meetings: number;
+}): CallRates {
+  return {
+    reach_rate: input.attempts > 0 ? input.connected / input.attempts : null,
+    meeting_rate: input.connected > 0 ? input.meetings / input.connected : null,
+  };
 }
 
 // --------------------------------------------------------------- economics

@@ -30,6 +30,7 @@ import {
 import {
   claimNextCall,
   scheduleNextStep,
+  type QueueMode,
   createCaller,
   logCall,
   releaseCall,
@@ -45,7 +46,7 @@ import {
   type CompanyStatus,
 } from "@/lib/companies";
 import { createWorkBlock, deleteWorkBlock } from "@/lib/queries/plan";
-import { isActivityType } from "@/lib/plan";
+import { isActivityType, plural } from "@/lib/plan";
 import { callOutcomeLabel, isCallOutcome, isMeetingOutcome, type MeetingOutcome } from "@/lib/calling";
 import type { Classification } from "@/lib/types";
 
@@ -437,7 +438,7 @@ export async function saveStepsAction(_prev: ActionState, formData: FormData): P
     }
   });
 
-  await logActivity({ action: "Sekvence upravena", detail: `${steps.length} kroků`, campaignId });
+  await logActivity({ action: "Sekvence upravena", detail: plural(steps.length, "krok", "kroky", "kroků"), campaignId });
   revalidatePath(`/campaigns/${campaignId}`);
   return { success: `Sekvence uložena: ${steps.length} kroků.` };
 }
@@ -635,7 +636,9 @@ export async function logCallAction(_prev: ActionState, formData: FormData): Pro
   // callera v jedné kampani, jak to dělá workspace kampaně.
   if (callerId) {
     const scope = String(formData.get("campaign_scope") ?? "") || null;
-    await claimNextCall(scope, callerId);
+    // Režim se přenáší z formuláře, aby blok "follow-up" nepodstrčil
+    // callerovi po prvním zápisu úplně nevolanou firmu.
+    await claimNextCall(scope, callerId, readMode(formData));
   }
 
   revalidatePath("/volani", "layout");
@@ -813,6 +816,12 @@ export async function clearCallerAction(_prev: ActionState, formData: FormData):
   redirect(next.startsWith("/") ? next : campaignId ? `/volani/${campaignId}` : "/osloveni");
 }
 
+/** Pracovní režim z formuláře - viz QueueMode v queries/calling.ts. */
+function readMode(formData: FormData): QueueMode | null {
+  const raw = String(formData.get("mode") ?? "");
+  return raw === "first" || raw === "followup" ? raw : null;
+}
+
 /**
  * Hands the caller the next prospect. The only other place a lease is taken,
  * and it exists because a lease must come from somebody pressing something -
@@ -824,7 +833,7 @@ export async function nextCallAction(_prev: ActionState, formData: FormData): Pr
   const callerId = await getSelectedCallerId();
   if (!callerId) return fail("Nejdřív vyberte, kdo volá.");
 
-  const claimed = await claimNextCall(campaignId, callerId);
+  const claimed = await claimNextCall(campaignId, callerId, readMode(formData));
   if (campaignId) revalidatePath(`/volani/${campaignId}`);
   revalidatePath("/osloveni");
   if (!claimed) return { success: "Fronta je prázdná — nikdo další k volání není." };

@@ -196,7 +196,15 @@ export async function suppressEmail(email: string, reason: string, note?: string
          and cc.status not in ('unsubscribed')
     `;
   });
-  await logActivity({ action: "Kontakt odhlášen", detail: `${normalised} added to the suppression list (${reason})` });
+  const [existing] = await sql<{ id: string }[]>`
+    select id from contacts where email = ${normalised}
+  `;
+  await logActivity({
+    action: "Kontakt odhlášen",
+    detail: `${normalised} — důvod: ${reason}`,
+    // Bez contactId by se odhlášení v Aktivitě zobrazilo bez toho, koho se týká.
+    contactId: existing?.id ?? null,
+  });
 }
 
 export async function unsuppressEmail(email: string): Promise<void> {
