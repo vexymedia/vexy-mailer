@@ -37,11 +37,15 @@ const PENDING_STATES = ["pending", "processing"];
 export function PostCallPanel({
   callId,
   campaignContactId,
+  contactId,
   qualification,
   onDone,
 }: {
   callId: string;
+  /** Kontakt v kampani. U ad-hoc hovoru chybí. */
   campaignContactId: string | null;
+  /** Kontakt sám. Vždycky je - každý skutečný hovor jde klasifikovat. */
+  contactId: string | null;
   qualification: string | null;
   onDone: () => void;
 }) {
@@ -104,13 +108,15 @@ export function PostCallPanel({
   const needsCallback = outcome === "callback";
   const needsMeeting = outcome === "meeting_booked";
 
-  if (!campaignContactId) {
+  // Mimo kampaň se výsledek zapisuje stejně, jen se neplánuje nic
+  // e-mailového. Bez kontaktu není co klasifikovat - to je jediný případ,
+  // kdy panel zápis nenabídne.
+  if (!campaignContactId && !contactId) {
     return (
       <div>
         <h3 className="text-sm font-semibold text-zinc-900">Hovor ukončen</h3>
         <p className="mt-2 text-sm text-zinc-600">
-          Tenhle kontakt není v žádné kampani, takže k němu nejde zapsat výsledek volání.
-          Hovor i jeho nahrávka se ukládají k firmě.
+          K tomuhle hovoru se nepodařilo dohledat kontakt, takže k němu nejde zapsat výsledek.
         </p>
         <button type="button" onClick={onDone} className="btn-primary mt-4">
           Zavřít
@@ -179,7 +185,8 @@ export function PostCallPanel({
             router.refresh();
           }}
         >
-          <input type="hidden" name="campaign_contact_id" value={campaignContactId} />
+          <input type="hidden" name="campaign_contact_id" value={campaignContactId ?? ""} />
+          <input type="hidden" name="contact_id" value={contactId ?? ""} />
           <input type="hidden" name="call_id" value={callId} />
           <input type="hidden" name="campaign_scope" value="" />
 

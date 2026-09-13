@@ -6,6 +6,7 @@ import {
   toE164,
   type CallAnalysis,
   type CallLifecycle,
+  type TranscriptSegment,
 } from "../telephony/call-state";
 
 /**
@@ -40,6 +41,9 @@ export interface CallRow {
   recording_error: string | null;
   transcript_status: string;
   transcript: string | null;
+  /** Repliky s rolemi. Null u starých hovorů a u mono nahrávek. */
+  transcript_segments: TranscriptSegment[] | null;
+  recording_channels: number | null;
   transcript_language: string | null;
   transcript_error: string | null;
   analysis_status: string;
@@ -468,12 +472,19 @@ export async function markTranscriptProcessing(callId: string): Promise<boolean>
 export async function saveTranscript(input: {
   callId: string;
   transcript: string;
+  /** Repliky s rolemi. Prázdné u mono nahrávky - tam řečníky nerozlišíme. */
+  segments?: TranscriptSegment[];
+  /** Kolik kanálů nahrávka měla. Null, když to nešlo zjistit. */
+  channels?: number | null;
   language: string | null;
   provider: string;
 }): Promise<void> {
+  const segments = input.segments ?? [];
   await sql`
     update calls
        set transcript = ${input.transcript},
+           transcript_segments = ${segments.length > 0 ? sql.json(segments) : null},
+           recording_channels = coalesce(${input.channels ?? null}, recording_channels),
            transcript_language = ${input.language},
            transcript_provider = ${input.provider},
            transcript_status = 'done',
@@ -571,7 +582,8 @@ export async function getUnloggedCall(filter: {
       join contacts ct on ct.id = c.contact_id
       left join companies co on co.id = c.company_id
      where c.call_activity_id is null
-       and c.campaign_contact_id is not null
+       -- Ad-hoc hovor (kontakt mimo kampaň) se musí dát dopsat stejně
+       -- jako hovor z fronty, takže se tu na kampaň neptáme.
        and c.provider_call_sid is not null
        and c.status in ('completed', 'no_answer', 'busy')
        and c.started_at > now() - ${UNLOGGED_CALL_WINDOW}::interval
@@ -585,10 +597,24 @@ export async function getUnloggedCall(filter: {
   return row ?? null;
 }
 
-export async function listCallsForCompany(companyId: string, limit = 50): Promise<CallRow[]> {
-  return sql<CallRow[]>`
-    select * from calls where company_id = ${companyId}
-     order by started_at desc limit ${limit}
+/**
+ * Telefonáty firmy i s výsledkem, který k nim někdo zapsal.
+ *
+ * Výsledek nežije na hovoru, ale na aktivitě - hovor je technický záznam
+ * spojení, aktivita je obchodní fakt. Timeline u firmy potřebuje obojí
+ * pohromadě, jinak vypadá dokončený hovor bez výsledku úplně stejně jako
+ * ten, u kterého caller vybral "Nemá zájem".
+ */
+export async function listCallsForCompany(
+  companyId: string,
+  limit = 50,
+): Promise<(CallRow & { outcome: string | null })[]> {
+  return sql<(CallRow & { outcome: string | null })[]>`
+    select c.*, ca.outcome
+      from calls c
+      left join call_activities ca on ca.id = c.call_activity_id
+     where c.company_id = ${companyId}
+     order by c.started_at desc limit ${limit}
   `;
 }
 

@@ -14,12 +14,14 @@ import { PostCallPanel } from "./post-call-panel";
 export function CallRecovery({
   callId,
   campaignContactId,
+  contactId,
   contactName,
   companyName,
   qualification,
 }: {
   callId: string;
-  campaignContactId: string;
+  campaignContactId: string | null;
+  contactId: string;
   contactName: string;
   companyName: string | null;
   qualification: string | null;
@@ -40,6 +42,7 @@ export function CallRecovery({
         <PostCallPanel
           callId={callId}
           campaignContactId={campaignContactId}
+          contactId={contactId}
           qualification={qualification}
           onDone={() => router.refresh()}
         />

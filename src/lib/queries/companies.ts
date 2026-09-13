@@ -41,13 +41,31 @@ const nextActionAt = () => sql`(
         from campaign_contacts cc join contacts c on c.id = cc.contact_id
        where c.company_id = co.id and cc.meeting_booked
          and cc.meeting_at is not null and cc.meeting_outcome = 'scheduled'
+      union all
+      -- Hovor mimo kampaň nemá campaign_contacts, takže si další krok
+      -- nese sám. Bere se jen poslední zápis na kontakt - starší už
+      -- neplatí, přepsal ho ten novější.
+      select ca.next_action_at
+        from (
+          select distinct on (ca2.contact_id) ca2.contact_id, ca2.next_action_at
+            from call_activities ca2
+            join contacts c2 on c2.id = ca2.contact_id
+           where c2.company_id = co.id and ca2.campaign_contact_id is null
+           order by ca2.contact_id, ca2.called_at desc
+        ) ca
+       where ca.next_action_at is not null
     ) t
 )`;
 
-/** Kolikrát jsme se o firmu pokusili - přes všechny její kontakty dohromady. */
+/**
+ * Kolikrát jsme se o firmu pokusili - přes všechny její kontakty.
+ *
+ * Počítá se ze skutečných zápisů hovorů, ne z denormalizovaného čítače
+ * v campaign_contacts: jen tak se do počtu dostanou i hovory mimo kampaň.
+ */
 const companyAttempts = () => sql`(
-  select coalesce(sum(cc.call_attempts), 0)::int
-    from campaign_contacts cc join contacts c on c.id = cc.contact_id
+  select count(*)::int
+    from call_activities ca join contacts c on c.id = ca.contact_id
    where c.company_id = co.id
 )`;
 
@@ -220,8 +238,8 @@ export async function listCompanies(
                c.email, c.phone
           from contacts c
          where c.company_id = co.id
-         -- Hlavní kontakt je ten, komu jde zavolat.
-         order by (c.phone is null or btrim(c.phone) = ''), c.created_at, c.id
+         -- Ručně označený hlavní kontakt vyhrává; jinak ten, komu jde zavolat.
+         order by c.is_primary desc, (c.phone is null or btrim(c.phone) = ''), c.created_at, c.id
          limit 1
       ) mc on true
       left join lateral (
@@ -263,6 +281,7 @@ export interface CompanyContact {
   call_status: string | null;
   call_attempts: number | null;
   next_call_at: Date | null;
+  is_primary: boolean;
   last_call_at: Date | null;
   last_call_outcome: string | null;
   email_status: string | null;
@@ -303,7 +322,8 @@ export async function getCompany(id: string): Promise<CompanyDetail | null> {
         select nullif(btrim(coalesce(c.first_name, '') || ' ' || coalesce(c.last_name, '')), '') as name,
                c.email, c.phone
           from contacts c where c.company_id = co.id
-         order by (c.phone is null or btrim(c.phone) = ''), c.created_at, c.id limit 1
+         order by c.is_primary desc, (c.phone is null or btrim(c.phone) = ''), c.created_at, c.id
+         limit 1
       ) mc on true
       left join lateral (
         select count(*)::int as meetings from campaign_contacts cc
@@ -326,7 +346,7 @@ export async function getCompany(id: string): Promise<CompanyDetail | null> {
 
 export async function listCompanyContacts(companyId: string): Promise<CompanyContact[]> {
   return sql<CompanyContact[]>`
-    select c.id, c.email, c.phone, c.first_name, c.last_name, c.position,
+    select c.id, c.email, c.phone, c.first_name, c.last_name, c.position, c.is_primary,
            cc.id as campaign_contact_id, cp.name as campaign_name,
            cc.call_status, cc.call_attempts, cc.next_call_at,
            cc.last_call_at, cc.last_call_outcome,
@@ -349,7 +369,7 @@ export async function listCompanyContacts(companyId: string): Promise<CompanyCon
       ) cc on true
       left join campaigns cp on cp.id = cc.campaign_id
      where c.company_id = ${companyId}
-     order by (c.phone is null or btrim(c.phone) = ''), c.created_at, c.id
+     order by c.is_primary desc, (c.phone is null or btrim(c.phone) = ''), c.created_at, c.id
   `;
 }
 
@@ -437,4 +457,41 @@ export async function getCompanyContext(companyId: string | null): Promise<Compa
     select name, reason, priority, status from companies where id = ${companyId}
   `;
   return row ?? null;
+}
+
+// ------------------------------------------------------ ruční zakládání
+
+export type CompanyWriteError = "duplicate" | "invalid";
+
+/**
+ * Ruční založení firmy.
+ *
+ * Firmy dosud vznikaly jen z importu kontaktů. Před hovorem ale často
+ * potřebuju založit jednu firmu ručně, a lézt kvůli tomu do SQL je
+ * nesmysl. Jméno je jediné povinné pole; zbytek se dá doplnit později.
+ */
+export async function createCompany(input: {
+  name: string;
+  website?: string | null;
+  reason?: string | null;
+  priority?: CompanyPriority;
+}): Promise<{ ok: true; id: string } | { ok: false; error: CompanyWriteError }> {
+  const name = input.name.trim();
+  if (!name) return { ok: false, error: "invalid" };
+
+  // Jedna firma jednou, bez ohledu na velikost písmen - stejné pravidlo,
+  // jakým se firmy zakládají z importu.
+  const [existing] = await sql<{ id: string }[]>`
+    select id from companies where lower(btrim(name)) = lower(${name})
+  `;
+  if (existing) return { ok: false, error: "duplicate" };
+
+  const [row] = await sql<{ id: string }[]>`
+    insert into companies (name, website, reason, priority)
+    values (${name}, ${input.website?.trim() || null}, ${input.reason?.trim() || null},
+            ${input.priority ?? "normal"})
+    returning id
+  `;
+  await logActivity({ action: "Firma vytvořena", detail: name });
+  return { ok: true, id: row.id };
 }

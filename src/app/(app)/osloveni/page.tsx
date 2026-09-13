@@ -71,19 +71,18 @@ export default async function OsloveniPage({
     // zavřený notebook hned po zavěšení.
     getUnloggedCall({ callerId: caller.id }),
   ]);
-  const recovery =
-    unlogged && unlogged.campaign_contact_id
-      ? {
-          call: unlogged,
-          qualification: (
-            await buildCockpitBriefing({
-              contactId: unlogged.contact_id,
-              companyId: unlogged.company_id,
-              campaignContactId: unlogged.campaign_contact_id,
-            })
-          ).qualification,
-        }
-      : null;
+  const recovery = unlogged
+    ? {
+        call: unlogged,
+        qualification: (
+          await buildCockpitBriefing({
+            contactId: unlogged.contact_id,
+            companyId: unlogged.company_id,
+            campaignContactId: unlogged.campaign_contact_id,
+          })
+        ).qualification,
+      }
+    : null;
   const briefing = held ? await buildCallBriefing(held.prospect, held.campaign.name) : null;
   // Jestli jde volat z prohlížeče, ví server.
   const browserCalling = isTwilioConfigured();
@@ -106,7 +105,8 @@ export default async function OsloveniPage({
       {recovery ? (
         <CallRecovery
           callId={recovery.call.id}
-          campaignContactId={recovery.call.campaign_contact_id!}
+          campaignContactId={recovery.call.campaign_contact_id}
+          contactId={recovery.call.contact_id}
           contactName={recovery.call.contact_name}
           companyName={recovery.call.company_name}
           qualification={recovery.qualification}

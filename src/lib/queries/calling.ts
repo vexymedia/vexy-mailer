@@ -366,7 +366,10 @@ export async function getCallerDayProgress(
 // -------------------------------------------------------------- logging
 
 export interface LogCallInput {
-  campaignContactId: string;
+  /** Kontakt v kampani. U ad-hoc hovoru chybí a použije se contactId. */
+  campaignContactId?: string | null;
+  /** Kontakt mimo kampaň. Calling produkt musí umět zapsat každý hovor. */
+  contactId?: string | null;
   outcome: CallOutcome;
   callerId?: string | null;
   note?: string | null;
@@ -397,6 +400,107 @@ export interface LogCallResult {
  * The prospect row is locked first, which is what makes the counter correct
  * when two callers happen to submit the same prospect at once.
  */
+/**
+ * Kolik pokusů má ad-hoc kontakt za sebou.
+ *
+ * Mimo kampaň není kam počítadlo ukládat, tak se počítá ze skutečných
+ * zápisů hovorů - což je stejně poctivější zdroj než denormalizovaný
+ * čítač.
+ */
+const AD_HOC_MAX_ATTEMPTS = 4;
+
+/**
+ * Zápis výsledku hovoru u kontaktu, který není v žádné kampani.
+ *
+ * Dělá přesně tolik, kolik bez kampaně dává smysl: zapíše aktivitu
+ * s dalším krokem, posune stav firmy a případně doplní do-not-call.
+ * Nedotýká se campaign_contacts, takže NEMŮŽE rozhýbat e-mailovou
+ * sekvenci - ta se řídí výhradně sloupci v té tabulce.
+ */
+async function logAdHocCall(
+  input: LogCallInput & { contactId: string },
+): Promise<LogCallResult> {
+  const definition = callOutcome(input.outcome);
+  const callerId = input.callerId ?? null;
+  const note = input.note?.trim() || null;
+
+  type AdHocResult = { email: string; attempts: number } | null;
+  const result: AdHocResult = await sql.begin(async (tx): Promise<AdHocResult> => {
+    const [contact] = await tx<
+      { id: string; email: string; company_id: string | null; company_status: string | null }[]
+    >`
+      select c.id, c.email, c.company_id, co.status as company_status
+        from contacts c
+        left join companies co on co.id = c.company_id
+       where c.id = ${input.contactId}
+         for update of c
+    `;
+    if (!contact) return null;
+
+    const [{ count: attemptsBefore }] = await tx<{ count: number }[]>`
+      select count(*)::int as count from call_activities where contact_id = ${contact.id}
+    `;
+
+    const applied = applyCallOutcome({
+      outcome: input.outcome,
+      attemptsBefore,
+      maxAttempts: AD_HOC_MAX_ATTEMPTS,
+      callbackAt: input.callbackAt ?? null,
+      meetingAt: input.meetingAt ?? null,
+      meetingQualified: input.meetingQualified ?? null,
+    });
+
+    const [activity] = await tx<{ id: string }[]>`
+      insert into call_activities (campaign_id, campaign_contact_id, contact_id, caller_id,
+                                   outcome, connected, note, attempt_number,
+                                   next_action_at, meeting_at, meeting_qualified, deal_value)
+      values (null, null, ${contact.id}, ${callerId},
+              ${input.outcome}, ${applied.connected}, ${note}, ${applied.attempts},
+              ${applied.nextCallAt}, ${applied.meetingAt}, ${applied.meetingQualified},
+              ${input.dealValue ?? null})
+      returning id
+    `;
+
+    if (input.callId) {
+      await tx`
+        update calls set call_activity_id = ${activity.id}, updated_at = now()
+         where id = ${input.callId} and call_activity_id is null
+      `;
+    }
+
+    if (contact.company_id && contact.company_status) {
+      const merged = nextCompanyStatus(
+        isCompanyStatus(contact.company_status) ? contact.company_status : "new",
+        applied.companyStatus,
+      );
+      if (merged !== contact.company_status) {
+        await tx`
+          update companies set status = ${merged}, updated_at = now() where id = ${contact.company_id}
+        `;
+      }
+    }
+
+    if (applied.status === "do_not_call") {
+      await tx`
+        insert into call_suppression (contact_id, reason)
+        values (${contact.id}, 'do_not_call')
+        on conflict (contact_id) do nothing
+      `;
+    }
+
+    return { email: contact.email, attempts: applied.attempts };
+  });
+
+  if (!result) return { ok: false, error: "Kontakt nebyl nalezen." };
+
+  await logActivity({
+    action: "Hovor zaznamenán",
+    detail: `${result.email}: ${definition.label} (pokus ${result.attempts})`,
+    contactId: input.contactId,
+  });
+  return { ok: true };
+}
+
 export async function logCall(input: LogCallInput): Promise<LogCallResult> {
   const definition = callOutcome(input.outcome);
 
@@ -405,6 +509,12 @@ export async function logCall(input: LogCallInput): Promise<LogCallResult> {
   }
   if (definition.requires === "meeting_at" && !input.meetingAt) {
     return { ok: false, error: "Zvolte datum a čas schůzky." };
+  }
+
+  // Hovor mimo kampaň se zapisuje stejným voláním, jen jinou cestou.
+  if (!input.campaignContactId) {
+    if (!input.contactId) return { ok: false, error: "Chybí kontakt." };
+    return logAdHocCall({ ...input, contactId: input.contactId });
   }
 
   const outcomeValue = input.outcome;
@@ -430,7 +540,7 @@ export async function logCall(input: LogCallInput): Promise<LogCallResult> {
         join campaigns cp on cp.id = cc.campaign_id
         join contacts c on c.id = cc.contact_id
         left join companies co on co.id = c.company_id
-       where cc.id = ${input.campaignContactId}
+       where cc.id = ${input.campaignContactId ?? null}
          for update of cc
     `;
     if (!row) return null;

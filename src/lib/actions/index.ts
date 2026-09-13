@@ -11,7 +11,13 @@ import { setCallRecordingEnabled, updateSettings } from "@/lib/settings";
 import { parseContactsCsv } from "@/lib/csv";
 import { hhmmToMinutes, assertValidTimezone } from "@/lib/schedule";
 import { findUnknownVariables } from "@/lib/template";
-import { importContacts, suppressEmail, unsuppressEmail } from "@/lib/queries/contacts";
+import {
+  createContact,
+  importContacts,
+  suppressEmail,
+  unsuppressEmail,
+  updateContact,
+} from "@/lib/queries/contacts";
 import { createMailbox, deleteMailbox, testMailbox, testMailboxImap, updateMailbox } from "@/lib/queries/mailboxes";
 import {
   pauseCampaign,
@@ -38,7 +44,7 @@ import {
   updateMeeting,
 } from "@/lib/queries/calling";
 import { clearSelectedCaller, getSelectedCallerId, setSelectedCallerId } from "@/lib/caller-session";
-import { updateCompany } from "@/lib/queries/companies";
+import { createCompany, updateCompany } from "@/lib/queries/companies";
 import {
   COMPANY_PRIORITY_LABELS,
   COMPANY_STATUS_LABELS,
@@ -586,9 +592,12 @@ export async function deleteConversationAction(
  */
 export async function logCallAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
   await requireAuth();
-  const campaignContactId = String(formData.get("campaign_contact_id") ?? "");
+  const campaignContactId = String(formData.get("campaign_contact_id") ?? "").trim();
+  // Kontakt mimo kampaň. Každý skutečný hovor musí jít klasifikovat.
+  const contactId = String(formData.get("contact_id") ?? "").trim();
   const outcome = String(formData.get("outcome") ?? "");
   if (!isCallOutcome(outcome)) return fail("Vyberte výsledek hovoru.");
+  if (!campaignContactId && !contactId) return fail("Chybí kontakt.");
 
   const parseWhen = (key: string): Date | null | "invalid" => {
     const raw = String(formData.get(key) ?? "").trim();
@@ -621,7 +630,8 @@ export async function logCallAction(_prev: ActionState, formData: FormData): Pro
   const rawCallId = String(formData.get("call_id") ?? "").trim();
 
   const result = await logCall({
-    campaignContactId,
+    campaignContactId: campaignContactId || null,
+    contactId: contactId || null,
     outcome,
     callerId,
     callId: rawCallId || null,
@@ -914,6 +924,74 @@ export async function setCallRecordingAction(
   await setCallRecordingEnabled(formData.get("call_recording_enabled") !== null);
   revalidatePath("/settings");
   return { success: "Uloženo." };
+}
+
+/** Ruční založení firmy před hovorem. */
+export async function createCompanyAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  await requireAuth();
+  const name = String(formData.get("name") ?? "").trim();
+  if (!name) return fail("Vyplňte název firmy.");
+
+  const priority = String(formData.get("priority") ?? "normal");
+  const result = await createCompany({
+    name,
+    website: String(formData.get("website") ?? ""),
+    reason: String(formData.get("reason") ?? ""),
+    priority: priority in COMPANY_PRIORITY_LABELS ? (priority as CompanyPriority) : "normal",
+  });
+  if (!result.ok) {
+    return fail(
+      result.error === "duplicate"
+        ? `Firma „${name}“ už existuje.`
+        : "Firmu se nepodařilo založit.",
+    );
+  }
+
+  revalidatePath("/firmy");
+  revalidatePath("/");
+  redirect(`/firmy/${result.id}`);
+}
+
+const CONTACT_ERRORS: Record<string, string> = {
+  duplicate: "Kontakt s tímhle e-mailem už existuje.",
+  invalid_email: "Zadejte platnou e-mailovou adresu.",
+  invalid_phone:
+    "Telefonní číslo nejde vytočit. Zadejte ho jako 737485738 nebo +420737485738.",
+  not_found: "Firma nebo kontakt nebyly nalezeny.",
+};
+
+/** Založení i úprava kontaktu. Jedna akce, aby formulář byl jen jeden. */
+export async function saveContactAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  await requireAuth();
+  const contactId = String(formData.get("contact_id") ?? "").trim();
+  const companyId = String(formData.get("company_id") ?? "").trim();
+
+  const input = {
+    firstName: String(formData.get("first_name") ?? ""),
+    lastName: String(formData.get("last_name") ?? ""),
+    position: String(formData.get("position") ?? ""),
+    email: String(formData.get("email") ?? ""),
+    phone: String(formData.get("phone") ?? ""),
+    isPrimary: formData.get("is_primary") !== null,
+  };
+
+  const result = contactId
+    ? await updateContact(contactId, input)
+    : companyId
+      ? await createContact(companyId, input)
+      : ({ ok: false, error: "not_found" } as const);
+
+  if (!result.ok) return fail(CONTACT_ERRORS[result.error] ?? "Kontakt se nepodařilo uložit.");
+
+  if (companyId) revalidatePath(`/firmy/${companyId}`);
+  revalidatePath("/firmy");
+  return { success: contactId ? "Kontakt upraven." : "Kontakt přidán." };
 }
 
 // ----------------------------------------------------------- týdenní plán

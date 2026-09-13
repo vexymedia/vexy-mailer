@@ -11,15 +11,24 @@ import { ActionForm, SubmitButton } from "./action-form";
  */
 export function ScheduleNextStep({
   contacts,
+  hasCallableContact = false,
 }: {
   contacts: { id: string; label: string }[];
+  /** Je komu zavolat? Bez kampaně se další krok plánuje právě přes hovor. */
+  hasCallableContact?: boolean;
 }) {
   const [open, setOpen] = useState(false);
 
+  // Naplánovat termín dopředu jde jen kontaktu v kampani - datum nemá kam
+  // jinam uložit. Zavolat se ale dá komukoliv a další krok se zapíše až u
+  // výsledku hovoru, takže firma bez kampaně není slepá ulička a nesmí se
+  // tak tvářit.
   if (contacts.length === 0) {
     return (
       <p className="mt-2 text-xs text-zinc-500">
-        Firma nemá otevřený kontakt v žádné kampani — přidejte kontakt nebo ji zařaďte do kampaně.
+        {hasCallableContact
+          ? "Firma není v žádné kampani. Zavolejte kontaktu a další krok zapište u výsledku hovoru — nebo ji zařaďte do kampaně."
+          : "Firma nemá kontakt, kterému by šlo zavolat. Přidejte kontakt s telefonem nebo e-mailem."}
       </p>
     );
   }

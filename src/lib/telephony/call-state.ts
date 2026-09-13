@@ -130,6 +130,79 @@ export const PIPELINE_STATUS_LABELS: Record<PipelineStatus, string> = {
 };
 
 /**
+ * Kdo mluví. Není to odhad modelu - Twilio nahrává každou větev hovoru do
+ * vlastního kanálu, takže kanál 0 je vždycky obchodník a kanál 1 prospekt.
+ */
+export type SpeakerRole = "agent" | "prospect";
+
+export const SPEAKER_LABELS: Record<SpeakerRole, string> = {
+  agent: "Obchodník",
+  prospect: "Prospekt",
+};
+
+export type TranscriptSegment = {
+  speaker: SpeakerRole;
+  text: string;
+  /** Vteřiny od začátku hovoru. Null, když je přepisovač nedal. */
+  start: number | null;
+  end: number | null;
+};
+
+export function isSpeakerRole(value: unknown): value is SpeakerRole {
+  return value === "agent" || value === "prospect";
+}
+
+/**
+ * Bere jen segmenty, kterým rozumíme. Rozbitý zápis nesmí shodit detail
+ * hovoru - v nejhorším se ukáže plochý přepis.
+ */
+export function parseSegments(raw: unknown): TranscriptSegment[] {
+  if (!Array.isArray(raw)) return [];
+  const segments: TranscriptSegment[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    const text = typeof record.text === "string" ? record.text.trim() : "";
+    if (!text || !isSpeakerRole(record.speaker)) continue;
+    segments.push({
+      speaker: record.speaker,
+      text,
+      start: typeof record.start === "number" && Number.isFinite(record.start) ? record.start : null,
+      end: typeof record.end === "number" && Number.isFinite(record.end) ? record.end : null,
+    });
+  }
+  return segments;
+}
+
+/**
+ * Sloučí repliky téhož člověka, které jdou hned po sobě.
+ *
+ * Přepisovač krájí zvuk po větách, takže jeden souvislý projev přijde jako
+ * pět segmentů. Přečíst se to pak nedá.
+ */
+export function mergeAdjacentSegments(segments: TranscriptSegment[]): TranscriptSegment[] {
+  const merged: TranscriptSegment[] = [];
+  for (const segment of segments) {
+    const previous = merged[merged.length - 1];
+    if (previous && previous.speaker === segment.speaker) {
+      previous.text = `${previous.text} ${segment.text}`.trim();
+      previous.end = segment.end ?? previous.end;
+      continue;
+    }
+    merged.push({ ...segment });
+  }
+  return merged;
+}
+
+/**
+ * Přepis jako čitelný text s rolemi. Tohle dostává i AI - bez toho by
+ * nevěděla, kdo co řekl, a mohla by námitku prospekta přičíst obchodníkovi.
+ */
+export function renderTranscript(segments: TranscriptSegment[]): string {
+  return segments.map((segment) => `${SPEAKER_LABELS[segment.speaker]}: ${segment.text}`).join("\n");
+}
+
+/**
  * Výsledek hovoru, jak ho navrhuje AI. Je to jen NÁVRH: zapsat výsledek
  * musí člověk, aby v datech bylo vždy poznat, co tvrdí model a co potvrdil
  * caller.

@@ -349,6 +349,192 @@ describe("jeden caller, jeden hovor", () => {
   });
 });
 
+// -------------------------------------------------- hovor mimo kampaň
+describe("výsledek hovoru mimo kampaň", () => {
+  /** Kontakt, který v žádné e-mailové kampani není. */
+  async function adHocContact() {
+    const [contact] = await sql<{ id: string; company_id: string }[]>`
+      insert into contacts (email, first_name, last_name, company, phone)
+      values ('adhoc@prospect.test', 'Petr', 'Novotný', 'AdHoc s.r.o.', '+420777000999')
+      returning id, company_id
+    `;
+    const callerId = await calling.createCaller({ name: "Jan", email: null, phone: null });
+    return { contactId: contact.id, companyId: contact.company_id, callerId };
+  }
+
+  async function adHocCall(contactId: string, callerId: string, sid = "CA-adhoc") {
+    const started = await calls.startCall({ contactId, callerId });
+    if (!started.ok) throw new Error(started.error);
+    await calls.attachProviderCall(started.call.callId, sid, null);
+    await calls.recordCallStatus({
+      providerCallSid: sid,
+      status: "completed",
+      durationSeconds: 140,
+    });
+    return started.call;
+  }
+
+  it("zapíše outcome, poznámku i aktivitu", async () => {
+    const { contactId, callerId } = await adHocContact();
+    const call = await adHocCall(contactId, callerId);
+
+    const logged = await calling.logCall({
+      contactId,
+      outcome: "not_interested",
+      callerId,
+      note: "Řekl, že to teď neřeší.",
+      callId: call.callId,
+    });
+    expect(logged.ok).toBe(true);
+
+    const [activity] = await sql<
+      {
+        outcome: string;
+        connected: boolean;
+        note: string | null;
+        attempt_number: number;
+        campaign_id: string | null;
+        campaign_contact_id: string | null;
+      }[]
+    >`select * from call_activities where contact_id = ${contactId}`;
+    expect(activity.outcome).toBe("not_interested");
+    expect(activity.connected).toBe(true);
+    expect(activity.note).toBe("Řekl, že to teď neřeší.");
+    expect(activity.attempt_number).toBe(1);
+    // Bez kampaně, a přesto plnohodnotný záznam.
+    expect(activity.campaign_id).toBeNull();
+    expect(activity.campaign_contact_id).toBeNull();
+
+    // Telefonát je navázaný na výsledek.
+    expect((await calls.getCall(call.callId))?.call_activity_id).not.toBeNull();
+  });
+
+  it("posune stav firmy podle stejných pravidel jako v kampani", async () => {
+    const { contactId, companyId, callerId } = await adHocContact();
+    await calling.logCall({
+      contactId,
+      outcome: "meeting_booked",
+      callerId,
+      meetingAt: new Date(Date.now() + 3 * 86_400_000),
+    });
+    expect((await companies.getCompany(companyId))?.status).toBe("meeting");
+  });
+
+  it("NESPUSTÍ e-mailovou kadenci", async () => {
+    const { contactId, callerId } = await adHocContact();
+    await calling.logCall({ contactId, outcome: "no_answer", callerId });
+
+    // Tohle je ta hranice: zápis výsledku hovoru nesmí kontakt vtáhnout
+    // do žádné e-mailové sekvence.
+    const [{ count: inCampaign }] = await sql<{ count: number }[]>`
+      select count(*)::int from campaign_contacts where contact_id = ${contactId}
+    `;
+    expect(inCampaign).toBe(0);
+    const [{ count: sends }] = await sql<{ count: number }[]>`
+      select count(*)::int from email_sends
+    `;
+    expect(sends).toBe(0);
+  });
+
+  it("naplánuje další krok, který je vidět na firmě", async () => {
+    const { contactId, companyId, callerId } = await adHocContact();
+    await companies.updateCompany(companyId, { status: "in_progress" });
+    await calling.logCall({ contactId, outcome: "no_answer", callerId });
+
+    const company = await companies.getCompany(companyId);
+    // Bez campaign_contacts si další krok nese sama aktivita.
+    expect(company?.next_action_at).not.toBeNull();
+    expect(company?.needs_attention).toBe(false);
+    expect(company?.attempts).toBe(1);
+  });
+
+  it("umožní ruční datum dalšího kontaktu", async () => {
+    const { contactId, companyId, callerId } = await adHocContact();
+    const when = new Date(Date.now() + 5 * 86_400_000);
+    const logged = await calling.logCall({
+      contactId,
+      outcome: "callback",
+      callerId,
+      callbackAt: when,
+    });
+    expect(logged.ok).toBe(true);
+
+    const [activity] = await sql<{ next_action_at: Date }[]>`
+      select next_action_at from call_activities where contact_id = ${contactId}
+    `;
+    expect(activity.next_action_at.getTime()).toBe(when.getTime());
+    expect((await companies.getCompany(companyId))?.next_action_at?.getTime()).toBe(when.getTime());
+  });
+
+  it("bez data u „Volat jindy“ zápis odmítne", async () => {
+    const { contactId, callerId } = await adHocContact();
+    const logged = await calling.logCall({ contactId, outcome: "callback", callerId });
+    expect(logged.ok).toBe(false);
+    const [{ count }] = await sql<{ count: number }[]>`select count(*)::int from call_activities`;
+    expect(count).toBe(0);
+  });
+
+  it("„Nekontaktovat“ zapíše do-not-call i mimo kampaň", async () => {
+    const { contactId, callerId } = await adHocContact();
+    await calling.logCall({ contactId, outcome: "do_not_call", callerId });
+
+    const [{ count }] = await sql<{ count: number }[]>`
+      select count(*)::int from call_suppression where contact_id = ${contactId}
+    `;
+    expect(count).toBe(1);
+    // A od téhle chvíle mu nejde zavolat ani ad-hoc.
+    const again = await calls.startCall({ contactId, callerId });
+    expect(again.ok).toBe(false);
+  });
+
+  it("počítá pokusy napříč hovory", async () => {
+    const { contactId, companyId, callerId } = await adHocContact();
+    await calling.logCall({ contactId, outcome: "no_answer", callerId });
+    await calling.logCall({ contactId, outcome: "busy", callerId });
+
+    const [rows] = await sql<{ max: number }[]>`
+      select max(attempt_number)::int as max from call_activities where contact_id = ${contactId}
+    `;
+    expect(rows.max).toBe(2);
+    expect((await companies.getCompany(companyId))?.attempts).toBe(2);
+  });
+
+  it("nedokončený ad-hoc hovor se nabídne k dopsání stejně jako ostatní", async () => {
+    const { contactId, callerId } = await adHocContact();
+    const call = await adHocCall(contactId, callerId, "CA-adhoc-lost");
+
+    const pending = await calls.getUnloggedCall({ callerId });
+    expect(pending?.id).toBe(call.callId);
+    expect(pending?.campaign_contact_id).toBeNull();
+    expect(pending?.contact_name).toBe("Petr Novotný");
+
+    await calling.logCall({ contactId, outcome: "no_answer", callerId, callId: call.callId });
+    expect(await calls.getUnloggedCall({ callerId })).toBeNull();
+  });
+
+  it("timeline firmy pozná hovor s výsledkem od hovoru bez něj", async () => {
+    const { contactId, companyId, callerId } = await adHocContact();
+    const call = await adHocCall(contactId, callerId, "CA-adhoc-timeline");
+
+    // Dokud výsledek nikdo nezapsal, nesmí se řádek tvářit hotově - jinak
+    // se ad-hoc hovor u firmy ztratí mezi vyřízenými.
+    const [before] = await calls.listCallsForCompany(companyId);
+    expect(before.call_activity_id).toBeNull();
+    expect(before.outcome).toBeNull();
+
+    await calling.logCall({
+      contactId,
+      outcome: "not_interested",
+      callerId,
+      callId: call.callId,
+    });
+
+    const [after] = await calls.listCallsForCompany(companyId);
+    expect(after.call_activity_id).not.toBeNull();
+    expect(after.outcome).toBe("not_interested");
+  });
+});
+
 // ------------------------------------------ nezapsaný výsledek po hovoru
 describe("hovor bez zapsaného výsledku", () => {
   /** Hovor, který proběhl a caller pak zavřel notebook. */
@@ -528,7 +714,12 @@ function fakeProviders(overrides: {
       overrides.transcribe ??
       (async () => ({
         ok: true as const,
-        result: { text: "Dobrý den, tady Jan.", language: "cs", provider: "test" },
+        result: {
+          text: "Dobrý den, tady Jan.",
+          language: "cs",
+          provider: "test",
+          segments: [{ text: "Dobrý den, tady Jan.", start: 0, end: 2 }],
+        },
       })),
   };
   const analysis: AnalysisProvider = {
@@ -537,6 +728,148 @@ function fakeProviders(overrides: {
   };
   return { transcription, analysis };
 }
+
+/** Stereo WAV: přepisovač podle délky pozná, který kanál dostal. */
+function stereoRecording(): Buffer {
+  const frames = 16;
+  const blockAlign = 4;
+  const data = Buffer.alloc(frames * blockAlign);
+  for (let i = 0; i < frames; i++) {
+    data.writeInt16LE(1000 + i, i * blockAlign);
+    data.writeInt16LE(-(1000 + i), i * blockAlign + 2);
+  }
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0, "ascii");
+  header.writeUInt32LE(36 + data.length, 4);
+  header.write("WAVE", 8, "ascii");
+  header.write("fmt ", 12, "ascii");
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(2, 22);
+  header.writeUInt32LE(8000, 24);
+  header.writeUInt32LE(8000 * blockAlign, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(16, 34);
+  header.write("data", 36, "ascii");
+  header.writeUInt32LE(data.length, 40);
+  return Buffer.concat([header, data]);
+}
+
+describe("rozlišení řečníků", () => {
+  /**
+   * Přepisovač dostane dva různé kanály a musí vrátit dvě různé repliky.
+   * Rozlišuje je podle prvního vzorku: kladný = kanál obchodníka.
+   */
+  function channelAwareProviders() {
+    const seen: string[] = [];
+    const transcription: TranscriptionProvider = {
+      name: "test",
+      transcribe: async (audio) => {
+        const first = audio.readInt16LE(44);
+        const agent = first > 0;
+        seen.push(agent ? "agent" : "prospect");
+        return {
+          ok: true as const,
+          result: {
+            text: agent ? "Dobrý den, tady Jan z VEXY." : "Ano, poslouchám.",
+            language: "cs",
+            provider: "test",
+            segments: agent
+              ? [
+                  { text: "Dobrý den, tady Jan z VEXY.", start: 0, end: 3 },
+                  { text: "Volám kvůli náboru.", start: 6, end: 8 },
+                ]
+              : [{ text: "Ano, poslouchám.", start: 3.5, end: 5 }],
+          },
+        };
+      },
+    };
+    let analysisTranscript = "";
+    const analysis: AnalysisProvider = {
+      name: "test",
+      analyse: async (input) => {
+        analysisTranscript = input.transcript;
+        return { ok: true as const, analysis: ANALYSIS };
+      },
+    };
+    return { transcription, analysis, seen, transcript: () => analysisTranscript };
+  }
+
+  async function runWith(audio: Buffer, providers: { transcription: TranscriptionProvider; analysis: AnalysisProvider }) {
+    // Stahování nahrávky jde přes Twilio klienta, takže konfigurace musí být.
+    Object.assign(process.env, {
+      TWILIO_ACCOUNT_SID: "AC-test",
+      TWILIO_AUTH_TOKEN: "token",
+      TWILIO_API_KEY_SID: "SK-test",
+      TWILIO_API_KEY_SECRET: "secret",
+      TWILIO_TWIML_APP_SID: "AP-test",
+      TWILIO_CALLER_ID: "+420222222222",
+    });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(new Uint8Array(audio), {
+        status: 200,
+        headers: { "content-type": "audio/wav" },
+      })) as typeof fetch;
+    try {
+      return await pipeline.processCallPipeline(providers);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
+
+  it("přepíše každý kanál zvlášť a proloží repliky podle času", async () => {
+    const seeded = await seed();
+    const call = await completedCall(seeded);
+    const providers = channelAwareProviders();
+
+    const pass = await runWith(stereoRecording(), providers);
+    expect(pass.transcribed).toBe(1);
+    // Dva průchody přepisovačem: jeden na každou stranu hovoru.
+    expect(providers.seen).toEqual(["agent", "prospect"]);
+
+    const row = await calls.getCall(call.callId);
+    expect(row?.recording_channels).toBe(2);
+    expect(row?.transcript_segments).toEqual([
+      { speaker: "agent", text: "Dobrý den, tady Jan z VEXY.", start: 0, end: 3 },
+      { speaker: "prospect", text: "Ano, poslouchám.", start: 3.5, end: 5 },
+      { speaker: "agent", text: "Volám kvůli náboru.", start: 6, end: 8 },
+    ]);
+    // Plochý přepis zůstává, ale už nese role.
+    expect(row?.transcript).toBe(
+      "Obchodník: Dobrý den, tady Jan z VEXY.\nProspekt: Ano, poslouchám.\nObchodník: Volám kvůli náboru.",
+    );
+  });
+
+  it("analýza dostane přepis s rolemi, ne anonymní text", async () => {
+    const seeded = await seed();
+    await completedCall(seeded);
+    const providers = channelAwareProviders();
+    await runWith(stereoRecording(), providers);
+
+    // Bez rolí by model mohl přičíst větu obchodníka prospektovi.
+    expect(providers.transcript()).toContain("Obchodník:");
+    expect(providers.transcript()).toContain("Prospekt: Ano, poslouchám.");
+  });
+
+  it("mono nahrávku přepíše postaru, bez vymyšlených rolí", async () => {
+    const seeded = await seed();
+    const call = await completedCall(seeded);
+    const providers = channelAwareProviders();
+
+    // Jednokanálová nahrávka: řečníky rozlišit nejde a hádat se nebude.
+    const mono = Buffer.concat([stereoRecording().subarray(0, 44), Buffer.alloc(32)]);
+    mono.writeUInt16LE(1, 22);
+    mono.writeUInt16LE(2, 32);
+    await runWith(mono, providers);
+
+    const row = await calls.getCall(call.callId);
+    expect(row?.transcript_status).toBe("done");
+    expect(row?.transcript_segments).toBeNull();
+    expect(row?.transcript).not.toContain("Obchodník:");
+    expect(providers.seen).toHaveLength(1);
+  });
+});
 
 describe("přepis a analýza", () => {
   it("přepíše nahrávku a rovnou ji zanalyzuje", async () => {
@@ -662,7 +995,12 @@ describe("přepis a analýza", () => {
         transcribeCalls++;
         return {
           ok: true as const,
-          result: { text: "Dobrý den.", language: "cs", provider: "test" },
+          result: {
+            text: "Dobrý den.",
+            language: "cs",
+            provider: "test",
+            segments: [{ text: "Dobrý den.", start: 0, end: 1 }],
+          },
         };
       },
       analyse: async () => {
