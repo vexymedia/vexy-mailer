@@ -157,50 +157,66 @@ export async function startCall(input: {
     };
   }
 
-  // Jeden člověk, jeden hovor. Druhá záložka nebo zapomenutá stará nesmí
-  // vytočit druhou linku - platí se obě.
-  if (input.callerId) {
-    const [active] = await sql<{ id: string }[]>`
-      select id from calls
-       where caller_id = ${input.callerId}
-         and status in ('ringing', 'in_progress')
-         and started_at > now() - interval '2 hours'
-       limit 1
-    `;
-    if (active) {
-      return {
-        ok: false,
-        error: "Už máte rozjednaný hovor. Nejdřív ho ukončete.",
-        code: "already_calling",
-      };
-    }
-
-    // Hovor, který se k providerovi nikdy nedostal, blokovat nemá co:
-    // uzavře se jako neúspěšný a jde se dál. Tím se zároveň zajistí, že
-    // ho TwiML endpoint už nevytočí, kdyby se ozval opožděně.
-    await sql`
-      update calls
-         set status = 'failed',
-             ended_at = coalesce(ended_at, now()),
-             error_message = coalesce(error_message, 'Nahrazeno novým hovorem.'),
-             recording_status = case when recording_status = 'pending' then 'disabled' else recording_status end,
-             transcript_status = case when transcript_status = 'pending' then 'skipped' else transcript_status end,
-             analysis_status = case when analysis_status = 'pending' then 'skipped' else analysis_status end,
-             updated_at = now()
-       where caller_id = ${input.callerId}
-         and status = 'queued'
-         and provider_call_sid is null
-    `;
-  }
-
   const name = [row.first_name, row.last_name].filter(Boolean).join(" ").trim() || row.email;
 
-  const [created] = await sql<{ id: string }[]>`
-    insert into calls (contact_id, campaign_contact_id, company_id, caller_id, destination)
-    values (${row.contact_id}, ${row.campaign_contact_id}, ${row.company_id},
-            ${input.callerId}, ${destination})
-    returning id
-  `;
+  /**
+   * Založení hovoru je jedna atomická operace: zjistit, jestli caller
+   * někde nevisí na lince, uklidit po nedokončeném pokusu, a teprve pak
+   * založit nový.
+   *
+   * Bez zámku dva požadavky ze dvou záložek oba projdou kontrolou dřív,
+   * než kterýkoli z nich stihne zapsat - a vytočí se dvě linky, obě
+   * placené. `pg_advisory_xact_lock` serializuje jen tohohle callera
+   * a pouští se sám při konci transakce, takže nemá jak se zaseknout
+   * (a funguje i přes transakční pooler, na rozdíl od zámku na relaci).
+   */
+  const created = await sql.begin(async (tx) => {
+    if (input.callerId) {
+      await tx`select pg_advisory_xact_lock(hashtextextended(${input.callerId}, 0))`;
+
+      const [active] = await tx<{ id: string }[]>`
+        select id from calls
+         where caller_id = ${input.callerId}
+           and status in ('ringing', 'in_progress')
+           and started_at > now() - interval '2 hours'
+         limit 1
+      `;
+      if (active) return null;
+
+      // Hovor, který se k providerovi nikdy nedostal, blokovat nemá co:
+      // uzavře se jako neúspěšný a jde se dál. Tím se zároveň zajistí, že
+      // ho TwiML endpoint už nevytočí, kdyby se ozval opožděně.
+      await tx`
+        update calls
+           set status = 'failed',
+               ended_at = coalesce(ended_at, now()),
+               error_message = coalesce(error_message, 'Nahrazeno novým hovorem.'),
+               recording_status = case when recording_status = 'pending' then 'disabled' else recording_status end,
+               transcript_status = case when transcript_status = 'pending' then 'skipped' else transcript_status end,
+               analysis_status = case when analysis_status = 'pending' then 'skipped' else analysis_status end,
+               updated_at = now()
+         where caller_id = ${input.callerId}
+           and status = 'queued'
+           and provider_call_sid is null
+      `;
+    }
+
+    const [inserted] = await tx<{ id: string }[]>`
+      insert into calls (contact_id, campaign_contact_id, company_id, caller_id, destination)
+      values (${row.contact_id}, ${row.campaign_contact_id}, ${row.company_id},
+              ${input.callerId}, ${destination})
+      returning id
+    `;
+    return inserted;
+  });
+
+  if (!created) {
+    return {
+      ok: false,
+      error: "Už máte rozjednaný hovor. Nejdřív ho ukončete.",
+      code: "already_calling",
+    };
+  }
 
   return {
     ok: true,
@@ -520,13 +536,50 @@ export async function linkCallActivity(callId: string, callActivityId: string): 
   `;
 }
 
-/** Poslední hovor daného kontaktu, který ještě nemá zapsaný výsledek. */
-export async function getUnloggedCall(campaignContactId: string): Promise<CallRow | null> {
-  const [row] = await sql<CallRow[]>`
-    select * from calls
-     where campaign_contact_id = ${campaignContactId}
-       and call_activity_id is null
-     order by started_at desc
+export interface UnloggedCall extends CallRow {
+  contact_name: string;
+  company_name: string | null;
+}
+
+/**
+ * Jak dlouho se ještě nabízí dopsat výsledek. Po pracovním dni už je to
+ * spíš matoucí než užitečné a kontakt se vrátí do normální fronty.
+ */
+export const UNLOGGED_CALL_WINDOW = "12 hours";
+
+/**
+ * Poslední telefonát, který se opravdu odehrál, ale nemá zapsaný výsledek.
+ *
+ * Typicky: caller zavěsil a zavřel notebook. Kontakt se pak nesmí objevit
+ * jako běžný lead a být omylem vytočen znovu - viz stejná podmínka ve
+ * frontě volání.
+ *
+ * Berou se jen hovory potvrzené providerem, které skončily reálným
+ * telefonním výsledkem. Nepovedené pokusy o spojení se sem nepletou,
+ * u nich není co zapisovat.
+ */
+export async function getUnloggedCall(filter: {
+  campaignContactId?: string | null;
+  callerId?: string | null;
+}): Promise<UnloggedCall | null> {
+  const [row] = await sql<UnloggedCall[]>`
+    select c.*,
+           coalesce(nullif(btrim(coalesce(ct.first_name, '') || ' ' || coalesce(ct.last_name, '')), ''),
+                    ct.email) as contact_name,
+           co.name as company_name
+      from calls c
+      join contacts ct on ct.id = c.contact_id
+      left join companies co on co.id = c.company_id
+     where c.call_activity_id is null
+       and c.campaign_contact_id is not null
+       and c.provider_call_sid is not null
+       and c.status in ('completed', 'no_answer', 'busy')
+       and c.started_at > now() - ${UNLOGGED_CALL_WINDOW}::interval
+       and (${filter.campaignContactId ?? null}::uuid is null
+            or c.campaign_contact_id = ${filter.campaignContactId ?? null}::uuid)
+       and (${filter.callerId ?? null}::uuid is null
+            or c.caller_id = ${filter.callerId ?? null}::uuid)
+     order by c.started_at desc
      limit 1
   `;
   return row ?? null;

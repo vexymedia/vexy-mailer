@@ -112,6 +112,14 @@ export async function listCallQueue(
        -- jít do prospectingu ani přes svůj druhý kontakt.
        and not exists (select 1 from companies qco where qco.id = c.company_id
                         and qco.status in ('won', 'lost', 'excluded'))
+       -- Ani kontakt, kterému se už volalo, jen se nestihl zapsat výsledek.
+       -- Jinak by ho fronta nabídla znovu a vytočil by se podruhé.
+       and not exists (select 1 from calls uc
+                        where uc.campaign_contact_id = cc.id
+                          and uc.call_activity_id is null
+                          and uc.provider_call_sid is not null
+                          and uc.status in ('completed', 'no_answer', 'busy')
+                          and uc.started_at > now() - interval '12 hours')
        and (${mode}::text is null
             or (${mode} = 'first' and cc.call_attempts = 0)
             or (${mode} = 'followup' and cc.call_attempts > 0))
@@ -189,6 +197,12 @@ export async function claimNextCall(
           and (inner_cc.next_call_at is null or inner_cc.next_call_at <= now())
           and not exists (select 1 from companies qco where qco.id = c.company_id
                            and qco.status in ('won', 'lost', 'excluded'))
+          and not exists (select 1 from calls uc
+                           where uc.campaign_contact_id = inner_cc.id
+                             and uc.call_activity_id is null
+                             and uc.provider_call_sid is not null
+                             and uc.status in ('completed', 'no_answer', 'busy')
+                             and uc.started_at > now() - interval '12 hours')
           and (${mode}::text is null
                or (${mode} = 'first' and inner_cc.call_attempts = 0)
                or (${mode} = 'followup' and inner_cc.call_attempts > 0))
@@ -306,6 +320,15 @@ export async function getHeldCall(
        -- ...ani firmu, kterou mezitím někdo uzavřel.
        and not exists (select 1 from companies qco where qco.id = c.company_id
                         and qco.status in ('won', 'lost', 'excluded'))
+       -- ...ani kontakt, kterému se právě volalo a chybí u toho výsledek.
+       -- Rezervace přežije zavřený notebook o pár minut, takže bez téhle
+       -- podmínky by se po návratu nabídl k vytočení podruhé.
+       and not exists (select 1 from calls uc
+                        where uc.campaign_contact_id = cc.id
+                          and uc.call_activity_id is null
+                          and uc.provider_call_sid is not null
+                          and uc.status in ('completed', 'no_answer', 'busy')
+                          and uc.started_at > now() - interval '12 hours')
      limit 1
   `;
   if (!prospect) return null;

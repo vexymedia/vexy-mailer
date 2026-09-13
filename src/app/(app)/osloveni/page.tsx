@@ -9,6 +9,9 @@ import { CallerPicker } from "@/components/caller-picker";
 import { OsloveniTabs } from "@/components/osloveni-tabs";
 import { WorkProgress } from "@/components/work-progress";
 import { buildCallBriefing } from "@/lib/briefing";
+import { getUnloggedCall } from "@/lib/queries/calls";
+import { buildCockpitBriefing } from "@/lib/telephony/briefing";
+import { CallRecovery } from "@/components/call/call-recovery";
 import { isTwilioConfigured } from "@/lib/telephony/twilio";
 import { plural } from "@/lib/plan";
 
@@ -61,10 +64,26 @@ export default async function OsloveniPage({
     );
   }
 
-  const [held, progress] = await Promise.all([
+  const [held, progress, unlogged] = await Promise.all([
     getHeldCall(null, caller.id),
     getCallerDayProgress(caller.id, null, mode),
+    // Hovor, který proběhl, ale výsledek se nestihl zapsat - typicky
+    // zavřený notebook hned po zavěšení.
+    getUnloggedCall({ callerId: caller.id }),
   ]);
+  const recovery =
+    unlogged && unlogged.campaign_contact_id
+      ? {
+          call: unlogged,
+          qualification: (
+            await buildCockpitBriefing({
+              contactId: unlogged.contact_id,
+              companyId: unlogged.company_id,
+              campaignContactId: unlogged.campaign_contact_id,
+            })
+          ).qualification,
+        }
+      : null;
   const briefing = held ? await buildCallBriefing(held.prospect, held.campaign.name) : null;
   // Jestli jde volat z prohlížeče, ví server.
   const browserCalling = isTwilioConfigured();
@@ -83,6 +102,16 @@ export default async function OsloveniPage({
         }
       />
       <OsloveniTabs active="/osloveni" />
+
+      {recovery ? (
+        <CallRecovery
+          callId={recovery.call.id}
+          campaignContactId={recovery.call.campaign_contact_id!}
+          contactName={recovery.call.contact_name}
+          companyName={recovery.call.company_name}
+          qualification={recovery.qualification}
+        />
+      ) : null}
 
       <WorkProgress processed={progress.processed} total={progress.total} />
 

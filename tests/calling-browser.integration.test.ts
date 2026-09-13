@@ -276,6 +276,40 @@ describe("jeden caller, jeden hovor", () => {
     expect(third.ok).toBe(true);
   });
 
+  it("dva souběžné požadavky vytvoří právě jeden vytočitelný hovor", async () => {
+    const seeded = await seed();
+
+    // Dvě záložky mačkají Zavolat ve stejný okamžik. Bez serializace obě
+    // projdou kontrolou dřív, než kterákoli stihne zapsat - a vytočí se
+    // dvě linky, obě placené.
+    const results = await Promise.all([
+      calls.startCall({ campaignContactId: seeded.campaignContactId, callerId: seeded.callerId }),
+      calls.startCall({ campaignContactId: seeded.campaignContactId, callerId: seeded.callerId }),
+    ]);
+    expect(results.filter((r) => r.ok)).toHaveLength(2);
+
+    // Vytočit se ale smí právě jeden: TwiML endpoint pouští jen `queued`.
+    const rows = await sql<{ status: string }[]>`select status from calls`;
+    expect(rows).toHaveLength(2);
+    expect(rows.filter((r) => r.status === "queued")).toHaveLength(1);
+    expect(rows.filter((r) => r.status === "failed")).toHaveLength(1);
+  });
+
+  it("deset souběžných požadavků nechá vytočitelný pořád jen jeden", async () => {
+    const seeded = await seed();
+    const attempts = await Promise.all(
+      Array.from({ length: 10 }, () =>
+        calls.startCall({ campaignContactId: seeded.campaignContactId, callerId: seeded.callerId }),
+      ),
+    );
+    expect(attempts.every((r) => r.ok)).toBe(true);
+
+    const [{ count }] = await sql<{ count: number }[]>`
+      select count(*)::int from calls where status = 'queued'
+    `;
+    expect(count).toBe(1);
+  });
+
   it("hovor, který se k providerovi nedostal, další volání neblokuje", async () => {
     const seeded = await seed();
     const abandoned = await calls.startCall({
@@ -312,6 +346,102 @@ describe("jeden caller, jeden hovor", () => {
     // Tenhle stav čte /api/calling/voice, než cokoli vytočí.
     const stale = await calls.getCallForDial(first.call.callId);
     expect(stale?.status).not.toBe("queued");
+  });
+});
+
+// ------------------------------------------ nezapsaný výsledek po hovoru
+describe("hovor bez zapsaného výsledku", () => {
+  /** Hovor, který proběhl a caller pak zavřel notebook. */
+  async function hungUpWithoutLogging(seeded: Awaited<ReturnType<typeof seed>>) {
+    const started = await calls.startCall({
+      campaignContactId: seeded.campaignContactId,
+      callerId: seeded.callerId,
+    });
+    if (!started.ok) throw new Error(started.error);
+    await calls.attachProviderCall(started.call.callId, "CA-hung", null);
+    await calls.recordCallStatus({
+      providerCallSid: "CA-hung",
+      status: "completed",
+      durationSeconds: 130,
+    });
+    return started.call;
+  }
+
+  it("nabídne se k dopsání a ví, komu se volalo", async () => {
+    const seeded = await seed();
+    const call = await hungUpWithoutLogging(seeded);
+
+    const pending = await calls.getUnloggedCall({ callerId: seeded.callerId });
+    expect(pending?.id).toBe(call.callId);
+    expect(pending?.contact_name).toBe("Ana");
+    expect(pending?.company_name).toBe("Acme");
+  });
+
+  it("kontakt se mezitím nesmí znovu vytočit jako běžný lead", async () => {
+    const seeded = await seed();
+    await hungUpWithoutLogging(seeded);
+
+    // Tohle je ta chyba, kterou to má chytit: prospekt se zavolá podruhé,
+    // protože o prvním hovoru nikde není zapsaný výsledek.
+    expect(await calling.listCallQueue(seeded.campaignId)).toHaveLength(0);
+    expect(await calling.claimNextCall(seeded.campaignId, seeded.callerId)).toBeNull();
+  });
+
+  it("nenabídne se ani přes rezervaci, která zavřený notebook přežila", async () => {
+    const seeded = await seed();
+    // Caller si kontakt rezervoval, zavolal a zavřel notebook. Rezervace
+    // platí ještě pár minut - pracovní režim ho proto po návratu měl
+    // stále nabídnutý k vytočení.
+    const claimed = await calling.claimNextCall(seeded.campaignId, seeded.callerId);
+    expect(claimed).toBe(seeded.campaignContactId);
+    await hungUpWithoutLogging(seeded);
+
+    expect(await calling.getHeldCall(seeded.campaignId, seeded.callerId)).toBeNull();
+  });
+
+  it("po dopsání výsledku se vrátí do normálního běhu", async () => {
+    const seeded = await seed();
+    const call = await hungUpWithoutLogging(seeded);
+
+    await calling.logCall({
+      campaignContactId: seeded.campaignContactId,
+      outcome: "no_answer",
+      callerId: seeded.callerId,
+      callId: call.callId,
+    });
+
+    // Nabídka zmizí...
+    expect(await calls.getUnloggedCall({ callerId: seeded.callerId })).toBeNull();
+    // ...a kadence normálně naplánovala další pokus.
+    const [row] = await sql<{ call_attempts: number; next_call_at: Date | null }[]>`
+      select call_attempts, next_call_at from campaign_contacts where id = ${seeded.campaignContactId}
+    `;
+    expect(row.call_attempts).toBe(1);
+    expect(row.next_call_at).not.toBeNull();
+  });
+
+  it("nenabízí hovor, který se nikdy nespojil", async () => {
+    const seeded = await seed();
+    const started = await calls.startCall({
+      campaignContactId: seeded.campaignContactId,
+      callerId: seeded.callerId,
+    });
+    if (!started.ok) throw new Error(started.error);
+    // Nikdy nedostal SID od providera - není co zapisovat.
+    expect(await calls.getUnloggedCall({ callerId: seeded.callerId })).toBeNull();
+    // A kontakt zůstává normálně ve frontě.
+    expect(await calling.listCallQueue(seeded.campaignId)).toHaveLength(1);
+  });
+
+  it("po dni už kontakt nedrží a vrátí ho do fronty", async () => {
+    const seeded = await seed();
+    const call = await hungUpWithoutLogging(seeded);
+    await sql`
+      update calls set started_at = now() - interval '20 hours' where id = ${call.callId}
+    `;
+    // Věčná blokáda by byla horší než riziko druhého hovoru po dni.
+    expect(await calls.getUnloggedCall({ callerId: seeded.callerId })).toBeNull();
+    expect(await calling.listCallQueue(seeded.campaignId)).toHaveLength(1);
   });
 });
 
@@ -675,7 +805,7 @@ describe("napojení na výsledky a frontu", () => {
   it("nabídne poslední telefonát bez zapsaného výsledku", async () => {
     const seeded = await seed();
     const call = await completedCall(seeded);
-    const pending = await calls.getUnloggedCall(seeded.campaignContactId);
+    const pending = await calls.getUnloggedCall({ campaignContactId: seeded.campaignContactId });
     expect(pending?.id).toBe(call.callId);
 
     await calling.logCall({
@@ -684,7 +814,7 @@ describe("napojení na výsledky a frontu", () => {
       callerId: seeded.callerId,
       callId: call.callId,
     });
-    expect(await calls.getUnloggedCall(seeded.campaignContactId)).toBeNull();
+    expect(await calls.getUnloggedCall({ campaignContactId: seeded.campaignContactId })).toBeNull();
   });
 
   it("telefonáty se dají číst k firmě i ke kontaktu", async () => {
