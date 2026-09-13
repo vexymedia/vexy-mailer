@@ -4,11 +4,14 @@ import { SettingsForm } from "@/components/settings-form";
 import { RunWorkerButton } from "@/components/run-worker-button";
 import { NastaveniTabs } from "@/components/section-tabs";
 import { appUrl } from "@/lib/unsubscribe";
+import { CallingSettings } from "@/components/call/calling-settings";
+import { missingTwilioEnv } from "@/lib/telephony/twilio";
 
 export const dynamic = "force-dynamic";
 
 export default async function SettingsPage() {
   const settings = await getSettings();
+  const missingCalling = missingTwilioEnv();
 
   return (
     <>
@@ -19,6 +22,13 @@ export default async function SettingsPage() {
           testMode={settings.test_mode}
           testEmail={settings.test_email ?? ""}
           testBehavior={settings.test_behavior}
+        />
+
+        <CallingSettings
+          configured={missingCalling.length === 0}
+          missing={missingCalling}
+          recordingEnabled={settings.call_recording_enabled}
+          callerId={process.env.TWILIO_CALLER_ID?.trim() || null}
         />
 
         <div className="card p-6">

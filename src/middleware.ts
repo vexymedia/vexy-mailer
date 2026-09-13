@@ -10,6 +10,12 @@ import { SESSION_COOKIE } from "@/lib/session-cookie";
 const PUBLIC_PREFIXES = [
   "/login",
   "/api/cron",
+  // Twilio webhooky. Session cookie poslat nemůžou - chrání je podpis
+  // ověřený v samotném handleru, ne přihlášení. Token a založení hovoru
+  // sem schválně NEPATŘÍ: ty přihlášení vyžadují.
+  "/api/calling/voice",
+  "/api/calling/status",
+  "/api/calling/recording",
   "/u/", // public one-click unsubscribe
   "/_next",
   // Next's generated metadata routes. Without these the icon request is

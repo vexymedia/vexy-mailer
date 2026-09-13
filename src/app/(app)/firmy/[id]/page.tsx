@@ -14,6 +14,10 @@ import {
 } from "@/components/ui";
 import { CompanyForm } from "@/components/company-form";
 import { ScheduleNextStep } from "@/components/next-step-block";
+import { CallButton } from "@/components/call/call-button";
+import { isTwilioConfigured } from "@/lib/telephony/twilio";
+import { listCallsForCompany } from "@/lib/queries/calls";
+import { CallHistory } from "@/components/call/call-history";
 
 export const dynamic = "force-dynamic";
 
@@ -27,12 +31,15 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
   const company = await getCompany(id);
   if (!company) notFound();
 
-  const [contacts, timeline, team, nextStep] = await Promise.all([
+  const [contacts, timeline, team, nextStep, callRecords] = await Promise.all([
     listCompanyContacts(id),
     getCompanyTimeline(id),
     listCallers({ activeOnly: true }),
     getCompanyNextStep(id),
+    listCallsForCompany(id, 20),
   ]);
+  // Jestli jde volat z prohlížeče, ví server. Klient si to nevymýšlí.
+  const browserCalling = isTwilioConfigured();
 
   // Primární CTA jen tam, kde volání skutečně dává smysl. Zavádějící
   // "Zavolat" u člověka na do-not-call listu je horší než žádné tlačítko.
@@ -68,9 +75,12 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
         actions={
           <>
             {callable?.phone ? (
-              <a href={`tel:${callable.phone.replace(/\s+/g, "")}`} className="btn-go">
-                Zavolat {callable.phone}
-              </a>
+              <CallButton
+                phone={callable.phone}
+                contactId={callable.id}
+                campaignContactId={callable.campaign_contact_id ?? undefined}
+                browserCalling={browserCalling}
+              />
             ) : null}
             {callable ? (
               <Link href="/osloveni" className="btn-secondary">Otevřít v oslovení</Link>
@@ -160,15 +170,21 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
                           <p className="truncate text-xs text-zinc-500">{contact.email}</p>
                         </div>
                         <div className="flex shrink-0 flex-wrap items-center gap-2">
-                          {contact.phone && !contact.do_not_call ? (
-                            <a href={`tel:${contact.phone.replace(/\s+/g, "")}`} className="btn-go !py-1.5 text-sm">
-                              Zavolat
-                            </a>
-                          ) : (
-                            <span className="btn !py-1.5 cursor-not-allowed border border-zinc-200 bg-zinc-100 text-sm text-zinc-400">
-                              Zavolat
-                            </span>
-                          )}
+                          <CallButton
+                            phone={contact.phone}
+                            contactId={contact.id}
+                            campaignContactId={contact.campaign_contact_id ?? undefined}
+                            browserCalling={browserCalling}
+                            disabled={contact.do_not_call || !contact.phone}
+                            disabledReason={
+                              contact.do_not_call
+                                ? "Tento člověk je na seznamu „nevolat“."
+                                : "Kontakt nemá telefonní číslo."
+                            }
+                            className="btn-go !py-1.5 text-sm"
+                          >
+                            Zavolat
+                          </CallButton>
                           {contact.suppressed ? (
                             <span className="btn !py-1.5 cursor-not-allowed border border-zinc-200 bg-zinc-100 text-sm text-zinc-400">
                               E-mail
@@ -229,6 +245,8 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
               </ul>
             )}
           </section>
+
+          <CallHistory calls={callRecords} />
 
           <section>
             <h2 className="section-title mb-3">Co se stalo</h2>

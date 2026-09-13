@@ -8,6 +8,7 @@ import { clearCallerAction, nextCallAction } from "@/lib/actions";
 import { PageHeader, EmptyState, Stat } from "@/components/ui";
 import { CallWorkspace } from "@/components/call-workspace";
 import { buildCallBriefing } from "@/lib/briefing";
+import { isTwilioConfigured } from "@/lib/telephony/twilio";
 
 export const dynamic = "force-dynamic";
 
@@ -65,6 +66,8 @@ export default async function CallerWorkspacePage({
   // Read-only: the workspace shows whichever prospect this caller already
   // holds. Taking a lease is an action, never a render - a prefetch of this
   // page must not reserve anybody.
+  // Jestli jde volat z prohlížeče, ví server.
+  const browserCalling = isTwilioConfigured();
   const [next, report] = await Promise.all([
     getHeldCall(id, caller.id),
     getCampaignCallingReport(id),
@@ -150,6 +153,7 @@ export default async function CallerWorkspacePage({
             qualificationCriteria={next.script.qualification}
             callerName={caller.name}
             campaignScope={id}
+            browserCalling={browserCalling}
             briefing={await buildCallBriefing(next.prospect, next.campaign.name)}
           />
           <p className="mt-3 text-xs text-zinc-500">

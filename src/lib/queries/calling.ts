@@ -351,6 +351,11 @@ export interface LogCallInput {
   meetingAt?: Date | null;
   meetingQualified?: boolean | null;
   dealValue?: number | null;
+  /**
+   * Telefonát, ze kterého výsledek vzešel. Nepovinné: výsledek se dá
+   * zapsat i k hovoru z mobilu, který VEXY nikdy neviděla.
+   */
+  callId?: string | null;
 }
 
 export interface LogCallResult {
@@ -424,7 +429,7 @@ export async function logCall(input: LogCallInput): Promise<LogCallResult> {
       meetingQualified: input.meetingQualified ?? null,
     });
 
-    await tx`
+    const [activity] = await tx<{ id: string }[]>`
       insert into call_activities (campaign_id, campaign_contact_id, contact_id, caller_id,
                                    outcome, connected, note, attempt_number,
                                    next_action_at, meeting_at, meeting_qualified, deal_value)
@@ -432,6 +437,7 @@ export async function logCall(input: LogCallInput): Promise<LogCallResult> {
               ${outcomeValue}, ${applied.connected}, ${note}, ${applied.attempts},
               ${applied.nextCallAt}, ${applied.meetingAt}, ${applied.meetingQualified},
               ${input.dealValue ?? null})
+      returning id
     `;
 
     await tx`
@@ -466,6 +472,16 @@ export async function logCall(input: LogCallInput): Promise<LogCallResult> {
           update companies set status = ${merged}, updated_at = now() where id = ${row.company_id}
         `;
       }
+    }
+
+    // Telefonát a jeho výsledek patří k sobě. Váže se až tady, uvnitř
+    // transakce: kdyby se zápis výsledku nepovedl, nesmí u hovoru zůstat
+    // odkaz na aktivitu, která nevznikla.
+    if (input.callId) {
+      await tx`
+        update calls set call_activity_id = ${activity.id}, updated_at = now()
+         where id = ${input.callId} and call_activity_id is null
+      `;
     }
 
     // "Nevolat" is a decision about the person, not about this campaign, so it

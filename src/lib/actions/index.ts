@@ -7,7 +7,7 @@ import { z } from "zod";
 import { sql } from "@/lib/db";
 import { requireAuth, checkPassword, createSessionToken, SESSION_COOKIE, sessionCookieOptions } from "@/lib/auth";
 import { logActivity } from "@/lib/activity";
-import { updateSettings } from "@/lib/settings";
+import { setCallRecordingEnabled, updateSettings } from "@/lib/settings";
 import { parseContactsCsv } from "@/lib/csv";
 import { hhmmToMinutes, assertValidTimezone } from "@/lib/schedule";
 import { findUnknownVariables } from "@/lib/template";
@@ -616,10 +616,15 @@ export async function logCallAction(_prev: ActionState, formData: FormData): Pro
   // actually at this workstation, and a stale tab cannot credit someone else.
   const callerId = await getSelectedCallerId();
 
+  // Telefonát, ze kterého výsledek vzešel. Nepovinné: zápis z mobilu
+  // žádný nemá a musí jít uložit stejně.
+  const rawCallId = String(formData.get("call_id") ?? "").trim();
+
   const result = await logCall({
     campaignContactId,
     outcome,
     callerId,
+    callId: rawCallId || null,
     note: String(formData.get("note") ?? "") || null,
     callbackAt,
     meetingAt,
@@ -898,6 +903,17 @@ export async function scheduleNextStepAction(
   revalidatePath("/");
   revalidatePath("/osloveni", "layout");
   return { success: "Další krok naplánován." };
+}
+
+/** Nahrávání hovorů je samostatný přepínač, ne součást testovacího režimu. */
+export async function setCallRecordingAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  await requireAuth();
+  await setCallRecordingEnabled(formData.get("call_recording_enabled") !== null);
+  revalidatePath("/settings");
+  return { success: "Uloženo." };
 }
 
 // ----------------------------------------------------------- týdenní plán

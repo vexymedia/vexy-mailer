@@ -29,6 +29,11 @@ export interface AppSettings {
   test_mode: boolean;
   test_email: string | null;
   test_behavior: TestBehavior;
+  /**
+   * Nahrávat hovory? Když je vypnuté, hovor funguje dál - jen z něj
+   * nevznikne nahrávka, a tím ani přepis a AI analýza.
+   */
+  call_recording_enabled: boolean;
   updated_at: Date;
 }
 

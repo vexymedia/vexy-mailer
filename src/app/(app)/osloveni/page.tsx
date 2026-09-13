@@ -9,6 +9,7 @@ import { CallerPicker } from "@/components/caller-picker";
 import { OsloveniTabs } from "@/components/osloveni-tabs";
 import { WorkProgress } from "@/components/work-progress";
 import { buildCallBriefing } from "@/lib/briefing";
+import { isTwilioConfigured } from "@/lib/telephony/twilio";
 import { plural } from "@/lib/plan";
 
 export const dynamic = "force-dynamic";
@@ -65,6 +66,8 @@ export default async function OsloveniPage({
     getCallerDayProgress(caller.id, null, mode),
   ]);
   const briefing = held ? await buildCallBriefing(held.prospect, held.campaign.name) : null;
+  // Jestli jde volat z prohlížeče, ví server.
+  const browserCalling = isTwilioConfigured();
 
   return (
     <>
@@ -114,6 +117,7 @@ export default async function OsloveniPage({
               callerName={caller.name}
               campaignScope=""
               mode={mode}
+              browserCalling={browserCalling}
               briefing={briefing ?? undefined}
             />
             <p className="mt-3 text-xs text-zinc-500">

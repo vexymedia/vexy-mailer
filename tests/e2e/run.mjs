@@ -496,6 +496,31 @@ try {
   await expectVisible(page, "h1:has-text('První oslovení')", "režim prvního oslovení se vykreslí");
   await shot(page, "plan");
 
+  // ---- volání bez Twilia --------------------------------------------------
+  // Server běží bez TWILIO_* proměnných, takže se tu ověřuje ten stav, ve
+  // kterém aplikace je hned po nasazení: volání z prohlížeče vypnuté,
+  // a tlačítko Zavolat pořád k něčemu je.
+  await page.goto(`${BASE}/settings`);
+  await expectVisible(page, 'h2:has-text("Volání")', "nastavení má sekci Volání");
+  await expectVisible(page, "text=není nastaveno", "chybějící telefonie se hlásí, ne skrývá");
+  await expectVisible(page, "text=TWILIO_ACCOUNT_SID", "nastavení vypíše, které proměnné chybí");
+  await expectVisible(page, 'text=Nahrávat hovory', "nahrávání jde vypnout");
+  await shot(page, "nastaveni-volani");
+
+  await page.goto(`${BASE}/firmy`);
+  await page.click("table a[href^='/firmy/']");
+  await page.waitForURL(/\/firmy\/[0-9a-f-]+/);
+  const dialLink = page.locator('a[href^="tel:"]').first();
+  if ((await dialLink.count()) > 0) {
+    ok("bez Twilia zůstane Zavolat odkazem tel:");
+  } else {
+    fail("bez Twilia zůstane Zavolat odkazem tel:", "žádný tel: odkaz na detailu firmy");
+  }
+  // A hlavně: nesmí vzniknout hovor, který nikdo nezaložil.
+  const callRows = await checkDb`select count(*)::int as count from calls`;
+  if (callRows[0].count === 0) ok("samotné otevření stránky nezaloží hovor");
+  else fail("samotné otevření stránky nezaloží hovor", `${callRows[0].count} řádků v calls`);
+
   // ---- responsive ---------------------------------------------------------
   // Desktop je hlavní pracovní prostředí, ale hlavní obrazovky musí zůstat
   // použitelné na telefonu. Kontroluje se to, co se skutečně rozbíjí:

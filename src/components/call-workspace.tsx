@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useFormStatus } from "react-dom";
 import { logCallAction } from "@/lib/actions";
 import { ActionForm } from "./action-form";
+import { CallButton } from "./call/call-button";
 import {
   PRIMARY_CALL_OUTCOMES,
   SECONDARY_CALL_OUTCOMES,
@@ -22,6 +23,7 @@ import {
 
 export interface CallProspect {
   id: string;
+  contact_id: string;
   email: string;
   phone: string | null;
   first_name: string | null;
@@ -160,6 +162,7 @@ export function CallWorkspace({
   callerName,
   campaignScope = "",
   mode = null,
+  browserCalling = false,
   briefing,
 }: {
   prospect: CallProspect;
@@ -171,6 +174,8 @@ export function CallWorkspace({
   campaignScope?: string;
   /** Pracovní režim z plánu: první oslovení, nebo follow-up. */
   mode?: "first" | "followup" | null;
+  /** Je nastavené volání z prohlížeče? Zjišťuje server. */
+  browserCalling?: boolean;
   briefing?: CallBriefing;
 }) {
   // Outcomes that need one more piece of information before they can be saved.
@@ -290,9 +295,13 @@ export function CallWorkspace({
 
         <div className="mt-6 flex flex-wrap items-center gap-2">
           {tel ? (
-            <a href={`tel:${tel}`} className="btn-go text-lg">
-              Zavolat {prospect.phone}
-            </a>
+            <CallButton
+              phone={prospect.phone}
+              contactId={prospect.contact_id}
+              campaignContactId={prospect.id}
+              browserCalling={browserCalling}
+              className="btn-go text-lg"
+            />
           ) : (
             <span className="badge bg-amber-50 text-amber-700 ring-amber-200">
               Bez telefonu — zavolat nelze
