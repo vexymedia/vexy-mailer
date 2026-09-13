@@ -106,7 +106,7 @@ redeploy** — proměnné se do funkcí zapékají při buildu.
 ## 4. Lokální vývoj
 
 ```bash
-npm run db:migrate     # potřebuje migraci 0007_calls.sql
+npm run db:migrate     # potřebuje migrace 0005, 0006 a 0007
 npm run dev
 ```
 
@@ -114,17 +114,51 @@ Bez Twilio proměnných uvidíte v *Nastavení → Volání* stav „není
 nastaveno“ a seznam chybějících proměnných. Tlačítko Zavolat zůstane
 funkční jako `tel:` odkaz.
 
-Webhooky potřebují veřejnou URL. Twilio se na `localhost` nedostane,
-takže při lokálním testování skutečných hovorů potřebujete tunel —
-například `cloudflared tunnel --url http://localhost:3000` nebo
-`ngrok http 3000`. Žádnou závislost kvůli tomu do projektu nepřidávejte;
-je to nástroj, ne součást aplikace. Výslednou adresu dejte do
-`TWILIO_WEBHOOK_BASE_URL` **a** do Voice Request URL v TwiML App.
+### Bez veřejné URL se odchozí hovor neuskuteční
 
-Bez tunelu hovor proběhne, ale nedorazí stavové události ani nahrávka —
-hovor zůstane ve stavu „Vytáčím“ a nezpracuje se.
+Tohle je důležité a snadno se to plete. Když kliknete na Zavolat,
+prohlížeč jen *požádá* Twilio o spojení; **vytáčí Twilio, a to podle
+TwiML, které si samo stáhne z Voice Request URL vaší TwiML App.** Na
+`http://localhost:3000` se Twilio nedostane.
 
----
+Bez tunelu proto funguje:
+
+* vydání přístupového tokenu (`/api/calling/token`),
+* načtení Voice SDK a registrace zařízení u Twilia,
+* kontrola a povolení mikrofonu v *Nastavení → Volání*,
+* založení záznamu hovoru (řádek v `calls` vznikne, číslo se dohledá).
+
+Bez tunelu naopak **nefunguje vůbec nic z vlastního hovoru**:
+
+* Twilio nedokáže stáhnout TwiML, takže **telefon prospektovi nikdy
+  nezazvoní** — PSTN větev se ani nezaloží,
+* hovor v prohlížeči skončí chybou (Twilio hlásí problém se stažením
+  TwiML, typicky `11200`), cockpit ukáže „Nepodařilo se“,
+* nedorazí žádné stavové události ani nahrávka, protože není co hlásit.
+
+Založený řádek v `calls` zůstane ve stavu „vytáčím“ a po patnácti
+minutách ho úklid v ticku uzavře jako neúspěšný — v historii firmy tedy
+nezůstane viset jako věčně zpracovávaný.
+
+Jinými slovy: **bez tunelu se nedá otestovat ani jeden skutečný hovor.**
+Dá se otestovat všechno okolo.
+
+### Tunel
+
+```bash
+cloudflared tunnel --url http://localhost:3000     # nebo: ngrok http 3000
+```
+
+Výslednou `https://…` adresu dejte **na obě místa**:
+
+1. do `TWILIO_WEBHOOK_BASE_URL` v `.env.local` (podpis webhooků se počítá
+   proti URL, na kterou Twilio skutečně volá — když nesedí, všechny tři
+   webhooky vrátí 403),
+2. do **Voice Request URL** v TwiML App: `https://…/api/calling/voice`.
+
+Tunel je nástroj, ne součást aplikace — do `package.json` nepatří.
+Adresa se u obou nástrojů při restartu mění, takže ji po každém spuštění
+aktualizujte na obou místech.
 
 ## 5. Webhooky
 
@@ -134,23 +168,52 @@ hovor zůstane ve stavu „Vytáčím“ a nezpracuje se.
 | `POST /api/calling/status` | Twilio v průběhu hovoru | posouvá stav (`ringing` → `in_progress` → `completed`) |
 | `POST /api/calling/recording` | Twilio po zpracování nahrávky | uloží odkaz a délku nahrávky |
 
-Všechny tři ověřují hlavičku `X-Twilio-Signature` proti `TWILIO_AUTH_TOKEN`.
-Bez platného podpisu vrátí `403` a nic nezmění. Jsou proto v middlewaru
-mezi veřejnými cestami — Twilio se přihlásit neumí.
+Podpis ověřuje oficiální `twilio.validateRequest`. Ručně to Twilio dělat
+nedoporučuje — co přesně do podpisu vstupuje se časem mění a vlastní
+implementace by o tom nevěděla. Bez platného podpisu vrátí endpoint `403`
+a nic nezmění. Proto jsou tyhle tři cesty v middlewaru mezi veřejnými:
+Twilio se přihlásit neumí, chrání je podpis.
 
-Události chodí opakovaně a mimo pořadí. Zápis je idempotentní a stav
-hovoru se nikdy nevrací zpátky: jednou ukončený hovor zůstane ukončený.
+### Dvě větve, jedno SID
+
+Hovor má u Twilia dvě větve a webhooky chodí z každé jinak:
+
+* **rodič** je hovor z prohlížeče. Jeho `CallSid` dorazí do
+  `/api/calling/voice` a ukládá se do `calls.provider_call_sid`.
+* **potomek** je odchozí PSTN větev, kterou vytvoří `<Dial><Number>`.
+
+Z toho plyne párování, na kterém všechno stojí:
+
+* `statusCallback` je na `<Number>`, takže události nesou `CallSid`
+  potomka a `ParentCallSid` rodiče → párujeme na `ParentCallSid`.
+* `recordingStatusCallback` je na `<Dial>`, takže události nesou
+  `CallSid` **rodiče** → párujeme na `CallSid`.
+
+Kdyby se to zaměnilo, události by se navázaly na hovor, který v databázi
+neexistuje, a stav by se nikdy nepohnul. Obojí hlídá test s reálnými
+payloady od Twilia.
+
+### Doručení vícekrát a mimo pořadí
+
+Twilio garantuje doručení „alespoň jednou“, ne „právě jednou“, a ne
+v pořadí. Zápis je proto idempotentní a stav se nikdy nevrací zpátky:
+
+* ukončený hovor zůstane ukončený, i když po něm dorazí opožděné
+  „vyzvání“,
+* stejná událost doručená třikrát nechá stejný jeden řádek se stejnými
+  hodnotami,
+* když se ztratí událost o zvednutí, ale dorazí „completed“ s nenulovou
+  délkou, hovor se přesto označí za spojený.
 
 **Časté chyby**
 
-* `403` na všech webhoodech → `TWILIO_WEBHOOK_BASE_URL` neodpovídá URL, na
-  kterou Twilio skutečně volá (typicky http/https nebo chybějící doména).
+* `403` na všech webhoocích → `TWILIO_WEBHOOK_BASE_URL` neodpovídá URL, na
+  kterou Twilio skutečně volá (typicky http/https nebo jiná doména).
 * Hovor zůstane „Vytáčím“ → webhooky nedorazily; zkontrolujte tunel nebo
-  Voice Request URL v TwiML App.
+  Voice Request URL v TwiML App. Po patnácti minutách takový hovor úklid
+  v ticku uzavře jako neúspěšný.
 * Nahrávka se nikdy nezpracuje → chybí `OPENAI_API_KEY`, nebo neběží
   `/api/cron/tick`.
-
----
 
 ## 6. Testování
 
@@ -171,25 +234,83 @@ metadata a po konečném výsledku už kontakt nejde vytočit.
 
 ## 7. První skutečný hovor
 
-1. Doplňte všech šest `TWILIO_*` proměnných a nasaďte (na Vercelu
-   redeploy, aby se zapekly).
-2. Aplikujte migraci: `npm run db:migrate`.
-3. Otevřete **Nastavení → Volání**. Musí svítit „nastaveno“.
-4. Klikněte na **Otestovat** u mikrofonu a povolte ho. (Prohlížeč pustí
+### Nejdřív schéma, potom kód
+
+Volání přidává tabulku `calls` a sloupce, bez kterých se nové obrazovky
+nevykreslí. Deploy migrace **nespouští**, takže kdyby kód šel první,
+vzniklo by okno, ve kterém aplikace očekává schéma, co neexistuje.
+
+Ověřeno v obou směrech:
+
+* nový kód na starém schématu **spadne** — chybí tabulka `calls`,
+  sloupec `contacts.position` i `app_settings.call_recording_enabled`,
+* starý kód na novém schématu **běží** — kompletní testovací sada
+  předchozí verze prochází proti schématu s migrací 0007.
+
+Pořadí je tedy jednoznačné: **migrovat, pak nasadit.**
+
+```bash
+# 1. co produkce opravdu má
+psql "$PRODUCTION_DATABASE_URL" -c "select name from schema_migrations order by name;"
+
+# 2. migrace, přes PŘÍMÉ spojení (port 5432, ne pooler 6543)
+DATABASE_URL="postgresql://…:5432/postgres" npm run db:migrate
+#    čekaný výstup: skip 0001–0004, apply 0005, 0006, 0007
+#    když se objeví "apply" u 0001–0004, zastavte se a zjistěte proč
+
+# 3. teprve teď kód
+git push origin main     # nebo merge PR
+```
+
+Po migraci se hodí ověřit, že data zůstala na místě:
+
+```sql
+select
+  (select count(*) from email_sends) as odeslane_emaily,
+  (select count(*) from contacts)    as kontakty,
+  (select count(*) from calls)       as hovory;   -- 0, tabulka je nová
+```
+
+### Pak samotný hovor
+
+1. Doplňte všech šest `TWILIO_*` proměnných a **udělejte redeploy** —
+   na Vercelu se proměnné zapékají do funkcí při buildu.
+2. Otevřete **Nastavení → Volání**. Musí svítit „nastaveno“.
+3. Klikněte na **Otestovat** u mikrofonu a povolte ho. (Prohlížeč pustí
    mikrofon jen na HTTPS nebo na `localhost`.)
-5. Připojte headset.
-6. Otevřete **Oslovení → Dnes** nebo detail firmy s telefonním číslem.
-7. Klikněte **Zavolat**. Otevře se cockpit: uvidíte „Vytáčím“, pak
+4. Připojte headset.
+5. Otevřete **Oslovení → Dnes** nebo detail firmy s telefonním číslem.
+6. Klikněte **Zavolat**. Otevře se cockpit: uvidíte „Vytáčím“, pak
    „Vyzvání“ a po zvednutí běžící čas.
-8. Zavěste. Objeví se panel „Jak hovor dopadl?“ — výsledek jde zapsat
+7. Zavěste. Objeví se panel „Jak hovor dopadl?“ — výsledek jde zapsat
    hned, i když se nahrávka ještě zpracovává.
-9. Do minuty (jeden tick) se doplní přepis, do druhé shrnutí a návrh
-   výsledku. Najdete je na detailu firmy v sekci **Telefonáty**.
+8. Přepis a shrnutí se doplní samy, typicky do dvou minut (viz níže).
+   Najdete je na detailu firmy v sekci **Telefonáty**.
 
 Hovor přežije přechod na jinou stránku: dole zůstane lišta se jménem,
 firmou, časem a tlačítky Ztlumit / Zavěsit.
 
----
+### Jak dlouho trvá, než je přepis vidět
+
+Zpracování jede na stejném ticku jako odesílání e-mailů, tedy jednou za
+minutu (`vercel.json`, `* * * * *`). Od zavěšení k hotovému shrnutí:
+
+| krok | typicky | nejhůř |
+| --- | --- | --- |
+| Twilio zpracuje nahrávku a zavolá webhook | 5–20 s | ~60 s |
+| čekání na nejbližší tick | ~30 s | 60 s |
+| přepis + analýza (v jednom ticku) | 10–25 s | ~40 s |
+| **celkem** | **~1 minuta** | **~2,5 minuty** |
+
+Přepis a analýza se dělají v jednom průběhu, pokud na to ve funkci zbývá
+čas; když ne, analýza se odloží o tick (v odpovědi ticku se to hlásí jako
+`deferred`). Na výsledek se nikde nečeká — zapsat ho jde hned po zavěšení.
+
+Zkracovat to dál by znamenalo buď častější cron (Vercel kratší než minutu
+neumí), nebo spouštět zpracování přímo z webhooku. To druhé by znamenalo
+dlouhou práci ve funkci, kterou platí Twilio svým timeoutem — a hlavně by
+pak neexistovalo místo, kde se znovu zkusí, co selhalo. Minuta čekání za
+spolehlivost stojí.
 
 ## 8. Nahrávání
 

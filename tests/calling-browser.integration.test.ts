@@ -288,7 +288,7 @@ function fakeProviders(overrides: {
 }
 
 describe("přepis a analýza", () => {
-  it("přepíše nahrávku a v dalším průchodu ji zanalyzuje", async () => {
+  it("přepíše nahrávku a rovnou ji zanalyzuje", async () => {
     const seeded = await seed();
     const call = await completedCall(seeded);
     const providers = fakeProviders();
@@ -308,25 +308,48 @@ describe("přepis a analýza", () => {
     process.env.TWILIO_CALLER_ID = "+420222222222";
 
     try {
-      const first = await pipeline.processCallPipeline(providers);
+      // Jeden tick: přepis i analýza. Čekat na další by callerovi přidalo
+      // minutu, ve které nemá co číst.
+      const pass = await pipeline.processCallPipeline(providers);
+      expect(pass.transcribed).toBe(1);
+      expect(pass.analysed).toBe(1);
+
+      const row = await calls.getCall(call.callId);
+      expect(row?.transcript_status).toBe("done");
+      expect(row?.transcript).toBe("Dobrý den, tady Jan.");
+      expect(row?.transcript_language).toBe("cs");
+      expect(row?.analysis_status).toBe("done");
+      expect(row?.analysis?.summary).toBe("Firma expanduje, zajímá je nábor.");
+      expect(row?.analysis?.objections).toEqual(["teď nemají čas"]);
+      // Návrh výsledku je jen návrh - zapsat ho musí člověk.
+      expect(row?.suggested_outcome).toBe("callback");
+      expect(row?.call_activity_id).toBeNull();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("když dochází čas funkce, odloží analýzu na další tick", async () => {
+    const seeded = await seed();
+    const call = await completedCall(seeded);
+    const providers = fakeProviders();
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(new Uint8Array([1]), { status: 200, headers: { "content-type": "audio/mpeg" } })) as typeof fetch;
+    try {
+      // Rozpočet stačí na přepis, ne na analýzu.
+      const first = await pipeline.processCallPipeline({ ...providers, deadline: Date.now() + 5_000 });
       expect(first.transcribed).toBe(1);
-      const afterTranscript = await calls.getCall(call.callId);
-      expect(afterTranscript?.transcript_status).toBe("done");
-      expect(afterTranscript?.transcript).toBe("Dobrý den, tady Jan.");
-      expect(afterTranscript?.transcript_language).toBe("cs");
-      // Analýza je schválně až v dalším průchodu, aby se obojí vešlo do
-      // limitu serverless funkce.
-      expect(afterTranscript?.analysis_status).toBe("pending");
+      expect(first.analysed).toBe(0);
+      expect(first.deferred).toBe(1);
+      // Přepis je uložený, nic se neztratilo.
+      expect((await calls.getCall(call.callId))?.transcript_status).toBe("done");
+      expect((await calls.getCall(call.callId))?.analysis_status).toBe("pending");
 
       const second = await pipeline.processCallPipeline(providers);
       expect(second.analysed).toBe(1);
-      const analysed = await calls.getCall(call.callId);
-      expect(analysed?.analysis_status).toBe("done");
-      expect(analysed?.analysis?.summary).toBe("Firma expanduje, zajímá je nábor.");
-      expect(analysed?.analysis?.objections).toEqual(["teď nemají čas"]);
-      // Návrh výsledku je jen návrh - zapsat ho musí člověk.
-      expect(analysed?.suggested_outcome).toBe("callback");
-      expect(analysed?.call_activity_id).toBeNull();
+      expect((await calls.getCall(call.callId))?.analysis_status).toBe("done");
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -364,7 +387,6 @@ describe("přepis a analýza", () => {
     globalThis.fetch = (async () =>
       new Response(new Uint8Array([1]), { status: 200, headers: { "content-type": "audio/mpeg" } })) as typeof fetch;
     try {
-      await pipeline.processCallPipeline(fakeProviders());
       await pipeline.processCallPipeline(
         fakeProviders({ analyse: async () => ({ ok: false as const, error: "model selhal" }) }),
       );

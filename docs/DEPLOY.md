@@ -162,5 +162,37 @@ mailbox whose last inbox check is hours old.
 `SESSION_SECRET`. Rotate that instead to sign everyone out, but note that it
 also invalidates every unsubscribe link already sitting in someone's inbox.
 
-**Upgrading.** Pull, `npm ci`, `npm run db:migrate`, redeploy. Migrations are
-additive and idempotent.
+**Upgrading: migrate first, deploy second.** In that order, always.
+
+```bash
+git pull
+npm ci
+DATABASE_URL="postgresql://…:5432/postgres" npm run db:migrate   # 1. schema
+# only once that prints "Applied N migration(s)":
+git push origin main                                             # 2. code
+```
+
+The deploy does **not** run migrations — nothing in the build or the runtime
+touches the schema. If the code ships first, every request that needs the new
+schema fails until you catch up, and that window is entirely avoidable.
+
+The reverse order is safe because migrations are additive: they add tables and
+columns, and never change the meaning of an existing one. This is verified,
+not assumed — the previous release's full test suite is run against the newest
+schema before each schema change ships. Old code simply does not see the new
+columns.
+
+A migration applied twice is a no-op: `scripts/migrate.mjs` keeps a
+`schema_migrations` table and skips what is already in it. It prints `skip` for
+those and `apply` only for what it actually runs, so read the output — an
+unexpected `apply` on an old migration means the tracker does not match reality
+and you should stop.
+
+Check what production actually has before migrating:
+
+```sql
+select name, applied_at from schema_migrations order by name;
+```
+
+**Use the direct connection (port 5432), not the transaction pooler (6543),
+for migrations.** DDL in PgBouncer's transaction mode is asking for trouble.

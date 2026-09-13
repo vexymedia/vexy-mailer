@@ -1,15 +1,17 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import twilio from "twilio";
 
 /**
- * Twilio bez SDK.
+ * Serverová část Twilia.
  *
- * Serverová část Voice je tři věci: podepsaný JWT pro prohlížeč, ověření
- * podpisu webhooku a kus XML. Dohromady to je zhruba tolik kódu, kolik má
- * náš CSV parser - a oproti balíčku `twilio` (desítky závislostí kvůli
- * celému REST API, které nepoužíváme) je to menší plocha, ne větší.
+ * Všechno, co má definovaný drát - podpis webhooku, přístupový token
+ * a TwiML - dělá oficiální balíček `twilio`. Ručně psané ekvivalenty tu
+ * kdysi byly a fungovaly, ale u podpisu to Twilio výslovně nedoporučuje:
+ * sada parametrů, které do podpisu vstupují, se časem mění a vlastní
+ * implementace tiše zastará. Tady je cena chyby tichý průnik, ne
+ * spadlý build, takže rozhoduje správnost, ne velikost závislosti.
  *
- * Prohlížeč SDK samozřejmě potřebuje - WebRTC se ručně psát nedá.
- * To je @twilio/voice-sdk a běží jen na klientovi.
+ * Tenhle modul je SERVER-ONLY. Prohlížeč používá @twilio/voice-sdk,
+ * který je něco jiného a je v komponentách volání.
  */
 
 // ------------------------------------------------------------ konfigurace
@@ -62,80 +64,58 @@ export function twilioConfig(): TwilioConfig {
 
 // ------------------------------------------------------------ access token
 
-function base64url(input: Buffer | string): string {
-  return Buffer.from(input)
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
-}
-
 export interface AccessTokenOptions {
   identity: string;
   /** Platnost v sekundách. Twilio povoluje maximálně 24 hodin. */
   ttlSeconds?: number;
-  now?: number;
 }
 
 /**
  * Access Token pro Voice SDK.
  *
- * Je to obyčejný HS256 JWT podepsaný TAJEMSTVÍM API KLÍČE - ne Auth
- * Tokenem. To je důležité: Auth Token je heslo k celému účtu a nikdy
- * nesmí opustit server ani v odvozené podobě, kdežto API klíč jde
- * kdykoli zneplatnit.
+ * Podepisuje se TAJEMSTVÍM API KLÍČE, ne Auth Tokenem. To je důležité:
+ * Auth Token je heslo k celému účtu a nikdy nesmí opustit server ani
+ * v odvozené podobě, kdežto API klíč jde kdykoli zneplatnit.
+ *
+ * Příchozí hovory produkt neřeší, takže se grant pro ně vůbec nepřidává -
+ * token pak na příchozí hovor nikoho neopravňuje.
  */
 export function createVoiceAccessToken(
   config: TwilioConfig,
   options: AccessTokenOptions,
 ): { token: string; identity: string; expiresAt: number } {
   const ttl = Math.min(Math.max(options.ttlSeconds ?? 3600, 60), 24 * 3600);
-  const now = Math.floor((options.now ?? Date.now()) / 1000);
-  const exp = now + ttl;
+  const { AccessToken } = twilio.jwt;
 
-  const header = { alg: "HS256", typ: "JWT", cty: "twilio-fpa;v=1" };
-  const payload = {
-    jti: `${config.apiKeySid}-${now}`,
-    iss: config.apiKeySid,
-    sub: config.accountSid,
-    // Malý posun zpět: hodiny serveru a Twilia se o pár sekund liší a
-    // token "z budoucnosti" je odmítnutý.
-    nbf: now - 30,
-    exp,
-    grants: {
-      identity: options.identity,
-      voice: {
-        outgoing: { application_sid: config.twimlAppSid },
-        // Příchozí hovory tenhle produkt neřeší; povolit je by znamenalo
-        // pustit na prohlížeč hovory, které nikdo nečeká.
-        incoming: { allow: false },
-      },
-    },
-  };
-
-  const signingInput = `${base64url(JSON.stringify(header))}.${base64url(JSON.stringify(payload))}`;
-  const signature = base64url(
-    createHmac("sha256", config.apiKeySecret).update(signingInput).digest(),
+  const token = new AccessToken(config.accountSid, config.apiKeySid, config.apiKeySecret, {
+    identity: options.identity,
+    ttl,
+  });
+  token.addGrant(
+    new AccessToken.VoiceGrant({
+      outgoingApplicationSid: config.twimlAppSid,
+      incomingAllow: false,
+    }),
   );
-  return { token: `${signingInput}.${signature}`, identity: options.identity, expiresAt: exp * 1000 };
+
+  const jwt = token.toJwt();
+  // Expiraci si čteme z tokenu, ne z vlastního výpočtu: platí to, co je
+  // opravdu podepsané.
+  const payload = JSON.parse(
+    Buffer.from(jwt.split(".")[1], "base64url").toString("utf8"),
+  ) as { exp: number };
+
+  return { token: jwt, identity: options.identity, expiresAt: payload.exp * 1000 };
 }
 
 // --------------------------------------------------------- podpis webhooku
 
 /**
- * Podpis, který Twilio posílá v X-Twilio-Signature.
+ * Ověření hlavičky X-Twilio-Signature oficiálním helperem.
  *
- * Algoritmus: HMAC-SHA1 Auth Tokenem nad URL, na kterou se volalo, za
- * kterou se připojí všechny POST parametry seřazené podle jména jako
- * `klíčhodnota` bez oddělovačů.
+ * Ručně to Twilio dělat nedoporučuje - co přesně do podpisu vstupuje se
+ * mění a vlastní implementace by o tom nevěděla.
  */
-export function twilioSignature(authToken: string, url: string, params: Record<string, string>): string {
-  const data = Object.keys(params)
-    .sort()
-    .reduce((acc, key) => acc + key + params[key], url);
-  return createHmac("sha1", authToken).update(Buffer.from(data, "utf8")).digest("base64");
-}
-
 export function verifyTwilioSignature(
   authToken: string,
   url: string,
@@ -143,27 +123,10 @@ export function verifyTwilioSignature(
   signature: string | null,
 ): boolean {
   if (!signature) return false;
-  const expected = twilioSignature(authToken, url, params);
-  const a = Buffer.from(expected, "utf8");
-  const b = Buffer.from(signature, "utf8");
-  if (a.length !== b.length) {
-    // Stejná práce jako při shodě, aby délka neprosákla v čase odpovědi.
-    timingSafeEqual(a, a);
-    return false;
-  }
-  return timingSafeEqual(a, b);
+  return twilio.validateRequest(authToken, signature, url, params);
 }
 
 // ---------------------------------------------------------------- TwiML
-
-function escapeXml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
-}
 
 export interface DialTwimlOptions {
   to: string;
@@ -181,51 +144,68 @@ export interface DialTwimlOptions {
  *
  * `record-from-answer-dual` nahrává až od okamžiku spojení a každou stranu
  * do vlastní stopy - to je potřeba, aby šlo později rozlišit mluvčí.
+ *
+ * Pozor na rozdíl, na kterém stojí párování webhooků:
+ *   * statusCallback je na <Number>, tedy na PSTN větvi. Její události
+ *     nesou CallSid té větve a ParentCallSid hovoru z prohlížeče.
+ *   * recordingStatusCallback je na <Dial>, tedy na hovoru z prohlížeče.
+ *     Jeho události nesou CallSid rodiče.
+ * V databázi držíme SID rodiče, takže se obojí musí párovat na něj.
  */
 export function dialTwiml(options: DialTwimlOptions): string {
-  const attrs = [
-    `callerId="${escapeXml(options.callerId)}"`,
-    `timeout="${Math.max(5, Math.min(options.timeoutSeconds ?? 30, 120))}"`,
-    `answerOnBridge="true"`,
-  ];
-  if (options.record) {
-    attrs.push(`record="record-from-answer-dual"`);
-    if (options.recordingCallbackUrl) {
-      attrs.push(`recordingStatusCallback="${escapeXml(options.recordingCallbackUrl)}"`);
-      attrs.push(`recordingStatusCallbackEvent="completed absent"`);
-    }
-  }
+  const response = new twilio.twiml.VoiceResponse();
 
-  const numberAttrs = options.statusCallbackUrl
-    ? ` statusCallback="${escapeXml(options.statusCallbackUrl)}"` +
-      ` statusCallbackEvent="initiated ringing answered completed"` +
-      ` statusCallbackMethod="POST"`
-    : "";
+  const dial = response.dial({
+    callerId: options.callerId,
+    timeout: Math.max(5, Math.min(options.timeoutSeconds ?? 30, 120)),
+    answerOnBridge: true,
+    ...(options.record
+      ? {
+          record: "record-from-answer-dual" as const,
+          ...(options.recordingCallbackUrl
+            ? {
+                recordingStatusCallback: options.recordingCallbackUrl,
+                recordingStatusCallbackEvent: ["completed", "absent"],
+                recordingStatusCallbackMethod: "POST" as const,
+              }
+            : {}),
+        }
+      : {}),
+  });
 
-  return (
-    `<?xml version="1.0" encoding="UTF-8"?>` +
-    `<Response>` +
-    `<Dial ${attrs.join(" ")}>` +
-    `<Number${numberAttrs}>${escapeXml(options.to)}</Number>` +
-    `</Dial>` +
-    `</Response>`
+  dial.number(
+    options.statusCallbackUrl
+      ? {
+          statusCallback: options.statusCallbackUrl,
+          statusCallbackEvent: ["initiated", "ringing", "answered", "completed"],
+          statusCallbackMethod: "POST" as const,
+        }
+      : {},
+    options.to,
   );
+
+  return response.toString();
 }
 
 /** TwiML, které hovor slušně ukončí. Používá se, když něco nesedí. */
 export function rejectTwiml(reason: string): string {
-  return (
-    `<?xml version="1.0" encoding="UTF-8"?>` +
-    `<Response><Say language="cs-CZ">${escapeXml(reason)}</Say><Hangup/></Response>`
-  );
+  const response = new twilio.twiml.VoiceResponse();
+  response.say({ language: "cs-CZ" }, reason);
+  response.hangup();
+  return response.toString();
 }
 
 // ------------------------------------------------------------------- REST
 
+function restClient(config: TwilioConfig) {
+  return twilio(config.accountSid, config.authToken);
+}
+
 /**
- * Stažení nahrávky. Jde o jediné místo, kde se sahá na Twilio REST API -
- * a je to prosté GET s basic auth, takže se kvůli němu nevyplatí tahat
- * celé SDK.
+ * Stažení nahrávky kvůli přepisu.
+ *
+ * REST klient umí metadata, ale samotné audio se stahuje z media URL, na
+ * kterou stačí basic auth. Odkaz se nikdy neposílá do prohlížeče.
  */
 export async function fetchRecording(
   config: TwilioConfig,
@@ -259,16 +239,12 @@ export async function fetchCallStatus(
   config: TwilioConfig,
   callSid: string,
 ): Promise<{ ok: true; status: string; duration: number | null } | { ok: false; error: string }> {
-  const auth = Buffer.from(`${config.accountSid}:${config.authToken}`).toString("base64");
-  const url = `https://api.twilio.com/2010-04-01/Accounts/${config.accountSid}/Calls/${callSid}.json`;
   try {
-    const response = await fetch(url, { headers: { authorization: `Basic ${auth}` } });
-    if (!response.ok) return { ok: false, error: `Twilio vrátilo ${response.status}.` };
-    const body = (await response.json()) as { status?: string; duration?: string };
+    const call = await restClient(config).calls(callSid).fetch();
     return {
       ok: true,
-      status: body.status ?? "unknown",
-      duration: body.duration ? Number(body.duration) : null,
+      status: call.status ?? "unknown",
+      duration: call.duration ? Number(call.duration) : null,
     };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };

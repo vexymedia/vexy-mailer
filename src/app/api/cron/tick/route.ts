@@ -42,8 +42,9 @@ async function handle(request: NextRequest) {
     const dispatch = await dispatchTick();
     const replies = await pollReplies();
     // Nahrávky a přepisy jsou na řadě poslední: e-mail i odpovědi jsou
-    // časově citlivé, zpracování hovoru počká o minutu déle bez následku.
-    const calls = await processCallPipeline();
+    // časově citlivé. Dostanou, co ze šedesátivteřinového limitu funkce
+    // zbylo, s rezervou na dokončení odpovědi.
+    const calls = await processCallPipeline({ deadline: started + 50_000 });
     return NextResponse.json({
       ok: true,
       durationMs: Date.now() - started,

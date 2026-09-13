@@ -228,7 +228,14 @@ export async function recordCallStatus(input: {
   if (!existing) return null;
   if (!shouldAdvanceLifecycle(existing.status, input.status)) return existing;
 
-  const answeredAt = input.status === "in_progress" && !existing.answered_at ? new Date() : null;
+  // Spojeno = buď to dorazilo jako "answered", nebo přišlo rovnou
+  // "completed" s nenulovou délkou. Druhý případ nastane, když se událost
+  // o zvednutí ztratí - a bez tohohle by se dovolaný hovor tvářil jako
+  // nedovolaný.
+  const connected =
+    input.status === "in_progress" ||
+    (input.status === "completed" && (input.durationSeconds ?? 0) > 0);
+  const answeredAt = connected && !existing.answered_at ? new Date() : null;
   const endedAt = isFinalLifecycle(input.status) ? new Date() : null;
 
   // Nahrávka vznikne jen u hovoru, který se spojil. U nedovolaného nemá

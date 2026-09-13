@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { createHmac } from "node:crypto";
+import { getExpectedTwilioSignature } from "twilio/lib/webhooks/webhooks";
 import {
   createVoiceAccessToken,
   dialTwiml,
-  twilioSignature,
   verifyTwilioSignature,
   type TwilioConfig,
 } from "@/lib/telephony/twilio";
@@ -17,8 +17,10 @@ import {
 } from "@/lib/telephony/call-state";
 
 /**
- * Serverová část Twilia je psaná ručně, takže musí být otestovaná proti
- * tomu, co Twilio skutečně očekává - ne proti tomu, co jsme si mysleli.
+ * Serverová část Twilia stojí na oficiálním balíčku. Netestuje se tu tedy
+ * jeho kryptografie, ale to, co jsme mu zadali: že se token podepisuje
+ * API klíčem a ne heslem k účtu, že nepovoluje příchozí hovory, že TwiML
+ * vytáčí to, co má, a že podpis skutečně něco odmítne.
  */
 
 const CONFIG: TwilioConfig = {
@@ -35,75 +37,73 @@ function decode(part: string): Record<string, unknown> {
 }
 
 describe("access token", () => {
-  const now = Date.UTC(2026, 8, 13, 10, 0, 0);
-  const { token, expiresAt } = createVoiceAccessToken(CONFIG, { identity: "caller_1", now });
+  const { token, expiresAt } = createVoiceAccessToken(CONFIG, { identity: "caller_1" });
+  const [header, payload, signature] = token.split(".");
 
-  it("is a JWT Twilio will accept", () => {
-    const [header, payload, signature] = token.split(".");
+  it("is a Voice JWT issued by the API key, for the account", () => {
     expect(decode(header)).toEqual({ alg: "HS256", typ: "JWT", cty: "twilio-fpa;v=1" });
-
-    const claims = decode(payload) as Record<string, unknown>;
+    const claims = decode(payload);
     // Vydavatelem je API klíč, subjektem účet - obráceně to Twilio odmítne.
     expect(claims.iss).toBe(CONFIG.apiKeySid);
     expect(claims.sub).toBe(CONFIG.accountSid);
-    expect(claims.exp).toBe(Math.floor(now / 1000) + 3600);
-    expect(expiresAt).toBe((Math.floor(now / 1000) + 3600) * 1000);
+    expect(expiresAt).toBe((claims.exp as number) * 1000);
+  });
 
-    const grants = claims.grants as { identity: string; voice: Record<string, unknown> };
+  it("grants outgoing calls through our TwiML app and no incoming ones", () => {
+    const grants = decode(payload).grants as {
+      identity: string;
+      voice: { outgoing?: unknown; incoming?: unknown };
+    };
     expect(grants.identity).toBe("caller_1");
     expect(grants.voice.outgoing).toEqual({ application_sid: CONFIG.twimlAppSid });
-    // Příchozí hovory produkt neřeší a token je nesmí povolit.
-    expect(grants.voice.incoming).toEqual({ allow: false });
-
-    const expected = createHmac("sha256", CONFIG.apiKeySecret)
-      .update(`${header}.${payload}`)
-      .digest("base64")
-      .replace(/\+/g, "-")
-      .replace(/\//g, "_")
-      .replace(/=+$/, "");
-    expect(signature).toBe(expected);
+    // Příchozí hovory produkt neřeší. Chybějící grant je způsob, jakým to
+    // Twilio zapisuje - prázdný objekt by byl něco jiného.
+    expect(grants.voice.incoming).toBeUndefined();
   });
 
   it("is signed with the API key secret, never the account auth token", () => {
     const withAuthToken = createHmac("sha256", CONFIG.authToken)
-      .update(token.split(".").slice(0, 2).join("."))
-      .digest("base64");
-    expect(token.split(".")[2]).not.toBe(withAuthToken);
+      .update(`${header}.${payload}`)
+      .digest("base64url");
+    expect(signature).not.toBe(withAuthToken);
+
+    const withApiSecret = createHmac("sha256", CONFIG.apiKeySecret)
+      .update(`${header}.${payload}`)
+      .digest("base64url");
+    expect(signature).toBe(withApiSecret);
   });
 
   it("keeps the lifetime inside Twilio's limits", () => {
-    expect(decode(createVoiceAccessToken(CONFIG, { identity: "x", ttlSeconds: 5, now }).token.split(".")[1]).exp)
-      .toBe(Math.floor(now / 1000) + 60);
-    expect(decode(createVoiceAccessToken(CONFIG, { identity: "x", ttlSeconds: 999_999, now }).token.split(".")[1]).exp)
-      .toBe(Math.floor(now / 1000) + 24 * 3600);
+    const short = decode(createVoiceAccessToken(CONFIG, { identity: "x", ttlSeconds: 5 }).token.split(".")[1]);
+    const long = decode(createVoiceAccessToken(CONFIG, { identity: "x", ttlSeconds: 999_999 }).token.split(".")[1]);
+    expect((short.exp as number) - (short.iat as number)).toBe(60);
+    expect((long.exp as number) - (long.iat as number)).toBe(24 * 3600);
   });
 });
 
 describe("webhook signature", () => {
   const url = "https://vexy.example.com/api/calling/status";
   const params = { CallSid: "CA123", CallStatus: "completed", CallDuration: "42" };
+  const signature = getExpectedTwilioSignature(CONFIG.authToken, url, params);
 
-  it("matches Twilio's documented algorithm", () => {
-    // URL + parametry seřazené podle jména, slepené bez oddělovačů.
-    const expected = createHmac("sha1", CONFIG.authToken)
-      .update("https://vexy.example.com/api/calling/statusCallDuration42CallSidCA123CallStatuscompleted")
-      .digest("base64");
-    expect(twilioSignature(CONFIG.authToken, url, params)).toBe(expected);
-  });
-
-  it("accepts a correct signature", () => {
-    const signature = twilioSignature(CONFIG.authToken, url, params);
+  it("accepts what Twilio would actually send", () => {
     expect(verifyTwilioSignature(CONFIG.authToken, url, params, signature)).toBe(true);
   });
 
-  it("rejects a tampered parameter, a wrong url and a missing signature", () => {
-    const signature = twilioSignature(CONFIG.authToken, url, params);
+  it("rejects a tampered parameter, a wrong url, a wrong token and no signature", () => {
     expect(
       verifyTwilioSignature(CONFIG.authToken, url, { ...params, CallStatus: "busy" }, signature),
     ).toBe(false);
     expect(verifyTwilioSignature(CONFIG.authToken, `${url}x`, params, signature)).toBe(false);
-    expect(verifyTwilioSignature(CONFIG.authToken, url, params, null)).toBe(false);
     expect(verifyTwilioSignature("jiny-token", url, params, signature)).toBe(false);
+    expect(verifyTwilioSignature(CONFIG.authToken, url, params, null)).toBe(false);
+    expect(verifyTwilioSignature(CONFIG.authToken, url, params, "")).toBe(false);
+  });
+
+  it("rejects an added parameter, which is how a replay with extras looks", () => {
+    expect(
+      verifyTwilioSignature(CONFIG.authToken, url, { ...params, Extra: "1" }, signature),
+    ).toBe(false);
   });
 });
 
