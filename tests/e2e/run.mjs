@@ -738,16 +738,17 @@ try {
   }
 
   // Menu je jen práce, žádná administrace.
-  for (const hidden of ["Nastavení", "Tým", "Komunikace", "Aktivita", "Přehled"]) {
+  for (const hidden of ["Nastavení", "Tým", "Komunikace", "Aktivita", "Přehled", "Firmy"]) {
     if ((await page.locator(`nav a:has-text("${hidden}")`).count()) === 0) {
       ok(`caller navigation hides "${hidden}"`);
     } else {
       fail(`caller navigation hides "${hidden}"`, "link is present");
     }
   }
-  for (const shown of ["Dnes", "Firmy"]) {
-    await expectVisible(page, `nav a:has-text("${shown}")`, `caller navigation keeps "${shown}"`);
-  }
+  await expectVisible(page, 'nav a:has-text("Dnes")', "caller navigation keeps Dnes");
+  const navLinks = await page.locator("nav a").count();
+  if (navLinks <= 2) ok("caller navigation is down to the work itself");
+  else fail("caller navigation is down to the work itself", `${navLinks} links`);
   await shot(page, "caller-dnes");
 
   // A hlavně: přímá adresa administrace je zavřená i bez odkazu.
@@ -755,6 +756,9 @@ try {
     "/", "/settings", "/mailboxes", "/tym", "/uzivatele", "/inbox", "/inbox/schranka",
     "/activity", "/campaigns", "/contacts", "/volani", "/suppression", "/calleri",
     "/osloveni/plan", "/osloveni/hovory", "/osloveni/fronta",
+    // Adresář firem je od oddělení klientů taky administrace: caller nemá
+    // co procházet firmy napříč ASN Plus a VEXY.
+    "/firmy", "/klienti",
   ]) {
     await page.goto(BASE + path);
     const denied = page.url().includes("/nemate-pristup");
@@ -802,6 +806,119 @@ try {
   await page.click('button:has-text("Odhlásit")');
   await page.waitForURL(/\/login/);
   ok("a caller can sign out");
+
+  // ---- oddělení klientů --------------------------------------------------
+  // Tohle je ta věc, kvůli které se nesmí splést ASN Plus a VEXY. Testuje
+  // se server, ne menu: caller druhého klienta nesmí dostat cizí frontu
+  // ani když si adresu napíše ručně.
+  await attemptLogin(ADMIN_EMAIL, ADMIN_PASSWORD);
+  await page.waitForURL(`${BASE}/`);
+
+  await page.goto(`${BASE}/klienti`);
+  await expectVisible(page, "h1:has-text('Klienti')", "client management renders");
+  for (const client of ["ASN Plus", "VEXY"]) {
+    await page.fill('input[name="name"]', client);
+    await page.click('button:has-text("Přidat")');
+    await expectVisible(page, "text=Klient přidán", `client "${client}" is created`);
+  }
+  await expectVisible(
+    page,
+    "text=nemá klienta",
+    "campaigns without a client are flagged, not silently hidden",
+  );
+
+  // Stávající kampaň patří ASN Plus.
+  await page.locator('select[name="client_id"]').first().selectOption({ label: "ASN Plus" });
+  await page.locator('button:has-text("Uložit")').first().click();
+  await page.waitForLoadState("networkidle");
+  ok("a campaign can be filed under a client");
+  await shot(page, "klienti");
+
+  // Druhý klient dostane vlastní kampaň a vlastní kontakt, aby bylo co splést.
+  const [vexyMailbox] = await checkDb`select id from mailboxes limit 1`;
+  const [vexyClient] = await checkDb`select id from clients where name = 'VEXY'`;
+  const [vexyCampaign] = await checkDb`
+    insert into campaigns (name, mailbox_id, client_id, calling_enabled, status)
+    values ('VEXY vlastní outbound', ${vexyMailbox.id}, ${vexyClient.id}, true, 'draft')
+    returning id
+  `;
+  const [vexyContact] = await checkDb`
+    insert into contacts (email, first_name, last_name, company, phone)
+    values ('vexy-lead@prospect.test', 'Vexy', 'Lead', 'Vexy Only', '+420777000099')
+    returning id
+  `;
+  await checkDb`
+    insert into campaign_contacts (campaign_id, contact_id, status)
+    values (${vexyCampaign.id}, ${vexyContact.id}, 'pending')
+  `;
+
+  // Jan je přidělený jen na ASN Plus.
+  await page.goto(`${BASE}/tym`);
+  await expectVisible(page, "text=Kampaně", "the team page shows campaign assignment");
+  await page.locator('button:has-text("Přidělit kampaně"), button:has-text("Kampaně (")').first().click();
+  await expectVisible(page, "text=Na čem smí", "assignment explains what it does");
+  await page.locator('input[name="campaign_ids"]').first().check();
+  await page.click('button:has-text("Uložit přidělení")');
+  await expectVisible(page, "text=Přiděleno", "a caller is assigned to one client's campaign");
+  await shot(page, "prideleni");
+
+  const [assignment] = await checkDb`
+    select cp.name from caller_campaigns ca join campaigns cp on cp.id = ca.campaign_id limit 1
+  `;
+  if (assignment && assignment.name !== "VEXY vlastní outbound") {
+    ok("the assignment points at the ASN campaign, not VEXY's");
+  } else {
+    fail("the assignment points at the ASN campaign, not VEXY's", JSON.stringify(assignment));
+  }
+
+  await page.goto(`${BASE}/`);
+  await page.click('button:has-text("Odhlásit")');
+  await page.waitForURL(/\/login/);
+
+  // Caller ASN nesmí uvidět kontakt VEXY - ani ve frontě, ani přes id.
+  await attemptLogin(CALLER_EMAIL, CALLER_PASSWORD);
+  await page.waitForURL(/\/osloveni/);
+  const callerBody = await page.locator("body").innerText();
+  if (!callerBody.includes("Vexy Only") && !callerBody.includes("vexy-lead@prospect.test")) {
+    ok("an ASN caller never sees VEXY data in their work mode");
+  } else {
+    fail("an ASN caller never sees VEXY data in their work mode", "VEXY contact leaked");
+  }
+
+  // A server ho odmítne vytočit, i když id zná.
+  const dial = await page.request.post(`${BASE}/api/calling/calls`, {
+    data: { contactId: vexyContact.id },
+    headers: { "content-type": "application/json" },
+  });
+  if (dial.status() === 404 || dial.status() === 409 || dial.status() === 503) {
+    ok(`the server refuses to dial another client's contact (${dial.status()})`);
+  } else {
+    fail("the server refuses to dial another client's contact", `got ${dial.status()}`);
+  }
+
+  const [leaked] = await checkDb`
+    select count(*)::int as count from calls where contact_id = ${vexyContact.id}
+  `;
+  if (leaked.count === 0) ok("no call row was created for the other client's contact");
+  else fail("no call row was created for the other client's contact", `${leaked.count} rows`);
+
+  await page.click('button:has-text("Odhlásit")');
+  await page.waitForURL(/\/login/);
+
+  // ---- výsledky pilotu ---------------------------------------------------
+  await attemptLogin(ADMIN_EMAIL, ADMIN_PASSWORD);
+  await page.waitForURL(`${BASE}/`);
+  await page.goto(campaignUrl + "?tab=pilot");
+  await expectVisible(page, "text=Kontaktů v kampani", "the pilot report states the scope");
+  await expectVisible(page, "text=Pokusů o volání", "the pilot report counts attempts");
+  await expectVisible(page, "text=Spojených kontaktů", "the pilot report counts unique contacts");
+  await expectVisible(page, "text=Pokus je jedno vytočení", "attempts and contacts are explained");
+  await expectVisible(page, "text=Schůzek", "the pilot report counts meetings");
+  await shot(page, "pilot-report");
+
+  await page.goto(campaignUrl);
+  await expectVisible(page, "text=Odesláno dnes", "the campaign shows today's sending against its limit");
+  await expectVisible(page, "text=ASN Plus", "the campaign shows which client it belongs to");
 
   const realErrors = consoleErrors.filter((text) => !/favicon|404 \(Not Found\)/i.test(text));
   if (realErrors.length === 0) ok("no browser console errors");

@@ -82,6 +82,8 @@ export interface Contact {
 export interface Campaign {
   id: string;
   name: string;
+  /** Čí je kampaň. Null u historických kampaní - ty vidí jen administrátor. */
+  client_id: string | null;
   /** @deprecated superseded by campaign_mailboxes; retained for history. */
   mailbox_id: string | null;
   status: CampaignStatus;

@@ -87,9 +87,12 @@ export default async function OsloveniPage({
     );
   }
 
+  // Caller pracuje výhradně na přidělených kampaních; administrátor vidí
+  // celou frontu, protože si obchodní identitu vybírá vědomě.
+  const scoped = !isAdmin;
   const [held, progress, unlogged] = await Promise.all([
-    getHeldCall(null, caller.id),
-    getCallerDayProgress(caller.id, null, mode),
+    getHeldCall(null, caller.id, scoped),
+    getCallerDayProgress(caller.id, null, mode, scoped),
     // Hovor, který proběhl, ale výsledek se nestihl zapsat - typicky
     // zavřený notebook hned po zavěšení.
     getUnloggedCall({ callerId: caller.id }),
@@ -110,6 +113,7 @@ export default async function OsloveniPage({
     ? await buildCallBriefing(held.prospect, held.campaign.name, {
         callerName: caller.name,
         campaignOpening: held.script.opening,
+        canOpenCompany: isAdmin,
       })
     : null;
   // Jestli jde volat z prohlížeče, ví server.
@@ -195,11 +199,13 @@ export default async function OsloveniPage({
               browserCalling={browserCalling}
               briefing={briefing ?? undefined}
             />
-            <p className="mt-3 text-xs text-zinc-500">
-              <Link href={`/kontakt/${held.prospect.id}`} className="underline">
-                Celá historie tohoto kontaktu
-              </Link>
-            </p>
+            {isAdmin ? (
+              <p className="mt-3 text-xs text-zinc-500">
+                <Link href={`/kontakt/${held.prospect.id}`} className="underline">
+                  Celá historie tohoto kontaktu
+                </Link>
+              </p>
+            ) : null}
           </div>
 
           {/* Úvodní věta tu schválně není: je v „Jak začít“ přímo nad

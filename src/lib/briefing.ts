@@ -17,7 +17,16 @@ import type { CallBriefing } from "@/components/call-workspace";
 export async function buildCallBriefing(
   prospect: CallQueueRow,
   campaignName: string | null,
-  options: { callerName?: string | null; campaignOpening?: string | null } = {},
+  options: {
+    callerName?: string | null;
+    campaignOpening?: string | null;
+    /**
+     * Smí uživatel do administrace? Detail firmy je adminská obrazovka;
+     * callerovi se odkaz nenabízí, protože by skončil na "nemáte přístup".
+     * Kontext, který potřebuje, má celý tady na pracovní kartě.
+     */
+    canOpenCompany?: boolean;
+  } = {},
 ): Promise<CallBriefing> {
   const [company, timeline, leadContext] = await Promise.all([
     getCompanyContext(prospect.company_id),
@@ -58,7 +67,8 @@ export async function buildCallBriefing(
     priority: company?.priority ?? null,
     priorityLabel: company ? companyPriorityLabel(company.priority) : null,
     statusLabel: company ? companyStatusLabel(company.status) : null,
-    companyHref: prospect.company_id ? `/firmy/${prospect.company_id}` : null,
+    companyHref:
+      options.canOpenCompany && prospect.company_id ? `/firmy/${prospect.company_id}` : null,
     campaignName,
     nextStep: prospect.next_call_at ? `Zavolat · ${formatWhen(prospect.next_call_at)}` : "Zavolat teď",
     nextStepOverdue: isOverdue(prospect.next_call_at),

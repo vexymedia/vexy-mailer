@@ -1,5 +1,6 @@
 import { sql } from "../db";
 import { logActivity } from "../activity";
+import { callerMayWorkWithContact } from "./clients";
 import {
   isFinalLifecycle,
   shouldAdvanceLifecycle,
@@ -84,6 +85,14 @@ export async function startCall(input: {
   contactId?: string | null;
   campaignContactId?: string | null;
   callerId: string | null;
+  /**
+   * Omezit vytáčení na kampaně přidělené callerovi?
+   *
+   * Zapíná se pro roli caller. Fronta je sice omezená, ale klient posílá
+   * id kontaktu - a to si může vymyslet. Bez téhle kontroly by stačilo
+   * uhodnout id z jiného klienta a vytočit ho přes náš Twilio účet.
+   */
+  scopedToAssignments?: boolean;
 }): Promise<StartCallResult> {
   // Kontakt se dohledá nejdřív, aby zbytek byl jeden jednoduchý dotaz.
   let contactId = input.contactId ?? null;
@@ -95,6 +104,14 @@ export async function startCall(input: {
     contactId = owner.contact_id;
   }
   if (!contactId) return { ok: false, error: "Kontakt nebyl nalezen.", code: "not_found" };
+
+  if (input.scopedToAssignments) {
+    if (!input.callerId) return { ok: false, error: "Kontakt nebyl nalezen.", code: "not_found" };
+    const allowed = await callerMayWorkWithContact(input.callerId, contactId);
+    // Stejná odpověď jako u neexistujícího kontaktu: z chybové hlášky se
+    // nesmí dát vyčíst, že kontakt existuje u jiného klienta.
+    if (!allowed) return { ok: false, error: "Kontakt nebyl nalezen.", code: "not_found" };
+  }
 
   const [row] = await sql<
     {

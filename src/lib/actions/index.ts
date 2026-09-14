@@ -35,6 +35,7 @@ import {
   updateContact,
 } from "@/lib/queries/contacts";
 import { createMailbox, deleteMailbox, testMailbox, testMailboxImap, updateMailbox } from "@/lib/queries/mailboxes";
+import { createClient, getClient, setAssignments } from "@/lib/queries/clients";
 import {
   pauseCampaign,
   skipStepAndResume,
@@ -638,7 +639,7 @@ export async function deleteConversationAction(
  * whole point of the workspace, so nothing here asks for confirmation.
  */
 export async function logCallAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  await requireAuth();
+  const user = await requireAuth();
   const campaignContactId = String(formData.get("campaign_contact_id") ?? "").trim();
   // Kontakt mimo kampaň. Každý skutečný hovor musí jít klasifikovat.
   const contactId = String(formData.get("contact_id") ?? "").trim();
@@ -700,7 +701,7 @@ export async function logCallAction(_prev: ActionState, formData: FormData): Pro
     const scope = String(formData.get("campaign_scope") ?? "") || null;
     // Režim se přenáší z formuláře, aby blok "follow-up" nepodstrčil
     // callerovi po prvním zápisu úplně nevolanou firmu.
-    await claimNextCall(scope, callerId, readMode(formData));
+    await claimNextCall(scope, callerId, readMode(formData), user.role === "caller");
   }
 
   revalidatePath("/volani", "layout");
@@ -890,12 +891,18 @@ function readMode(formData: FormData): QueueMode | null {
  * never from a page rendering or a router prefetching it.
  */
 export async function nextCallAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  await requireAuth();
+  const user = await requireAuth();
   const campaignId = String(formData.get("campaign_id") ?? "") || null;
   const callerId = await getSelectedCallerId();
   if (!callerId) return fail("Nejdřív vyberte, kdo volá.");
 
-  const claimed = await claimNextCall(campaignId, callerId, readMode(formData));
+  const claimed = await claimNextCall(
+    campaignId,
+    callerId,
+    readMode(formData),
+    // Caller dostane další firmu jen z přidělených kampaní.
+    user.role === "caller",
+  );
   if (campaignId) revalidatePath(`/volani/${campaignId}`);
   revalidatePath("/osloveni");
   if (!claimed) return { success: "Fronta je prázdná — nikdo další k volání není." };
@@ -1196,4 +1203,76 @@ export async function toggleUserAction(_prev: ActionState, formData: FormData): 
   if (!result.ok) return fail(USER_ERRORS[result.error] ?? "Stav se nepodařilo změnit.");
   revalidatePath("/uzivatele");
   return { success: active ? "Uživatel aktivován." : "Uživatel deaktivován." };
+}
+
+// ------------------------------------------------------------------ klienti
+
+/**
+ * Klient a přidělení kampaní.
+ *
+ * Nejmenší věc, která dělá provoz jednoznačným, když v systému vedle sebe
+ * běží ASN Plus a vlastní outbound VEXY.
+ */
+export async function createClientAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  await requireAdmin();
+  const result = await createClient(String(formData.get("name") ?? ""));
+  if (!result.ok) {
+    return fail(
+      result.error === "duplicate"
+        ? "Klient s tímhle názvem už existuje."
+        : "Zadejte název klienta.",
+    );
+  }
+  revalidatePath("/klienti");
+  revalidatePath("/campaigns");
+  return { success: "Klient přidán." };
+}
+
+/** Zařadí kampaň pod klienta. Bez klienta je kampaň jen pro administrátora. */
+export async function setCampaignClientAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  await requireAdmin();
+  const campaignId = String(formData.get("campaign_id") ?? "").trim();
+  if (!campaignId) return fail("Chybí kampaň.");
+  const clientId = String(formData.get("client_id") ?? "").trim() || null;
+
+  if (clientId && !(await getClient(clientId))) return fail("Klient nebyl nalezen.");
+
+  await sql`
+    update campaigns set client_id = ${clientId}, updated_at = now() where id = ${campaignId}
+  `;
+  revalidatePath("/klienti");
+  revalidatePath(`/campaigns/${campaignId}`);
+  return { success: clientId ? "Kampaň zařazena." : "Kampaň bez klienta." };
+}
+
+/**
+ * Které kampaně caller zpracovává.
+ *
+ * Tohle je hranice mezi klienty: bez přidělení caller nedostane žádnou
+ * práci a nic cizího neuvidí.
+ */
+export async function setCallerCampaignsAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  await requireAdmin();
+  const callerId = String(formData.get("caller_id") ?? "").trim();
+  if (!callerId) return fail("Chybí caller.");
+
+  const campaignIds = formData
+    .getAll("campaign_ids")
+    .map((value) => String(value))
+    .filter((value) => /^[0-9a-f-]{36}$/i.test(value));
+
+  await setAssignments(callerId, campaignIds);
+  revalidatePath("/tym");
+  revalidatePath("/osloveni");
+  return {
+    success: campaignIds.length === 0
+      ? "Caller nemá přidělenou žádnou kampaň — frontu uvidí prázdnou."
+      : `Přiděleno: ${campaignIds.length} ${campaignIds.length === 1 ? "kampaň" : campaignIds.length < 5 ? "kampaně" : "kampaní"}.`,
+  };
 }

@@ -75,10 +75,22 @@ export type QueueMode = "first" | "followup";
 
 export async function listCallQueue(
   campaignId: string | null,
-  options: { limit?: number; callerId?: string | null; mode?: QueueMode | null } = {},
+  options: {
+    limit?: number;
+    callerId?: string | null;
+    mode?: QueueMode | null;
+    /**
+     * Omezit frontu na kampaně přidělené callerovi?
+     *
+     * Zapíná se pro roli caller. Administrátor volá s false, protože smí
+     * volat komukoliv - ale pak si obchodní identitu vybírá vědomě.
+     */
+    scopedToAssignments?: boolean;
+  } = {},
 ): Promise<CallQueueRow[]> {
   const callerId = options.callerId ?? null;
   const mode = options.mode ?? null;
+  const scoped = options.scopedToAssignments ?? false;
   return sql<CallQueueRow[]>`
     select cc.id, cc.contact_id, c.email, c.phone, c.first_name, c.last_name,
            c.position, c.company, c.website, cc.call_status, cc.call_attempts, cc.last_call_at,
@@ -109,10 +121,21 @@ export async function listCallQueue(
        -- Naplánováno na později = dnes to není práce. Od zavedení kadence
        -- má datum dalšího kroku každý otevřený kontakt, ne jen callback.
        and (cc.next_call_at is null or cc.next_call_at <= now())
-       -- Uzavřená firma ("nemá zájem", "není ICP", "už je zákazník") nesmí
-       -- jít do prospectingu ani přes svůj druhý kontakt.
+       -- Vyloučená firma je rozhodnutí o firmě jako takové ("tyhle nikdy"),
+       -- takže platí napříč klienty.
        and not exists (select 1 from companies qco where qco.id = c.company_id
-                        and qco.status in ('won', 'lost', 'excluded'))
+                        and qco.status = 'excluded')
+       -- "Získaný klient" a "nemá zájem" jsou naopak výsledky konkrétního
+       -- obchodu. Zavírají firmu jen v té kampani, kde padly - jinak by
+       -- "nemá zájem" u ASN Plus utnulo tutéž firmu i ve vlastním outboundu
+       -- VEXY, kde jí nabízíme něco úplně jiného.
+       and not exists (
+         select 1 from campaign_contacts closed
+           join contacts cc2 on cc2.id = closed.contact_id
+          where cc2.company_id = c.company_id
+            and closed.campaign_id = cc.campaign_id
+            and closed.call_status in ('won', 'lost')
+       )
        -- Ani kontakt, kterému se už volalo, jen se nestihl zapsat výsledek.
        -- Jinak by ho fronta nabídla znovu a vytočil by se podruhé.
        and not exists (select 1 from calls uc
@@ -124,6 +147,13 @@ export async function listCallQueue(
        and (${mode}::text is null
             or (${mode} = 'first' and cc.call_attempts = 0)
             or (${mode} = 'followup' and cc.call_attempts > 0))
+       -- Oddělení klientů. Caller dostane práci výhradně z kampaní, které
+       -- mu někdo přidělil; bez přidělení nedostane nic. Fail-closed je
+       -- tu záměr - opačná chyba znamená cizího klienta ve frontě.
+       and (${scoped} = false
+            or exists (select 1 from caller_campaigns ca
+                        where ca.caller_id = ${callerId}::uuid
+                          and ca.campaign_id = cc.campaign_id))
      order by
        case cc.call_status when 'callback' then 0 when 'in_progress' then 1 else 2 end,
        cc.call_attempts,
@@ -177,7 +207,9 @@ export async function claimNextCall(
   campaignId: string | null,
   callerId: string,
   mode: QueueMode | null = null,
+  scopedToAssignments = false,
 ): Promise<string | null> {
+  const scoped = scopedToAssignments;
   const [row] = await sql<{ id: string }[]>`
     update campaign_contacts cc
        set call_locked_by = ${callerId}, call_locked_until = now() + interval '${sql.unsafe(String(CALL_LEASE_MINUTES))} minutes'
@@ -196,8 +228,17 @@ export async function claimNextCall(
           and (inner_cc.call_locked_until is null or inner_cc.call_locked_until < now()
                or inner_cc.call_locked_by = ${callerId})
           and (inner_cc.next_call_at is null or inner_cc.next_call_at <= now())
+          -- Viz listCallQueue: vyloučení platí globálně, obchodní výsledek
+          -- jen v rámci své kampaně.
           and not exists (select 1 from companies qco where qco.id = c.company_id
-                           and qco.status in ('won', 'lost', 'excluded'))
+                           and qco.status = 'excluded')
+          and not exists (
+            select 1 from campaign_contacts closed
+              join contacts cc2 on cc2.id = closed.contact_id
+             where cc2.company_id = c.company_id
+               and closed.campaign_id = inner_cc.campaign_id
+               and closed.call_status in ('won', 'lost')
+          )
           and not exists (select 1 from calls uc
                            where uc.campaign_contact_id = inner_cc.id
                              and uc.call_activity_id is null
@@ -207,6 +248,13 @@ export async function claimNextCall(
           and (${mode}::text is null
                or (${mode} = 'first' and inner_cc.call_attempts = 0)
                or (${mode} = 'followup' and inner_cc.call_attempts > 0))
+          -- Stejné omezení jako ve frontě. Musí být i tady: rezervace je
+          -- vlastní dotaz a bez tohohle by caller dostal cizí kontakt,
+          -- i když by ho ve frontě nikdy neviděl.
+          and (${scoped} = false
+               or exists (select 1 from caller_campaigns ca
+                           where ca.caller_id = ${callerId}
+                             and ca.campaign_id = inner_cc.campaign_id))
         order by
           case inner_cc.call_status when 'callback' then 0 when 'in_progress' then 1 else 2 end,
           inner_cc.call_attempts,
@@ -299,7 +347,9 @@ export async function getNextCall(
 export async function getHeldCall(
   campaignId: string | null,
   callerId: string,
+  scopedToAssignments = false,
 ): Promise<NextCall | null> {
+  const scoped = scopedToAssignments;
   const [prospect] = await sql<CallQueueRow[]>`
     select cc.id, cc.contact_id, c.email, c.phone, c.first_name, c.last_name,
            c.position, c.company, c.website, cc.call_status, cc.call_attempts, cc.last_call_at,
@@ -313,6 +363,11 @@ export async function getHeldCall(
      where (${campaignId}::uuid is null or cc.campaign_id = ${campaignId}::uuid)
        and cc.call_locked_by = ${callerId}
        and cc.call_locked_until > now()
+       -- Rezervace vznikla už omezená, ale přidělení se dá mezitím odebrat.
+       -- Pak drženou firmu ukazovat nesmíme.
+       and (${scoped} = false
+            or exists (select 1 from caller_campaigns ca
+                        where ca.caller_id = ${callerId} and ca.campaign_id = cc.campaign_id))
        -- A lease is not a reason to show somebody who has since been decided,
        -- run out of attempts or landed on the do-not-call list.
        and cc.call_status in ('new', 'in_progress', 'callback')
@@ -351,6 +406,7 @@ export async function getCallerDayProgress(
   callerId: string,
   campaignId: string | null = null,
   mode: QueueMode | null = null,
+  scopedToAssignments = false,
 ): Promise<{
   processed: number;
   remaining: number;
@@ -376,7 +432,7 @@ export async function getCallerDayProgress(
   `;
   const [metrics, queue] = await Promise.all([
     getCallMetrics({ from: dayStart, callerId }),
-    listCallQueue(campaignId, { limit: 500, callerId, mode }),
+    listCallQueue(campaignId, { limit: 500, callerId, mode, scopedToAssignments }),
   ]);
   const processed = row?.processed ?? 0;
   return {

@@ -56,13 +56,14 @@ const ADMIN_ITEMS: Item[] = [
 /**
  * Menu callera.
  *
- * Dvě položky, protože víc jich k práci nepotřebuje. Zbytek aplikace je
- * administrace a schovávat ji za šest nedostupných řádků by callera jen
- * nutil hádat, co smí. Odhlášení zůstává dole jako u admina.
+ * Jedna položka. Caller nemá VEXY procházet, má pracovat - a práce mu
+ * chodí sama do Dneška. Adresář firem tady byl a zmizel schválně: v systému
+ * vedle sebe žije ASN Plus a VEXY, takže procházení firem napříč klienty
+ * není jen zbytečné, ale nepřípustné. Kontext firmy dostane u konkrétní
+ * práce, kde je omezený na jeho kampaně.
  */
 const CALLER_ITEMS: Item[] = [
   { href: "/osloveni", label: "Dnes", icon: <Icon d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.1 9.9a16 16 0 0 0 6 6l1.26-1.26a2 2 0 0 1 2.11-.45c.9.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z" /> },
-  { href: "/firmy", label: "Firmy", also: ["/kontakt"], icon: <Icon d="M3 21h18M5 21V7l7-4 7 4v14M9 9h.01M15 9h.01M9 13h.01M15 13h.01M9 17h.01M15 17h.01" /> },
 ];
 
 function isActive(pathname: string, item: Item): boolean {

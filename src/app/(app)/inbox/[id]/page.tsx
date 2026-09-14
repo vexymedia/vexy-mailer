@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getConversation, listMessages, markConversationRead } from "@/lib/queries/inbox";
 import { requireUser } from "@/lib/auth";
+import { callerMaySeeConversation } from "@/lib/queries/clients";
 import { PageHeader, DateTime, StatusBadge } from "@/components/ui";
 import { ClassificationBadge } from "@/components/inbox-bits";
 import { ClassificationPicker, DeleteConversationButton, ReplyComposer } from "@/components/conversation-actions";
@@ -21,6 +22,15 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
   const { id } = await params;
   const user = await requireUser();
   const canManage = user.role === "admin";
+
+  // Caller vidí jen konverzace kontaktů ze svých kampaní. Odkaz na vlákno
+  // dostane z pracovní karty, ale id se dá napsat i ručně - a cizí klient
+  // mu do pošty nepatří. Stejná odpověď jako u neexistujícího vlákna:
+  // z chyby se nesmí dát vyčíst, že existuje.
+  if (!canManage && (!user.caller_id || !(await callerMaySeeConversation(user.caller_id, id)))) {
+    notFound();
+  }
+
   const conversation = await getConversation(id);
   if (!conversation) notFound();
 
