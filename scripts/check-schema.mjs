@@ -89,6 +89,20 @@ if (!url) {
 const sql = postgres(url, { max: 1, prepare: false });
 let problems = 0;
 
+// Nedostupná databáze je jiný problém než rozjeté schéma a nesmí skončit
+// stack tracem - tenhle skript se spouští proti produkci, často ve spěchu.
+try {
+  await sql`select 1`;
+} catch (error) {
+  console.error("K databázi se nepodařilo připojit.");
+  console.error(`  ${error instanceof Error ? error.message : String(error)}`);
+  console.error("");
+  console.error("Zkontrolujte DATABASE_URL — u Supabase se používá connection");
+  console.error("pooler a v adrese musí být i ?sslmode=require.");
+  await sql.end();
+  process.exit(2);
+}
+
 try {
   // ---- 1. migrace ------------------------------------------------------
   const files = readdirSync(join(root, "supabase", "migrations"))
