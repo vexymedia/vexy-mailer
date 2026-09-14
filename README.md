@@ -176,6 +176,21 @@ first admin exists.
 > Changing `ENCRYPTION_KEY` later makes every stored mailbox password
 > undecryptable and you will have to re-enter them. Keep a copy.
 
+### Deploy nespouští migrace
+
+Vercel build migrace **nespouští**. Pořadí je vždy: nejdřív `npm run db:migrate`
+proti produkční databázi, teprve potom deploy.
+
+Když se to obrátí, aplikace se tváří, že běží — rozbijí se jen stránky, které
+nové sloupce čtou. Po každém deployi (a při každé podezřelé chybě 500) proto:
+
+```bash
+DATABASE_URL="<produkční>" npm run db:check
+```
+
+Vypíše, které migrace a sloupce databázi chybí, nebo potvrdí, že odpovídá
+nasazené aplikaci.
+
 ## Setting it up
 
 1. **[docs/SETUP_SUPABASE.md](docs/SETUP_SUPABASE.md)** — create the project,

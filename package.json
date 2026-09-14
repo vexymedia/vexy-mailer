@@ -11,6 +11,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "db:migrate": "node scripts/migrate.mjs",
+    "db:check": "node scripts/check-schema.mjs",
     "user:create-admin": "node scripts/create-admin.mjs",
     "test:e2e": "node tests/e2e/run.mjs",
     "check": "npm run typecheck && npm run lint && npm run build && npm test"
