@@ -1,4 +1,5 @@
 import { sql } from "../db";
+import { getCallMetrics } from "./reporting";
 
 /**
  * Přehled pro majitele / obchodního ředitele.
@@ -76,28 +77,41 @@ export async function getOverviewStats(): Promise<OverviewStats> {
 }
 
 export interface WeekSummary {
-  /** Pokusy o volání - každý zápis hovoru, i nedovolaný. */
+  /** Pokusy o volání - viz definice v queries/reporting.ts. */
   calls: number;
   /** Hovory, kde jsme se skutečně dovolali. */
   connected: number;
   meetings_booked: number;
   emails_sent: number;
+  reach_rate: number | null;
+  meeting_rate: number | null;
 }
 
-/** Co se stalo za posledních 7 dní. */
+/**
+ * Co se stalo za posledních 7 dní.
+ *
+ * Čísla o volání se sem jen přenášejí z `queries/reporting.ts`. Dřív se
+ * tu počítala vlastním dotazem nad `call_activities`, což znamenalo, že
+ * skutečně proběhlý hovor bez zapsaného výsledku byl pro Přehled
+ * neviditelný - a 35 sekund hovoru se ukázalo jako nula.
+ */
 export async function getWeekSummary(): Promise<WeekSummary> {
-  const [row] = await sql<WeekSummary[]>`
-    select
-      (select count(*)::int from call_activities
-        where called_at >= now() - interval '7 days') as calls,
-      (select count(*)::int from call_activities
-        where connected and called_at >= now() - interval '7 days') as connected,
-      (select count(*)::int from call_activities
-        where outcome = 'meeting_booked' and called_at >= now() - interval '7 days') as meetings_booked,
-      (select count(*)::int from email_sends
-        where status = 'sent' and sent_at >= now() - interval '7 days') as emails_sent
-  `;
-  return row;
+  const from = new Date(Date.now() - 7 * 86_400_000);
+  const [metrics, row] = await Promise.all([
+    getCallMetrics({ from }),
+    sql<{ emails_sent: number }[]>`
+      select (select count(*)::int from email_sends
+               where status = 'sent' and sent_at >= now() - interval '7 days') as emails_sent
+    `,
+  ]);
+  return {
+    calls: metrics.attempts,
+    connected: metrics.connected,
+    meetings_booked: metrics.meetings,
+    emails_sent: row[0]?.emails_sent ?? 0,
+    reach_rate: metrics.reach_rate,
+    meeting_rate: metrics.meeting_rate,
+  };
 }
 
 export type TodoKind = "overdue" | "followup" | "reply" | "queue" | "attention";

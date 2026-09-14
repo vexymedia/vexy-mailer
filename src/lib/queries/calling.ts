@@ -15,6 +15,7 @@ import {
   type MeetingOutcome,
 } from "../calling";
 import { isCompanyStatus, nextCompanyStatus } from "../companies";
+import { getCallMetrics, getMetricsByCaller } from "./reporting";
 import type { Campaign } from "../types";
 
 /**
@@ -74,10 +75,22 @@ export type QueueMode = "first" | "followup";
 
 export async function listCallQueue(
   campaignId: string | null,
-  options: { limit?: number; callerId?: string | null; mode?: QueueMode | null } = {},
+  options: {
+    limit?: number;
+    callerId?: string | null;
+    mode?: QueueMode | null;
+    /**
+     * Omezit frontu na kampaně přidělené callerovi?
+     *
+     * Zapíná se pro roli caller. Administrátor volá s false, protože smí
+     * volat komukoliv - ale pak si obchodní identitu vybírá vědomě.
+     */
+    scopedToAssignments?: boolean;
+  } = {},
 ): Promise<CallQueueRow[]> {
   const callerId = options.callerId ?? null;
   const mode = options.mode ?? null;
+  const scoped = options.scopedToAssignments ?? false;
   return sql<CallQueueRow[]>`
     select cc.id, cc.contact_id, c.email, c.phone, c.first_name, c.last_name,
            c.position, c.company, c.website, cc.call_status, cc.call_attempts, cc.last_call_at,
@@ -108,10 +121,21 @@ export async function listCallQueue(
        -- Naplánováno na později = dnes to není práce. Od zavedení kadence
        -- má datum dalšího kroku každý otevřený kontakt, ne jen callback.
        and (cc.next_call_at is null or cc.next_call_at <= now())
-       -- Uzavřená firma ("nemá zájem", "není ICP", "už je zákazník") nesmí
-       -- jít do prospectingu ani přes svůj druhý kontakt.
+       -- Vyloučená firma je rozhodnutí o firmě jako takové ("tyhle nikdy"),
+       -- takže platí napříč klienty.
        and not exists (select 1 from companies qco where qco.id = c.company_id
-                        and qco.status in ('won', 'lost', 'excluded'))
+                        and qco.status = 'excluded')
+       -- "Získaný klient" a "nemá zájem" jsou naopak výsledky konkrétního
+       -- obchodu. Zavírají firmu jen v té kampani, kde padly - jinak by
+       -- "nemá zájem" u ASN Plus utnulo tutéž firmu i ve vlastním outboundu
+       -- VEXY, kde jí nabízíme něco úplně jiného.
+       and not exists (
+         select 1 from campaign_contacts closed
+           join contacts cc2 on cc2.id = closed.contact_id
+          where cc2.company_id = c.company_id
+            and closed.campaign_id = cc.campaign_id
+            and closed.call_status in ('won', 'lost')
+       )
        -- Ani kontakt, kterému se už volalo, jen se nestihl zapsat výsledek.
        -- Jinak by ho fronta nabídla znovu a vytočil by se podruhé.
        and not exists (select 1 from calls uc
@@ -123,6 +147,13 @@ export async function listCallQueue(
        and (${mode}::text is null
             or (${mode} = 'first' and cc.call_attempts = 0)
             or (${mode} = 'followup' and cc.call_attempts > 0))
+       -- Oddělení klientů. Caller dostane práci výhradně z kampaní, které
+       -- mu někdo přidělil; bez přidělení nedostane nic. Fail-closed je
+       -- tu záměr - opačná chyba znamená cizího klienta ve frontě.
+       and (${scoped} = false
+            or exists (select 1 from caller_campaigns ca
+                        where ca.caller_id = ${callerId}::uuid
+                          and ca.campaign_id = cc.campaign_id))
      order by
        case cc.call_status when 'callback' then 0 when 'in_progress' then 1 else 2 end,
        cc.call_attempts,
@@ -176,7 +207,9 @@ export async function claimNextCall(
   campaignId: string | null,
   callerId: string,
   mode: QueueMode | null = null,
+  scopedToAssignments = false,
 ): Promise<string | null> {
+  const scoped = scopedToAssignments;
   const [row] = await sql<{ id: string }[]>`
     update campaign_contacts cc
        set call_locked_by = ${callerId}, call_locked_until = now() + interval '${sql.unsafe(String(CALL_LEASE_MINUTES))} minutes'
@@ -195,8 +228,17 @@ export async function claimNextCall(
           and (inner_cc.call_locked_until is null or inner_cc.call_locked_until < now()
                or inner_cc.call_locked_by = ${callerId})
           and (inner_cc.next_call_at is null or inner_cc.next_call_at <= now())
+          -- Viz listCallQueue: vyloučení platí globálně, obchodní výsledek
+          -- jen v rámci své kampaně.
           and not exists (select 1 from companies qco where qco.id = c.company_id
-                           and qco.status in ('won', 'lost', 'excluded'))
+                           and qco.status = 'excluded')
+          and not exists (
+            select 1 from campaign_contacts closed
+              join contacts cc2 on cc2.id = closed.contact_id
+             where cc2.company_id = c.company_id
+               and closed.campaign_id = inner_cc.campaign_id
+               and closed.call_status in ('won', 'lost')
+          )
           and not exists (select 1 from calls uc
                            where uc.campaign_contact_id = inner_cc.id
                              and uc.call_activity_id is null
@@ -206,6 +248,13 @@ export async function claimNextCall(
           and (${mode}::text is null
                or (${mode} = 'first' and inner_cc.call_attempts = 0)
                or (${mode} = 'followup' and inner_cc.call_attempts > 0))
+          -- Stejné omezení jako ve frontě. Musí být i tady: rezervace je
+          -- vlastní dotaz a bez tohohle by caller dostal cizí kontakt,
+          -- i když by ho ve frontě nikdy neviděl.
+          and (${scoped} = false
+               or exists (select 1 from caller_campaigns ca
+                           where ca.caller_id = ${callerId}
+                             and ca.campaign_id = inner_cc.campaign_id))
         order by
           case inner_cc.call_status when 'callback' then 0 when 'in_progress' then 1 else 2 end,
           inner_cc.call_attempts,
@@ -298,7 +347,9 @@ export async function getNextCall(
 export async function getHeldCall(
   campaignId: string | null,
   callerId: string,
+  scopedToAssignments = false,
 ): Promise<NextCall | null> {
+  const scoped = scopedToAssignments;
   const [prospect] = await sql<CallQueueRow[]>`
     select cc.id, cc.contact_id, c.email, c.phone, c.first_name, c.last_name,
            c.position, c.company, c.website, cc.call_status, cc.call_attempts, cc.last_call_at,
@@ -312,6 +363,11 @@ export async function getHeldCall(
      where (${campaignId}::uuid is null or cc.campaign_id = ${campaignId}::uuid)
        and cc.call_locked_by = ${callerId}
        and cc.call_locked_until > now()
+       -- Rezervace vznikla už omezená, ale přidělení se dá mezitím odebrat.
+       -- Pak drženou firmu ukazovat nesmíme.
+       and (${scoped} = false
+            or exists (select 1 from caller_campaigns ca
+                        where ca.caller_id = ${callerId} and ca.campaign_id = cc.campaign_id))
        -- A lease is not a reason to show somebody who has since been decided,
        -- run out of attempts or landed on the do-not-call list.
        and cc.call_status in ('new', 'in_progress', 'callback')
@@ -350,23 +406,52 @@ export async function getCallerDayProgress(
   callerId: string,
   campaignId: string | null = null,
   mode: QueueMode | null = null,
-): Promise<{ processed: number; remaining: number; total: number }> {
+  scopedToAssignments = false,
+): Promise<{
+  processed: number;
+  remaining: number;
+  total: number;
+  attempts: number;
+  connected: number;
+  meetings: number;
+}> {
+  const dayStart = new Date();
+  dayStart.setHours(0, 0, 0, 0);
+
+  // "Zpracováno" je počet firem, které dnes caller odbavil - tedy zapsané
+  // výsledky. "Pokusy/spojené/schůzky" jsou provozní čísla a musí souhlasit
+  // s Přehledem i s Týmem, takže je počítá reporting service. Dřív tu byl
+  // vlastní dotaz nad call_activities, který ad-hoc hovory (bez kampaně)
+  // slil do jednoho a skutečné hovory bez výsledku neviděl vůbec.
   const [row] = await sql<{ processed: number }[]>`
-    select count(distinct ca.campaign_contact_id)::int as processed
+    select count(*)::int as processed
       from call_activities ca
      where ca.caller_id = ${callerId}
-       and ca.called_at >= date_trunc('day', now())
+       and ca.called_at >= ${dayStart}
        and (${campaignId}::uuid is null or ca.campaign_id = ${campaignId}::uuid)
   `;
-  const queue = await listCallQueue(campaignId, { limit: 500, callerId, mode });
+  const [metrics, queue] = await Promise.all([
+    getCallMetrics({ from: dayStart, callerId }),
+    listCallQueue(campaignId, { limit: 500, callerId, mode, scopedToAssignments }),
+  ]);
   const processed = row?.processed ?? 0;
-  return { processed, remaining: queue.length, total: processed + queue.length };
+  return {
+    processed,
+    remaining: queue.length,
+    total: processed + queue.length,
+    attempts: metrics.attempts,
+    connected: metrics.connected,
+    meetings: metrics.meetings,
+  };
 }
 
 // -------------------------------------------------------------- logging
 
 export interface LogCallInput {
-  campaignContactId: string;
+  /** Kontakt v kampani. U ad-hoc hovoru chybí a použije se contactId. */
+  campaignContactId?: string | null;
+  /** Kontakt mimo kampaň. Calling produkt musí umět zapsat každý hovor. */
+  contactId?: string | null;
   outcome: CallOutcome;
   callerId?: string | null;
   note?: string | null;
@@ -397,6 +482,107 @@ export interface LogCallResult {
  * The prospect row is locked first, which is what makes the counter correct
  * when two callers happen to submit the same prospect at once.
  */
+/**
+ * Kolik pokusů má ad-hoc kontakt za sebou.
+ *
+ * Mimo kampaň není kam počítadlo ukládat, tak se počítá ze skutečných
+ * zápisů hovorů - což je stejně poctivější zdroj než denormalizovaný
+ * čítač.
+ */
+const AD_HOC_MAX_ATTEMPTS = 4;
+
+/**
+ * Zápis výsledku hovoru u kontaktu, který není v žádné kampani.
+ *
+ * Dělá přesně tolik, kolik bez kampaně dává smysl: zapíše aktivitu
+ * s dalším krokem, posune stav firmy a případně doplní do-not-call.
+ * Nedotýká se campaign_contacts, takže NEMŮŽE rozhýbat e-mailovou
+ * sekvenci - ta se řídí výhradně sloupci v té tabulce.
+ */
+async function logAdHocCall(
+  input: LogCallInput & { contactId: string },
+): Promise<LogCallResult> {
+  const definition = callOutcome(input.outcome);
+  const callerId = input.callerId ?? null;
+  const note = input.note?.trim() || null;
+
+  type AdHocResult = { email: string; attempts: number } | null;
+  const result: AdHocResult = await sql.begin(async (tx): Promise<AdHocResult> => {
+    const [contact] = await tx<
+      { id: string; email: string; company_id: string | null; company_status: string | null }[]
+    >`
+      select c.id, c.email, c.company_id, co.status as company_status
+        from contacts c
+        left join companies co on co.id = c.company_id
+       where c.id = ${input.contactId}
+         for update of c
+    `;
+    if (!contact) return null;
+
+    const [{ count: attemptsBefore }] = await tx<{ count: number }[]>`
+      select count(*)::int as count from call_activities where contact_id = ${contact.id}
+    `;
+
+    const applied = applyCallOutcome({
+      outcome: input.outcome,
+      attemptsBefore,
+      maxAttempts: AD_HOC_MAX_ATTEMPTS,
+      callbackAt: input.callbackAt ?? null,
+      meetingAt: input.meetingAt ?? null,
+      meetingQualified: input.meetingQualified ?? null,
+    });
+
+    const [activity] = await tx<{ id: string }[]>`
+      insert into call_activities (campaign_id, campaign_contact_id, contact_id, caller_id,
+                                   outcome, connected, note, attempt_number,
+                                   next_action_at, meeting_at, meeting_qualified, deal_value)
+      values (null, null, ${contact.id}, ${callerId},
+              ${input.outcome}, ${applied.connected}, ${note}, ${applied.attempts},
+              ${applied.nextCallAt}, ${applied.meetingAt}, ${applied.meetingQualified},
+              ${input.dealValue ?? null})
+      returning id
+    `;
+
+    if (input.callId) {
+      await tx`
+        update calls set call_activity_id = ${activity.id}, updated_at = now()
+         where id = ${input.callId} and call_activity_id is null
+      `;
+    }
+
+    if (contact.company_id && contact.company_status) {
+      const merged = nextCompanyStatus(
+        isCompanyStatus(contact.company_status) ? contact.company_status : "new",
+        applied.companyStatus,
+      );
+      if (merged !== contact.company_status) {
+        await tx`
+          update companies set status = ${merged}, updated_at = now() where id = ${contact.company_id}
+        `;
+      }
+    }
+
+    if (applied.status === "do_not_call") {
+      await tx`
+        insert into call_suppression (contact_id, reason)
+        values (${contact.id}, 'do_not_call')
+        on conflict (contact_id) do nothing
+      `;
+    }
+
+    return { email: contact.email, attempts: applied.attempts };
+  });
+
+  if (!result) return { ok: false, error: "Kontakt nebyl nalezen." };
+
+  await logActivity({
+    action: "Hovor zaznamenán",
+    detail: `${result.email}: ${definition.label} (pokus ${result.attempts})`,
+    contactId: input.contactId,
+  });
+  return { ok: true };
+}
+
 export async function logCall(input: LogCallInput): Promise<LogCallResult> {
   const definition = callOutcome(input.outcome);
 
@@ -405,6 +591,12 @@ export async function logCall(input: LogCallInput): Promise<LogCallResult> {
   }
   if (definition.requires === "meeting_at" && !input.meetingAt) {
     return { ok: false, error: "Zvolte datum a čas schůzky." };
+  }
+
+  // Hovor mimo kampaň se zapisuje stejným voláním, jen jinou cestou.
+  if (!input.campaignContactId) {
+    if (!input.contactId) return { ok: false, error: "Chybí kontakt." };
+    return logAdHocCall({ ...input, contactId: input.contactId });
   }
 
   const outcomeValue = input.outcome;
@@ -430,7 +622,7 @@ export async function logCall(input: LogCallInput): Promise<LogCallResult> {
         join campaigns cp on cp.id = cc.campaign_id
         join contacts c on c.id = cc.contact_id
         left join companies co on co.id = c.company_id
-       where cc.id = ${input.campaignContactId}
+       where cc.id = ${input.campaignContactId ?? null}
          for update of cc
     `;
     if (!row) return null;
@@ -870,7 +1062,7 @@ export async function listCallContacts(
 
 // ---------------------------------------------------------------- timeline
 
-export type TimelineKind = "call" | "email" | "reply";
+export type TimelineKind = "call" | "email" | "reply" | "loom" | "outcome";
 
 export interface TimelineEntry {
   id: string;
@@ -879,6 +1071,12 @@ export interface TimelineEntry {
   title: string;
   detail: string | null;
   note: string | null;
+  /** Kdo to udělal. Null u událostí, které nikdo neinicioval ručně. */
+  actor?: string | null;
+  /** Kam vede proklik - vlákno, nahrávka, video. Null = nikam. */
+  href?: string | null;
+  /** Výsledek/stav ve zkratce, když ho událost má. */
+  status?: string | null;
 }
 
 /**
@@ -994,8 +1192,12 @@ export interface Caller {
 }
 
 export interface CallerRow extends Caller {
+  /** Pokusy o volání. Definice viz queries/reporting.ts. */
+  attempts: number;
   connected_calls: number;
   meetings_booked: number;
+  talk_seconds: number;
+  reach_rate: number | null;
 }
 
 export async function listCallers(options: { activeOnly?: boolean } = {}): Promise<Caller[]> {
@@ -1014,15 +1216,27 @@ export async function listCallers(options: { activeOnly?: boolean } = {}): Promi
  * these are the same counters the campaign economics already divide by.
  */
 export async function listCallersWithTotals(): Promise<CallerRow[]> {
-  return sql<CallerRow[]>`
-    select c.id, c.name, c.active, c.email, c.phone, c.created_at,
-           (select count(*)::int from call_activities ca
-             where ca.caller_id = c.id and ca.connected) as connected_calls,
-           (select count(*)::int from call_activities ca
-             where ca.caller_id = c.id and ca.outcome = 'meeting_booked') as meetings_booked
-      from callers c
-     order by c.active desc, c.name
-  `;
+  // Čísla nepočítá tenhle dotaz, ale reporting service - jinak by Tým
+  // tvrdil něco jiného než Přehled. Členové bez jediného hovoru dostanou
+  // nuly, ne prázdno.
+  const [people, metrics] = await Promise.all([
+    sql<Caller[]>`
+      select id, name, active, email, phone, created_at
+        from callers order by active desc, name
+    `,
+    getMetricsByCaller(),
+  ]);
+  return people.map((person) => {
+    const stats = metrics.get(person.id);
+    return {
+      ...person,
+      attempts: stats?.attempts ?? 0,
+      connected_calls: stats?.connected ?? 0,
+      meetings_booked: stats?.meetings ?? 0,
+      talk_seconds: stats?.talk_seconds ?? 0,
+      reach_rate: stats?.reach_rate ?? null,
+    };
+  });
 }
 
 export async function createCaller(input: {

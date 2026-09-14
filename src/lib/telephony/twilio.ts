@@ -210,9 +210,12 @@ function restClient(config: TwilioConfig) {
 export async function fetchRecording(
   config: TwilioConfig,
   recordingUrl: string,
+  format: "wav" | "mp3" = "wav",
 ): Promise<{ ok: true; audio: Buffer; contentType: string } | { ok: false; error: string }> {
-  // Twilio posílá URL bez přípony; .mp3 je menší než wav a přepisovačům stačí.
-  const url = recordingUrl.endsWith(".mp3") ? recordingUrl : `${recordingUrl}.mp3`;
+  // WAV, ne MP3: hovor se nahrává dvoukanálově (každá větev zvlášť) a
+  // převod do MP3 to smíchá do mona - tím se nenávratně ztratí informace
+  // o tom, kdo mluví.
+  const url = /\.(wav|mp3)$/i.test(recordingUrl) ? recordingUrl : `${recordingUrl}.${format}`;
   const auth = Buffer.from(`${config.accountSid}:${config.authToken}`).toString("base64");
   try {
     const response = await fetch(url, { headers: { authorization: `Basic ${auth}` } });
@@ -224,7 +227,9 @@ export async function fetchRecording(
     return {
       ok: true,
       audio: buffer,
-      contentType: response.headers.get("content-type") ?? "audio/mpeg",
+      contentType:
+        response.headers.get("content-type") ??
+        (format === "wav" ? "audio/wav" : "audio/mpeg"),
     };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };

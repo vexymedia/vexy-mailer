@@ -2,6 +2,8 @@ import { listCallersWithTotals } from "@/lib/queries/calling";
 import { saveCallerAction, toggleCallerAction } from "@/lib/actions";
 import { PageHeader, Table, DateTime, EmptyState } from "@/components/ui";
 import { ActionForm, SubmitButton } from "@/components/action-form";
+import { CallerRow } from "@/components/caller-assignments";
+import { listAllAssignments } from "@/lib/queries/clients";
 
 export const dynamic = "force-dynamic";
 
@@ -12,12 +14,15 @@ export const dynamic = "force-dynamic";
  */
 export default async function TeamPage() {
   const team = await listCallersWithTotals();
+  // Přidělení se načítá pro všechny najednou: tým se vykresluje na každé
+  // návštěvě a N dotazů by tu bylo zbytečných.
+  const assignments = await listAllAssignments();
 
   return (
     <>
       <PageHeader
         title="Tým"
-        description="Kdo zpracovává oslovení. Člověk se nemaže, jen deaktivuje — historie a výsledky se na něj odkazují."
+        description="Kdo zpracovává oslovení a na kterých kampaních. Bez přidělené kampaně caller nedostane žádnou práci."
       />
 
       <div className="mb-6 max-w-2xl">
@@ -52,21 +57,37 @@ export default async function TeamPage() {
           head={
             <tr>
               <th className="th">Jméno</th>
-              <th className="th">Kontakt</th>
               <th className="th">Stav</th>
-              <th className="th text-right">Dovolané hovory</th>
-              <th className="th text-right">Domluvené schůzky</th>
+              <th className="th text-right">Pokusy</th>
+              <th className="th text-right">Spojené</th>
+              <th className="th text-right">Schůzky</th>
               <th className="th">Přidán</th>
-              <th className="th"></th>
+              <th className="th text-right">Kampaně a stav účtu</th>
             </tr>
           }
         >
           {team.map((member) => (
-            <tr key={member.id} className="hover:bg-zinc-50">
-              <td className="td font-medium text-zinc-900">{member.name}</td>
-              <td className="td text-xs text-zinc-600">
-                {member.email ?? "—"}
-                {member.phone ? <div>{member.phone}</div> : null}
+            <CallerRow
+              key={member.id}
+              callerId={member.id}
+              callerName={member.name}
+              options={assignments.get(member.id) ?? []}
+              columns={7}
+              actions={
+                <ActionForm action={toggleCallerAction} hideMessages>
+                  <input type="hidden" name="id" value={member.id} />
+                  <input type="hidden" name="active" value={member.active ? "no" : "yes"} />
+                  <SubmitButton className="btn-secondary !px-2 !py-1 text-xs">
+                    {member.active ? "Deaktivovat" : "Aktivovat"}
+                  </SubmitButton>
+                </ActionForm>
+              }
+            >
+              <td className="td font-medium text-zinc-900">
+                {member.name}
+                {member.email ? (
+                  <div className="text-xs font-normal text-zinc-500">{member.email}</div>
+                ) : null}
               </td>
               <td className="td">
                 {member.active ? (
@@ -75,19 +96,17 @@ export default async function TeamPage() {
                   <span className="badge bg-zinc-50 text-zinc-500 ring-zinc-200">neaktivní</span>
                 )}
               </td>
+              <td className="td text-right tabular-nums">{member.attempts}</td>
               <td className="td text-right tabular-nums">{member.connected_calls}</td>
-              <td className="td text-right tabular-nums">{member.meetings_booked}</td>
-              <td className="td text-xs"><DateTime value={member.created_at} /></td>
-              <td className="td text-right">
-                <ActionForm action={toggleCallerAction} hideMessages>
-                  <input type="hidden" name="id" value={member.id} />
-                  <input type="hidden" name="active" value={member.active ? "no" : "yes"} />
-                  <SubmitButton className="btn-secondary !px-2 !py-1 text-xs">
-                    {member.active ? "Deaktivovat" : "Aktivovat"}
-                  </SubmitButton>
-                </ActionForm>
+              <td
+                className={`td text-right tabular-nums ${
+                  member.meetings_booked > 0 ? "font-medium text-emerald-700" : ""
+                }`}
+              >
+                {member.meetings_booked}
               </td>
-            </tr>
+              <td className="td text-xs"><DateTime value={member.created_at} /></td>
+            </CallerRow>
           ))}
         </Table>
       )}

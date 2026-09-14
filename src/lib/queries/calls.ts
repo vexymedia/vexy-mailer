@@ -1,11 +1,13 @@
 import { sql } from "../db";
 import { logActivity } from "../activity";
+import { callerMayWorkWithContact } from "./clients";
 import {
   isFinalLifecycle,
   shouldAdvanceLifecycle,
   toE164,
   type CallAnalysis,
   type CallLifecycle,
+  type TranscriptSegment,
 } from "../telephony/call-state";
 
 /**
@@ -40,6 +42,9 @@ export interface CallRow {
   recording_error: string | null;
   transcript_status: string;
   transcript: string | null;
+  /** Repliky s rolemi. Null u starých hovorů a u mono nahrávek. */
+  transcript_segments: TranscriptSegment[] | null;
+  recording_channels: number | null;
   transcript_language: string | null;
   transcript_error: string | null;
   analysis_status: string;
@@ -80,6 +85,14 @@ export async function startCall(input: {
   contactId?: string | null;
   campaignContactId?: string | null;
   callerId: string | null;
+  /**
+   * Omezit vytáčení na kampaně přidělené callerovi?
+   *
+   * Zapíná se pro roli caller. Fronta je sice omezená, ale klient posílá
+   * id kontaktu - a to si může vymyslet. Bez téhle kontroly by stačilo
+   * uhodnout id z jiného klienta a vytočit ho přes náš Twilio účet.
+   */
+  scopedToAssignments?: boolean;
 }): Promise<StartCallResult> {
   // Kontakt se dohledá nejdřív, aby zbytek byl jeden jednoduchý dotaz.
   let contactId = input.contactId ?? null;
@@ -91,6 +104,14 @@ export async function startCall(input: {
     contactId = owner.contact_id;
   }
   if (!contactId) return { ok: false, error: "Kontakt nebyl nalezen.", code: "not_found" };
+
+  if (input.scopedToAssignments) {
+    if (!input.callerId) return { ok: false, error: "Kontakt nebyl nalezen.", code: "not_found" };
+    const allowed = await callerMayWorkWithContact(input.callerId, contactId);
+    // Stejná odpověď jako u neexistujícího kontaktu: z chybové hlášky se
+    // nesmí dát vyčíst, že kontakt existuje u jiného klienta.
+    if (!allowed) return { ok: false, error: "Kontakt nebyl nalezen.", code: "not_found" };
+  }
 
   const [row] = await sql<
     {
@@ -468,12 +489,19 @@ export async function markTranscriptProcessing(callId: string): Promise<boolean>
 export async function saveTranscript(input: {
   callId: string;
   transcript: string;
+  /** Repliky s rolemi. Prázdné u mono nahrávky - tam řečníky nerozlišíme. */
+  segments?: TranscriptSegment[];
+  /** Kolik kanálů nahrávka měla. Null, když to nešlo zjistit. */
+  channels?: number | null;
   language: string | null;
   provider: string;
 }): Promise<void> {
+  const segments = input.segments ?? [];
   await sql`
     update calls
        set transcript = ${input.transcript},
+           transcript_segments = ${segments.length > 0 ? sql.json(segments) : null},
+           recording_channels = coalesce(${input.channels ?? null}, recording_channels),
            transcript_language = ${input.language},
            transcript_provider = ${input.provider},
            transcript_status = 'done',
@@ -571,7 +599,8 @@ export async function getUnloggedCall(filter: {
       join contacts ct on ct.id = c.contact_id
       left join companies co on co.id = c.company_id
      where c.call_activity_id is null
-       and c.campaign_contact_id is not null
+       -- Ad-hoc hovor (kontakt mimo kampaň) se musí dát dopsat stejně
+       -- jako hovor z fronty, takže se tu na kampaň neptáme.
        and c.provider_call_sid is not null
        and c.status in ('completed', 'no_answer', 'busy')
        and c.started_at > now() - ${UNLOGGED_CALL_WINDOW}::interval
@@ -585,10 +614,24 @@ export async function getUnloggedCall(filter: {
   return row ?? null;
 }
 
-export async function listCallsForCompany(companyId: string, limit = 50): Promise<CallRow[]> {
-  return sql<CallRow[]>`
-    select * from calls where company_id = ${companyId}
-     order by started_at desc limit ${limit}
+/**
+ * Telefonáty firmy i s výsledkem, který k nim někdo zapsal.
+ *
+ * Výsledek nežije na hovoru, ale na aktivitě - hovor je technický záznam
+ * spojení, aktivita je obchodní fakt. Timeline u firmy potřebuje obojí
+ * pohromadě, jinak vypadá dokončený hovor bez výsledku úplně stejně jako
+ * ten, u kterého caller vybral "Nemá zájem".
+ */
+export async function listCallsForCompany(
+  companyId: string,
+  limit = 50,
+): Promise<(CallRow & { outcome: string | null })[]> {
+  return sql<(CallRow & { outcome: string | null })[]>`
+    select c.*, ca.outcome
+      from calls c
+      left join call_activities ca on ca.id = c.call_activity_id
+     where c.company_id = ${companyId}
+     order by c.started_at desc limit ${limit}
   `;
 }
 

@@ -138,8 +138,12 @@ const PRIMARY_ORDER: CallOutcome[] = [
   "meeting_booked",
   "callback",
   "no_answer",
-  "not_interested",
   "send_info",
+  "not_interested",
+  // "Špatný kontakt" je na hlavních tlačítkách schválně: caller na něj
+  // narazí u každého nákupu dat a bez něj by sáhl po "Nemá zájem", čímž
+  // by zabil celou firmu kvůli jednomu špatnému číslu.
+  "wrong_number",
 ];
 
 /** Výsledky na hlavních tlačítkách. */

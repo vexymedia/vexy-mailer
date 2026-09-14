@@ -1,7 +1,14 @@
 import { sql } from "../db";
 import { CALL_OUTCOMES } from "../calling";
 import { fetchRecording, isTwilioConfigured, twilioConfig } from "./twilio";
-import { suggestedOutcomeFrom } from "./call-state";
+import {
+  mergeAdjacentSegments,
+  renderTranscript,
+  suggestedOutcomeFrom,
+  type SpeakerRole,
+  type TranscriptSegment,
+} from "./call-state";
+import { splitWavChannels } from "./wav";
 import {
   openAiAnalysis,
   openAiTranscription,
@@ -115,7 +122,15 @@ export async function processCallPipeline(
   const work = await listPipelineWork(options.limit ?? 3);
   const result: PipelineResult = { ...EMPTY, picked: work.length };
 
-  /** Vrací text přepisu, když se povedl. */
+  /**
+   * Vrací text přepisu, když se povedl.
+   *
+   * Když je nahrávka dvoukanálová, přepíše se každý kanál zvlášť a
+   * výsledky se proloží podle času. Kanál 0 je vždycky obchodník (větev
+   * z prohlížeče), kanál 1 prospekt - rozlišení řečníků tedy není odhad,
+   * ale fyzicky oddělený zvuk. Mono nahrávka (starší hovor, vypnuté
+   * dvoukanálové nahrávání) se přepíše postaru, bez rolí.
+   */
   const runTranscript = async (call: CallRow): Promise<string | null> => {
     if (!(await markTranscriptProcessing(call.id))) return null;
     try {
@@ -126,22 +141,68 @@ export async function processCallPipeline(
         result.failed++;
         return null;
       }
-      const transcribed = await transcription.transcribe(audio.audio, {
-        contentType: audio.contentType,
-      });
-      if (!transcribed.ok) {
-        await failTranscript(call.id, transcribed.error);
+
+      const channels = splitWavChannels(audio.audio);
+      const roles: SpeakerRole[] = ["agent", "prospect"];
+      let language: string | null = null;
+      let provider = transcription.name;
+      let segments: TranscriptSegment[] = [];
+      let monoText: string | null = null;
+
+      if (channels && channels.length >= 2) {
+        // Dva průchody přepisovačem, jeden na každou stranu hovoru.
+        for (const [index, role] of roles.entries()) {
+          const transcribed = await transcription.transcribe(channels[index], {
+            contentType: "audio/wav",
+          });
+          if (!transcribed.ok) {
+            await failTranscript(call.id, transcribed.error);
+            result.failed++;
+            return null;
+          }
+          language ??= transcribed.result.language;
+          provider = transcribed.result.provider;
+          for (const segment of transcribed.result.segments) {
+            segments.push({ speaker: role, text: segment.text, start: segment.start, end: segment.end });
+          }
+        }
+        // Do jedné konverzace podle času. Segmenty bez času skončí na
+        // konci, ale pořád u správného řečníka.
+        segments.sort((a, b) => (a.start ?? Number.MAX_SAFE_INTEGER) - (b.start ?? Number.MAX_SAFE_INTEGER));
+        segments = mergeAdjacentSegments(segments);
+      } else {
+        const transcribed = await transcription.transcribe(audio.audio, {
+          contentType: audio.contentType,
+        });
+        if (!transcribed.ok) {
+          await failTranscript(call.id, transcribed.error);
+          result.failed++;
+          return null;
+        }
+        language = transcribed.result.language;
+        provider = transcribed.result.provider;
+        monoText = transcribed.result.text;
+      }
+
+      // Plochý text zůstává zdrojem pravdy pro starý kód i pro fulltext;
+      // u dvoukanálového hovoru už nese role.
+      const transcript = segments.length > 0 ? renderTranscript(segments) : monoText;
+      if (!transcript) {
+        await failTranscript(call.id, "Přepis je prázdný.");
         result.failed++;
         return null;
       }
+
       await saveTranscript({
         callId: call.id,
-        transcript: transcribed.result.text,
-        language: transcribed.result.language,
-        provider: transcribed.result.provider,
+        transcript,
+        segments,
+        channels: channels?.length ?? null,
+        language,
+        provider,
       });
       result.transcribed++;
-      return transcribed.result.text;
+      return transcript;
     } catch (error) {
       await failTranscript(call.id, error instanceof Error ? error.message : String(error));
       result.failed++;

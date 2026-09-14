@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { getCallerDayProgress, getHeldCall, listCallers } from "@/lib/queries/calling";
 import { getSelectedCallerId } from "@/lib/caller-session";
+import { requireUser } from "@/lib/auth";
 import { clearCallerAction, nextCallAction } from "@/lib/actions";
 import { PageHeader, EmptyState } from "@/components/ui";
 import { ActionForm, SubmitButton } from "@/components/action-form";
@@ -40,13 +41,35 @@ export default async function OsloveniPage({
   const modeLabel =
     mode === "first" ? "První oslovení" : mode === "followup" ? "Follow-up" : null;
 
-  const [selectedCallerId, team] = await Promise.all([
+  /**
+   * Kdo zpracovává frontu.
+   *
+   * Caller se neptá a nevybírá - identitu má z přihlášení. Výběr osoby
+   * zůstává jen administrátorovi, který může volat pod libovolnou
+   * obchodní identitou (třeba když si chce sám vyzkoušet frontu).
+   */
+  const [user, selectedCallerId, team] = await Promise.all([
+    requireUser(),
     getSelectedCallerId(),
     listCallers({ activeOnly: true }),
   ]);
+  const isAdmin = user.role === "admin";
   const caller = team.find((c) => c.id === selectedCallerId) ?? null;
 
   if (!caller) {
+    // Callerovi chybí obchodní identita jen tehdy, když ji někdo mezitím
+    // deaktivoval. Vybírat si ji sám nesmí - musí to spravit administrátor.
+    if (!isAdmin) {
+      return (
+        <>
+          <PageHeader title="Dnes" description="Zpracování fronty." />
+          <EmptyState
+            title="Váš účet zatím nemá přiřazenou obchodní identitu"
+            description="Bez ní se hovory nedají zapsat. Požádejte administrátora, aby vám ji přiřadil."
+          />
+        </>
+      );
+    }
     return (
       <>
         <PageHeader title="Oslovení" description="Kdo dnes zpracovává frontu." />
@@ -64,27 +87,35 @@ export default async function OsloveniPage({
     );
   }
 
+  // Caller pracuje výhradně na přidělených kampaních; administrátor vidí
+  // celou frontu, protože si obchodní identitu vybírá vědomě.
+  const scoped = !isAdmin;
   const [held, progress, unlogged] = await Promise.all([
-    getHeldCall(null, caller.id),
-    getCallerDayProgress(caller.id, null, mode),
+    getHeldCall(null, caller.id, scoped),
+    getCallerDayProgress(caller.id, null, mode, scoped),
     // Hovor, který proběhl, ale výsledek se nestihl zapsat - typicky
     // zavřený notebook hned po zavěšení.
     getUnloggedCall({ callerId: caller.id }),
   ]);
-  const recovery =
-    unlogged && unlogged.campaign_contact_id
-      ? {
-          call: unlogged,
-          qualification: (
-            await buildCockpitBriefing({
-              contactId: unlogged.contact_id,
-              companyId: unlogged.company_id,
-              campaignContactId: unlogged.campaign_contact_id,
-            })
-          ).qualification,
-        }
-      : null;
-  const briefing = held ? await buildCallBriefing(held.prospect, held.campaign.name) : null;
+  const recovery = unlogged
+    ? {
+        call: unlogged,
+        qualification: (
+          await buildCockpitBriefing({
+            contactId: unlogged.contact_id,
+            companyId: unlogged.company_id,
+            campaignContactId: unlogged.campaign_contact_id,
+          })
+        ).qualification,
+      }
+    : null;
+  const briefing = held
+    ? await buildCallBriefing(held.prospect, held.campaign.name, {
+        callerName: caller.name,
+        campaignOpening: held.script.opening,
+        canOpenCompany: isAdmin,
+      })
+    : null;
   // Jestli jde volat z prohlížeče, ví server.
   const browserCalling = isTwilioConfigured();
 
@@ -92,35 +123,54 @@ export default async function OsloveniPage({
     <>
       <PageHeader
         title={modeLabel ? `Dnes · ${modeLabel}` : "Dnes"}
-        description={`Zpracovává ${caller.name}.`}
+        description={isAdmin ? `Zpracovává ${caller.name}.` : "Vaše dnešní fronta."}
         actions={
-          <ActionForm action={clearCallerAction} hideMessages>
-            <input type="hidden" name="next" value={backHref} />
-            {held ? <input type="hidden" name="campaign_contact_id" value={held.prospect.id} /> : null}
-            <SubmitButton className="btn-secondary">Změnit osobu</SubmitButton>
-          </ActionForm>
+          isAdmin ? (
+            <ActionForm action={clearCallerAction} hideMessages>
+              <input type="hidden" name="next" value={backHref} />
+              {held ? <input type="hidden" name="campaign_contact_id" value={held.prospect.id} /> : null}
+              <SubmitButton className="btn-secondary">Změnit osobu</SubmitButton>
+            </ActionForm>
+          ) : null
         }
       />
-      <OsloveniTabs active="/osloveni" />
+      {isAdmin ? <OsloveniTabs active="/osloveni" /> : null}
 
       {recovery ? (
         <CallRecovery
           callId={recovery.call.id}
-          campaignContactId={recovery.call.campaign_contact_id!}
+          campaignContactId={recovery.call.campaign_contact_id}
+          contactId={recovery.call.contact_id}
           contactName={recovery.call.contact_name}
           companyName={recovery.call.company_name}
           qualification={recovery.qualification}
         />
       ) : null}
 
-      <WorkProgress processed={progress.processed} total={progress.total} />
+      <WorkProgress
+        processed={progress.processed}
+        total={progress.total}
+        metrics={{
+          attempts: progress.attempts,
+          connected: progress.connected,
+          meetings: progress.meetings,
+        }}
+      />
 
       {!held ? (
         progress.remaining === 0 ? (
           <EmptyState
-            title={progress.processed > 0 ? "Hotovo, dnešní fronta je prázdná" : "Na dnešek nemáte nikoho k oslovení"}
-            description="Jakmile připravíme nové firmy nebo nastane čas naplánovaného follow-upu, objeví se tady. Zbytek fronty najdete na záložce Fronta."
-            action={{ href: "/firmy", label: "Projít firmy" }}
+            title={progress.processed > 0 ? "Pro dnešek hotovo" : "Na dnešek nemáte nikoho k oslovení"}
+            description={
+              progress.processed > 0
+                ? `Dnes jste udělali ${plural(progress.attempts, "pokus", "pokusy", "pokusů")}, ` +
+                  `dovolali se ${progress.connected}× a domluvili ${plural(progress.meetings, "schůzku", "schůzky", "schůzek")}. ` +
+                  "Další follow-upy se objeví, až nastane jejich čas."
+                : isAdmin
+                  ? "Jakmile připravíme nové firmy nebo nastane čas naplánovaného follow-upu, objeví se tady. Zbytek fronty najdete na záložce Fronta."
+                  : "Jakmile nastane čas dalšího follow-upu, objeví se tady sám. Nic hledat nemusíte."
+            }
+            action={isAdmin ? { href: "/firmy", label: "Projít firmy" } : undefined}
           />
         ) : (
           <ActionForm action={nextCallAction} className="card max-w-md p-6">
@@ -149,15 +199,19 @@ export default async function OsloveniPage({
               browserCalling={browserCalling}
               briefing={briefing ?? undefined}
             />
-            <p className="mt-3 text-xs text-zinc-500">
-              <Link href={`/kontakt/${held.prospect.id}`} className="underline">
-                Celá historie tohoto kontaktu
-              </Link>
-            </p>
+            {isAdmin ? (
+              <p className="mt-3 text-xs text-zinc-500">
+                <Link href={`/kontakt/${held.prospect.id}`} className="underline">
+                  Celá historie tohoto kontaktu
+                </Link>
+              </p>
+            ) : null}
           </div>
 
+          {/* Úvodní věta tu schválně není: je v „Jak začít“ přímo nad
+              tlačítkem Zavolat, kde ji caller čte. Dvakrát tentýž text by
+              ho jen nutil porovnávat, jestli se náhodou neliší. */}
           <aside className="space-y-4">
-            <ScriptPanel title="Úvod" text={held.script.opening} />
             <ScriptPanel title="Hodnota / nabídka" text={held.script.value} />
             <ScriptPanel title="Námitky" text={held.script.objections} />
             <ScriptPanel title="Zakončení" text={held.script.closing} />

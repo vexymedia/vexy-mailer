@@ -18,6 +18,7 @@ import {
   formatRatio,
 } from "@/lib/calling";
 import { formatSendDays, minutesToHHMM } from "@/lib/schedule";
+import { getPilotReport, listDisqualificationReasons } from "@/lib/queries/pilot";
 import { PageHeader, Stat, StatusBadge, Table, DateTime } from "@/components/ui";
 import { CampaignControls } from "@/components/campaign-controls";
 import { SequenceEditor, type StepValues } from "@/components/sequence-editor";
@@ -32,6 +33,7 @@ export const dynamic = "force-dynamic";
 
 const TABS = [
   { key: "prehled", label: "Přehled" },
+  { key: "pilot", label: "Výsledky" },
   { key: "kontakty", label: "Kontakty" },
   { key: "sekvence", label: "Sekvence" },
   { key: "volani", label: "Volání" },
@@ -54,6 +56,12 @@ export default async function CampaignDetailPage({
   const [campaign] = await sql<Campaign[]>`select * from campaigns where id = ${id}`;
   if (!campaign) notFound();
 
+  // Čí je tahle kampaň. Bez toho se v systému, kde vedle sebe běží ASN Plus
+  // a vlastní outbound VEXY, nedá poznat, komu se právě odesílá.
+  const [client] = campaign.client_id
+    ? await sql<{ name: string }[]>`select name from clients where id = ${campaign.client_id}`
+    : [];
+
   const stats = (await listCampaignStats()).find((c) => c.id === id);
   const readonly = campaign.status === "active";
 
@@ -63,6 +71,13 @@ export default async function CampaignDetailPage({
         title={campaign.name}
         description={
           <>
+            {client ? (
+              <span className="badge mr-2 bg-zinc-900 text-white ring-zinc-900">{client.name}</span>
+            ) : (
+              <Link href="/klienti" className="badge mr-2 bg-amber-50 text-amber-800 ring-amber-200">
+                bez klienta — zařadit
+              </Link>
+            )}
             <StatusBadge status={campaign.status} />{" "}
             <span className="ml-2">
               {describeSenderPool(stats?.mailbox_names ?? [])} · {formatSendDays(campaign.send_days)}{" "}
@@ -99,7 +114,10 @@ export default async function CampaignDetailPage({
         ))}
       </div>
 
-      {tab === "prehled" ? <OverviewTab campaignId={id} stats={stats} /> : null}
+      {tab === "prehled" ? (
+        <OverviewTab campaignId={id} stats={stats} campaignDailyLimit={campaign.daily_limit} />
+      ) : null}
+      {tab === "pilot" ? <PilotTab campaignId={id} /> : null}
       {tab === "kontakty" ? <ContactsTab campaignId={id} /> : null}
       {tab === "sekvence" ? <SequenceTab campaignId={id} readOnly={readonly} /> : null}
       {tab === "volani" ? <CallingTab campaign={campaign} filter={rawFilter} /> : null}
@@ -112,9 +130,11 @@ export default async function CampaignDetailPage({
 async function OverviewTab({
   campaignId,
   stats,
+  campaignDailyLimit,
 }: {
   campaignId: string;
   stats: Awaited<ReturnType<typeof listCampaignStats>>[number] | undefined;
+  campaignDailyLimit: number;
 }) {
   const readiness = await checkCampaignReadiness(campaignId);
   const replyRate = stats && stats.sent > 0 ? `${((stats.replies / stats.sent) * 100).toFixed(1)} %` : "—";
@@ -123,9 +143,30 @@ async function OverviewTab({
     <div className="space-y-6">
       <Readiness problems={readiness.problems} />
 
+      {/* Dnešní odeslání je provozní otázka číslo jedna: běží to, a kolik
+          ještě dnes odejde? Počítá se stejně jako v odesílači - v časové
+          zóně kampaně a včetně simulovaných odeslání - aby se obrazovka
+          a worker nemohly rozejít. */}
+      <div className="card flex flex-wrap items-baseline justify-between gap-3 p-6">
+        <div>
+          <p className="text-xs text-zinc-500">Odesláno dnes</p>
+          <p className="mt-0.5 text-2xl font-semibold tabular-nums text-zinc-900">
+            {stats?.sent_today ?? 0}{" "}
+            <span className="text-base font-normal text-zinc-400">
+              / {campaignDailyLimit}
+            </span>
+          </p>
+        </div>
+        <p className="text-sm text-zinc-500">
+          {(stats?.sent_today ?? 0) >= campaignDailyLimit
+            ? "Dnešní limit je vyčerpaný, další e-maily odejdou zítra."
+            : `Dnes ještě může odejít ${campaignDailyLimit - (stats?.sent_today ?? 0)} e-mailů.`}
+        </p>
+      </div>
+
       <div className="card grid grid-cols-2 gap-6 p-6 sm:grid-cols-3 lg:grid-cols-6">
         <Stat label="Kontakty" value={stats?.contacts ?? 0} />
-        <Stat label="Odesláno" value={stats?.sent ?? 0} />
+        <Stat label="Odesláno celkem" value={stats?.sent ?? 0} />
         <Stat label="Odpovědi" value={stats?.replies ?? 0} tone={stats?.replies ? "good" : undefined} />
         <Stat label="Míra odpovědí" value={replyRate} />
         <Stat label="Chyby" value={stats?.failed ?? 0} tone={stats?.failed ? "danger" : undefined} />
@@ -525,5 +566,124 @@ async function ActivityTab({ campaignId }: { campaignId: string }) {
         </tr>
       ))}
     </Table>
+  );
+}
+
+/**
+ * Výsledky kampaně tak, jak se o nich mluví s klientem.
+ *
+ * Celý smysl téhle obrazovky je jeden rozdíl: kolik jsme obvolali LIDÍ
+ * proti tomu, kolik jsme udělali POKUSŮ. Jeden kontakt jich má běžně
+ * několik, takže kdyby se to slilo, vypadal by pilot hotovější, než je.
+ */
+async function PilotTab({ campaignId }: { campaignId: string }) {
+  const [report, reasons] = await Promise.all([
+    getPilotReport(campaignId),
+    listDisqualificationReasons(campaignId),
+  ]);
+
+  const pct = (part: number, whole: number) =>
+    whole > 0 ? `${Math.round((part / whole) * 100)} %` : "—";
+
+  return (
+    <div className="space-y-6">
+      <div className="card grid grid-cols-2 gap-6 p-6 sm:grid-cols-4">
+        <Stat label="Kontaktů v kampani" value={report.target_contacts} />
+        <Stat label="Zpracováno" value={report.processed_contacts} />
+        <Stat label="Zbývá obvolat" value={report.remaining_contacts} />
+        <Stat
+          label="Bez telefonu"
+          value={report.unreachable_contacts}
+          tone={report.unreachable_contacts > 0 ? "danger" : undefined}
+        />
+      </div>
+      {/* Bez tohohle to vypadá jako chyba: zpracovaných může být víc než
+          kolik zbývá, protože kontakt s naplánovaným dalším pokusem je
+          obojí - už jsme s ním něco udělali a ještě mu zavoláme. */}
+      <p className="-mt-3 text-xs text-zinc-500">
+        Zpracovaný kontakt má buď konečný výsledek, nebo naplánovaný další krok. Kontakt
+        čekající na další pokus je proto v obou číslech — není to chyba.
+      </p>
+
+      <div>
+        <h2 className="section-title mb-3">Kolik práce jsme odvedli</h2>
+        <div className="card grid grid-cols-2 gap-6 p-6 sm:grid-cols-4">
+          <Stat label="Pokusů o volání" value={report.call_attempts} />
+          <Stat label="Spojených kontaktů" value={report.connected_contacts} />
+          <Stat
+            label="Dovolatelnost"
+            value={pct(report.connected_contacts, report.target_contacts)}
+          />
+          <Stat
+            label="Průměr pokusů na kontakt"
+            value={
+              report.target_contacts > 0
+                ? (report.call_attempts / report.target_contacts).toFixed(1)
+                : "—"
+            }
+          />
+        </div>
+        <p className="mt-2 text-xs text-zinc-500">
+          Pokus je jedno vytočení; spojený kontakt je člověk, se kterým jsme mluvili. Jeden
+          kontakt může mít několik pokusů, proto se tahle dvě čísla nikdy nesčítají.
+        </p>
+      </div>
+
+      <div>
+        <h2 className="section-title mb-3">Co z toho vzniklo</h2>
+        <div className="card grid grid-cols-2 gap-6 p-6 sm:grid-cols-4">
+          <Stat
+            label="Pozitivních konverzací"
+            value={report.positive_conversations}
+            tone={report.positive_conversations > 0 ? "good" : undefined}
+          />
+          <Stat label="Callbacků" value={report.callbacks} />
+          <Stat
+            label="Schůzek"
+            value={report.meetings}
+            tone={report.meetings > 0 ? "good" : undefined}
+          />
+          <Stat label="Vyřazeno" value={report.disqualified} />
+        </div>
+      </div>
+
+      <div>
+        <h2 className="section-title mb-3">Proč jsme přestali</h2>
+        {reasons.length === 0 ? (
+          <p className="card px-6 py-8 text-center text-sm text-zinc-500">
+            Zatím jsme nikoho nevyřadili.
+          </p>
+        ) : (
+          <>
+            <Table
+              head={
+                <tr>
+                  <th className="th">Důvod</th>
+                  <th className="th text-right">Kontaktů</th>
+                  <th className="th text-right">Podíl z vyřazených</th>
+                </tr>
+              }
+            >
+              {reasons.map((reason) => (
+                <tr key={reason.outcome} className="hover:bg-zinc-50">
+                  <td className="td text-sm">{callOutcomeLabel(reason.outcome)}</td>
+                  <td className="td text-right tabular-nums">{reason.contacts}</td>
+                  <td className="td text-right tabular-nums text-zinc-500">
+                    {pct(reason.contacts, report.disqualified)}
+                  </td>
+                </tr>
+              ))}
+            </Table>
+            {/* Bez velikosti vzorku se z pěti hovorů snadno stane "tenhle
+                segment nefunguje". Číslo je tu proto, aby to nešlo přehlédnout. */}
+            <p className="mt-2 text-xs text-zinc-500">
+              Počítá se poslední výsledek na kontakt, ne každý zápis. Vzorek:{" "}
+              {report.disqualified} z {report.target_contacts} kontaktů — u malých čísel
+              z toho nedělejte závěry o celém segmentu.
+            </p>
+          </>
+        )}
+      </div>
+    </div>
   );
 }

@@ -13,6 +13,11 @@ export interface TranscriptionResult {
   text: string;
   language: string | null;
   provider: string;
+  /**
+   * Časové úseky řeči. Používají se k proložení dvou samostatně
+   * přepsaných kanálů do jedné konverzace ve správném pořadí.
+   */
+  segments: { text: string; start: number | null; end: number | null }[];
 }
 
 export interface TranscriptionProvider {
@@ -79,10 +84,33 @@ export const openAiTranscription: TranscriptionProvider = {
         const body = await response.text();
         return { ok: false, error: `Přepis selhal (${response.status}): ${body.slice(0, 200)}` };
       }
-      const data = (await response.json()) as { text?: string; language?: string };
+      const data = (await response.json()) as {
+        text?: string;
+        language?: string;
+        segments?: { text?: string; start?: number; end?: number }[];
+      };
       const text = (data.text ?? "").trim();
       if (!text) return { ok: false, error: "Přepis je prázdný." };
-      return { ok: true, result: { text, language: data.language ?? null, provider: "openai" } };
+
+      const segments = (data.segments ?? [])
+        .map((segment) => ({
+          text: (segment.text ?? "").trim(),
+          start: typeof segment.start === "number" ? segment.start : null,
+          end: typeof segment.end === "number" ? segment.end : null,
+        }))
+        .filter((segment) => segment.text.length > 0);
+
+      return {
+        ok: true,
+        result: {
+          text,
+          language: data.language ?? null,
+          provider: "openai",
+          // Bez časů se dvojice kanálů proložit nedá; zbyde jeden úsek
+          // a konverzace se poskládá alespoň po kanálech.
+          segments: segments.length > 0 ? segments : [{ text, start: null, end: null }],
+        },
+      };
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
@@ -92,7 +120,11 @@ export const openAiTranscription: TranscriptionProvider = {
 const ANALYSIS_SYSTEM_PROMPT = [
   "Jsi asistent obchodníka, který dělá B2B cold outbound.",
   "Dostaneš přepis telefonátu a vrátíš strukturovaná data pro CRM.",
-  "Piš česky. Nic si nevymýšlej: co v přepisu není, nech prázdné nebo null.",
+  "Přepis může být rozdělený podle řečníků: 'Obchodník:' je náš člověk,",
+  "'Prospekt:' je volaná firma. Bolesti, námitky a signály zájmu hledej",
+  "VÝHRADNĚ v tom, co řekl prospekt - co řekl obchodník je nabídka, ne",
+  "potřeba zákazníka. Nikdy nepřičítej větu obchodníka prospektovi.",
+  "Piš česky. Nic si nevymýšlej: co v hovoru nezaznělo, nech prázdné nebo null.",
   "Nepřidávej žádný text mimo JSON.",
 ].join(" ");
 

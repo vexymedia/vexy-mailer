@@ -1,28 +1,39 @@
 import { cookies } from "next/headers";
+import { currentUser } from "./auth";
 
 /**
- * Which caller is at this browser.
+ * Která obchodní identita zapisuje hovory na tomhle prohlížeči.
  *
- * Held server-side in a cookie rather than in localStorage, for two reasons.
- * The page has to know the caller while it renders, because that is when the
- * next prospect is leased and a lease needs an owner; and an outcome must be
- * attributed to whoever is actually signed in at this workstation, not to
- * whatever a form field happens to carry.
+ * Od zavedení uživatelských účtů je odpověď u callera daná přihlášením:
+ * `users.caller_id`. Caller si tedy nevybírá, kdo je - systém to ví,
+ * a proto ani nejde vydávat se za někoho jiného. Klient identitu
+ * neposílá v žádné podobě.
+ *
+ * Cookie zůstává jen pro administrátora, který potřebuje volat pod
+ * konkrétní obchodní identitou (typicky při zkoušení nebo když volá
+ * sám). U callera se ignoruje - i kdyby ji někdo podstrčil.
  */
 export const CALLER_COOKIE = "vexy_caller";
 
 export async function getSelectedCallerId(): Promise<string | null> {
+  const user = await currentUser();
+  if (!user) return null;
+  // Caller: identita z přihlášení. Nic jiného se nebere v úvahu.
+  if (user.role === "caller") return user.caller_id;
+
   const store = await cookies();
   return store.get(CALLER_COOKIE)?.value ?? null;
 }
 
+/** Jen pro administrátora. U callera je identita daná a měnit ji nejde. */
 export async function setSelectedCallerId(callerId: string): Promise<void> {
   const store = await cookies();
   store.set(CALLER_COOKIE, callerId, {
     httpOnly: true,
     sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
     path: "/",
-    // A working day, so a caller picks themselves once per shift.
+    // Pracovní den, ať se admin nemusí rozhodovat po každém hovoru.
     maxAge: 60 * 60 * 12,
   });
 }

@@ -18,6 +18,10 @@ import { CallButton } from "@/components/call/call-button";
 import { isTwilioConfigured } from "@/lib/telephony/twilio";
 import { listCallsForCompany } from "@/lib/queries/calls";
 import { CallHistory } from "@/components/call/call-history";
+import { ContactFormToggle } from "@/components/contact-form";
+import { ActivityTimeline } from "@/components/activity-timeline";
+import { requireUser } from "@/lib/auth";
+import { OutreachForm } from "@/components/outreach-form";
 
 export const dynamic = "force-dynamic";
 
@@ -31,7 +35,8 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
   const company = await getCompany(id);
   if (!company) notFound();
 
-  const [contacts, timeline, team, nextStep, callRecords] = await Promise.all([
+  const [user, contacts, timeline, team, nextStep, callRecords] = await Promise.all([
+    requireUser(),
     listCompanyContacts(id),
     getCompanyTimeline(id),
     listCallers({ activeOnly: true }),
@@ -40,10 +45,18 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
   ]);
   // Jestli jde volat z prohlížeče, ví server. Klient si to nevymýšlí.
   const browserCalling = isTwilioConfigured();
+  const isAdmin = user.role === "admin";
 
   // Primární CTA jen tam, kde volání skutečně dává smysl. Zavádějící
   // "Zavolat" u člověka na do-not-call listu je horší než žádné tlačítko.
-  const callable = contacts.find((c) => c.callable && c.phone);
+  //
+  // Vytočit ale jde každý kontakt s číslem, který není na seznamu
+  // „nevolat“ - kampaň rozhoduje jen o tom, jestli hovor posune i
+  // e-mailovou kadenci a jestli má smysl otevírat frontu. Kdyby se hlavička
+  // ptala na `callable`, chyběla by u firmy mimo kampaň, zatímco tlačítko
+  // u kontaktu o řádek níž by bylo aktivní.
+  const queued = contacts.find((c) => c.callable && c.phone);
+  const dialable = queued ?? contacts.find((c) => c.phone && !c.do_not_call);
   const openContacts = contacts
     .filter((c) => c.campaign_contact_id && !c.do_not_call && c.call_status &&
                    !["meeting_booked", "won", "lost", "do_not_call", "max_attempts"].includes(c.call_status))
@@ -74,15 +87,15 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
         }
         actions={
           <>
-            {callable?.phone ? (
+            {dialable?.phone ? (
               <CallButton
-                phone={callable.phone}
-                contactId={callable.id}
-                campaignContactId={callable.campaign_contact_id ?? undefined}
+                phone={dialable.phone}
+                contactId={dialable.id}
+                campaignContactId={dialable.campaign_contact_id ?? undefined}
                 browserCalling={browserCalling}
               />
             ) : null}
-            {callable ? (
+            {queued && isAdmin ? (
               <Link href="/osloveni" className="btn-secondary">Otevřít v oslovení</Link>
             ) : null}
             <Link href="/firmy" className="btn-secondary">Zpět na firmy</Link>
@@ -131,7 +144,7 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
               <p className="mt-1 text-xs text-amber-800">
                 Firmu stále řešíme, ale nikdo nemá naplánováno, co se stane dál.
               </p>
-              <ScheduleNextStep contacts={openContacts} />
+              <ScheduleNextStep contacts={openContacts} hasCallableContact={Boolean(dialable)} />
             </>
           ) : (
             <p className="mt-2 text-base font-semibold text-zinc-500">Uzavřeno — nic dalšího neplánujeme</p>
@@ -145,10 +158,17 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)]">
         <div className="space-y-6">
           <section>
-            <h2 className="section-title mb-3">Koho kontaktovat</h2>
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+              <h2 className="section-title">Koho kontaktovat</h2>
+              <ContactFormToggle
+                companyId={company.id}
+                label="Přidat kontakt"
+                className="btn-secondary"
+              />
+            </div>
             {contacts.length === 0 ? (
               <p className="card px-5 py-8 text-center text-sm text-zinc-500">
-                U této firmy zatím není žádný kontakt.
+                U této firmy zatím není žádný kontakt. Přidejte ho tlačítkem nahoře.
               </p>
             ) : (
               <ul className="card divide-y divide-zinc-100">
@@ -202,11 +222,25 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
                               Historie
                             </Link>
                           ) : null}
+                          <ContactFormToggle
+                            companyId={company.id}
+                            className="btn-secondary !py-1.5 text-sm"
+                            label="Upravit"
+                            contact={{
+                              id: contact.id,
+                              firstName: contact.first_name,
+                              lastName: contact.last_name,
+                              position: contact.position,
+                              email: contact.email,
+                              phone: contact.phone,
+                              isPrimary: contact.is_primary,
+                            }}
+                          />
                         </div>
                       </div>
 
                       <div className="mt-2 flex flex-wrap gap-1.5">
-                        {index === 0 ? (
+                        {contact.is_primary || index === 0 ? (
                           <span className="badge bg-zinc-100 text-zinc-700 ring-zinc-200">hlavní kontakt</span>
                         ) : null}
                         {contact.call_status ? (
@@ -239,6 +273,46 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
                           Tento člověk je na seznamu „nevolat“. Volat mu nelze a nedostane se do fronty.
                         </p>
                       ) : null}
+
+                      {/* Co prospekt dostal. Caller to čte v Oslovení; vyplňuje
+                          to ten, kdo oslovení připravuje, tedy administrátor. */}
+                      <div className="mt-3">
+                        {contact.loom_url ? (
+                          <p className="mb-2 text-xs text-zinc-500">
+                            Loom:{" "}
+                            <a
+                              href={contact.loom_url}
+                              target="_blank"
+                              rel="noreferrer noopener"
+                              className="text-zinc-700 underline underline-offset-2"
+                            >
+                              {contact.loom_title ?? "video"}
+                            </a>
+                            {contact.loom_sent_at ? (
+                              <> · odesláno <DateTime value={contact.loom_sent_at} /></>
+                            ) : null}
+                          </p>
+                        ) : null}
+                        {isAdmin ? (
+                        <OutreachForm
+                          contactId={contact.id}
+                          companyId={company.id}
+                          contactLabel={
+                            [contact.first_name, contact.last_name].filter(Boolean).join(" ") ||
+                            contact.email
+                          }
+                          loomUrl={contact.loom_url ?? ""}
+                          loomTitle={contact.loom_title ?? ""}
+                          loomSentAt={
+                            contact.loom_sent_at
+                              ? new Date(contact.loom_sent_at).toISOString().slice(0, 10)
+                              : ""
+                          }
+                          loomNote={contact.loom_note ?? ""}
+                          opener={contact.call_opener ?? ""}
+                        />
+                        ) : null}
+                      </div>
                     </li>
                   );
                 })}
@@ -249,40 +323,13 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
           <CallHistory calls={callRecords} />
 
           <section>
-            <h2 className="section-title mb-3">Co se stalo</h2>
+            <h2 className="section-title mb-3">Historie aktivit</h2>
             {timeline.length === 0 ? (
               <p className="card px-5 py-8 text-center text-sm text-zinc-500">
                 S touto firmou jsme zatím nekomunikovali.
               </p>
             ) : (
-              <ol className="space-y-2">
-                {timeline.map((entry) => (
-                  <li
-                    key={`${entry.kind}-${entry.id}`}
-                    className={`card border-l-4 p-4 ${
-                      entry.kind === "call"
-                        ? "border-l-sky-500"
-                        : entry.kind === "reply"
-                          ? "border-l-emerald-500"
-                          : "border-l-zinc-300"
-                    }`}
-                  >
-                    <div className="mb-1 flex flex-wrap items-baseline justify-between gap-2">
-                      <span className="text-sm font-medium text-zinc-900">
-                        {entry.kind === "call" ? "Hovor" : entry.kind === "reply" ? "Odpověď" : "E-mail"}
-                        <span className="ml-2 font-normal text-zinc-700">
-                          {entry.kind === "call" ? callOutcomeLabel(entry.title) : entry.title}
-                        </span>
-                      </span>
-                      <span className="text-xs text-zinc-500"><DateTime value={entry.occurred_at} /></span>
-                    </div>
-                    {entry.detail ? <p className="text-xs text-zinc-500">{entry.detail}</p> : null}
-                    {entry.note ? (
-                      <p className="mt-2 whitespace-pre-wrap text-sm text-zinc-700">{entry.note}</p>
-                    ) : null}
-                  </li>
-                ))}
-              </ol>
+              <ActivityTimeline entries={timeline} />
             )}
           </section>
         </div>

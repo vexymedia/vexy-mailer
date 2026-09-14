@@ -1,6 +1,7 @@
 import { sql } from "../db";
+import { toE164 } from "../telephony/call-state";
 import { logActivity } from "../activity";
-import type { ParsedContactRow } from "../csv";
+import { isValidEmail, normaliseEmail, type ParsedContactRow } from "../csv";
 import { schedulePendingContacts } from "./campaigns";
 
 export interface ImportResult {
@@ -210,4 +211,170 @@ export async function suppressEmail(email: string, reason: string, note?: string
 export async function unsuppressEmail(email: string): Promise<void> {
   await sql`delete from suppression_list where email = ${email.trim().toLowerCase()}`;
   await logActivity({ action: "Zrušeno nekontaktovat", detail: email.trim().toLowerCase(), level: "warn" });
+}
+
+// ------------------------------------------------------ ruční zakládání
+
+export type ContactWriteResult =
+  | { ok: true; id: string }
+  | { ok: false; error: "duplicate" | "invalid_email" | "invalid_phone" | "invalid_url" | "not_found" };
+
+export interface ContactInput {
+  firstName?: string | null;
+  lastName?: string | null;
+  position?: string | null;
+  email: string;
+  phone?: string | null;
+  isPrimary?: boolean;
+}
+
+/**
+ * Co prospekt dostal a čím na to navázat.
+ *
+ * Odděleno od `ContactInput` schválně: tohle needituje ten, kdo zakládá
+ * kontakt, ale ten, kdo připravuje oslovení. Kdyby to byla jedna
+ * struktura, uložení kontaktu bez Loomu by Loom smazalo.
+ */
+export interface OutreachInput {
+  loomUrl?: string | null;
+  loomTitle?: string | null;
+  loomSentAt?: Date | null;
+  loomNote?: string | null;
+  opener?: string | null;
+}
+
+/** Jen http(s). Bez tohohle by šlo do odkazu propašovat javascript:. */
+function safeUrl(value: string | null | undefined): string | null | "invalid" {
+  const raw = value?.trim();
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return "invalid";
+    return url.toString();
+  } catch {
+    return "invalid";
+  }
+}
+
+/**
+ * Uloží kontext oslovení ke kontaktu.
+ *
+ * Prázdné pole znamená "smazat" - připravující člověk musí mít možnost
+ * špatný odkaz odebrat, ne s ním být navždycky.
+ */
+export async function saveOutreachContext(
+  contactId: string,
+  input: OutreachInput,
+): Promise<ContactWriteResult> {
+  const url = safeUrl(input.loomUrl);
+  if (url === "invalid") return { ok: false, error: "invalid_url" };
+
+  const [current] = await sql<{ id: string }[]>`select id from contacts where id = ${contactId}`;
+  if (!current) return { ok: false, error: "not_found" };
+
+  await sql`
+    update contacts
+       set loom_url = ${url},
+           loom_title = ${input.loomTitle?.trim() || null},
+           -- Bez odkazu nemá datum odeslání co znamenat.
+           loom_sent_at = ${url ? (input.loomSentAt ?? null) : null},
+           loom_note = ${input.loomNote?.trim() || null},
+           call_opener = ${input.opener?.trim() || null},
+           updated_at = now()
+     where id = ${contactId}
+  `;
+  await logActivity({ action: "Kontext oslovení uložen", detail: url ?? "bez videa", contactId });
+  return { ok: true, id: contactId };
+}
+
+/**
+ * Telefon se ukládá jen ve tvaru, který jde vytočit.
+ *
+ * České číslo se běžně píše jako 737485738 nebo 737 485 738; obojí musí
+ * projít jako +420737485738. Co se na telefonní číslo nedá převést, se
+ * neuloží vůbec - polovičatě uložené číslo by se ukázalo až ve chvíli,
+ * kdy na něj někdo zkusí zavolat.
+ */
+function normalisedPhone(raw: string | null | undefined): string | null | "invalid" {
+  const value = raw?.trim();
+  if (!value) return null;
+  return toE164(value) ?? "invalid";
+}
+
+export async function createContact(
+  companyId: string,
+  input: ContactInput,
+): Promise<ContactWriteResult> {
+  const email = normaliseEmail(input.email ?? "");
+  if (!email || !isValidEmail(email)) return { ok: false, error: "invalid_email" };
+
+  const phone = normalisedPhone(input.phone);
+  if (phone === "invalid") return { ok: false, error: "invalid_phone" };
+
+  const [company] = await sql<{ name: string }[]>`
+    select name from companies where id = ${companyId}
+  `;
+  if (!company) return { ok: false, error: "not_found" };
+
+  const [existing] = await sql<{ id: string }[]>`select id from contacts where email = ${email}`;
+  if (existing) return { ok: false, error: "duplicate" };
+
+  // `company` (text) je pořád zdroj pravdy pro import a trigger z něj
+  // dopočítá company_id, takže se sem píše jméno firmy, ne jen id.
+  const [row] = await sql<{ id: string }[]>`
+    insert into contacts (email, first_name, last_name, position, phone, company, is_primary)
+    values (${email}, ${input.firstName?.trim() || null}, ${input.lastName?.trim() || null},
+            ${input.position?.trim() || null}, ${phone}, ${company.name},
+            ${input.isPrimary ?? false})
+    returning id
+  `;
+  if (input.isPrimary) await makePrimary(companyId, row.id);
+
+  await logActivity({ action: "Kontakt vytvořen", detail: email, contactId: row.id });
+  return { ok: true, id: row.id };
+}
+
+export async function updateContact(
+  contactId: string,
+  input: ContactInput,
+): Promise<ContactWriteResult> {
+  const email = normaliseEmail(input.email ?? "");
+  if (!email || !isValidEmail(email)) return { ok: false, error: "invalid_email" };
+
+  const phone = normalisedPhone(input.phone);
+  if (phone === "invalid") return { ok: false, error: "invalid_phone" };
+
+  const [current] = await sql<{ company_id: string | null }[]>`
+    select company_id from contacts where id = ${contactId}
+  `;
+  if (!current) return { ok: false, error: "not_found" };
+
+  const [clash] = await sql<{ id: string }[]>`
+    select id from contacts where email = ${email} and id <> ${contactId}
+  `;
+  if (clash) return { ok: false, error: "duplicate" };
+
+  await sql`
+    update contacts
+       set email = ${email},
+           first_name = ${input.firstName?.trim() || null},
+           last_name = ${input.lastName?.trim() || null},
+           position = ${input.position?.trim() || null},
+           phone = ${phone},
+           is_primary = ${input.isPrimary ?? false},
+           updated_at = now()
+     where id = ${contactId}
+  `;
+  if (input.isPrimary && current.company_id) await makePrimary(current.company_id, contactId);
+
+  await logActivity({ action: "Kontakt upraven", detail: email, contactId });
+  return { ok: true, id: contactId };
+}
+
+/** Hlavní kontakt je ve firmě jen jeden. */
+async function makePrimary(companyId: string, contactId: string): Promise<void> {
+  await sql`
+    update contacts set is_primary = (id = ${contactId}), updated_at = now()
+     where company_id = ${companyId}
+  `;
 }

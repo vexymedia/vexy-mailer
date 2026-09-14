@@ -16,8 +16,17 @@ export const env = {
   get encryptionKey() {
     return required("ENCRYPTION_KEY");
   },
-  get appPassword() {
-    return required("APP_PASSWORD");
+  /**
+   * Staré sdílené heslo.
+   *
+   * Od zavedení uživatelských účtů se k přihlášení NEPOUŽÍVÁ. Zůstává tu
+   * jen proto, aby běžící nasazení s nastaveným APP_PASSWORD nespadlo -
+   * proměnnou jde po migraci bez náhrady smazat.
+   *
+   * @deprecated Přihlašuje se e-mailem a heslem proti tabulce `users`.
+   */
+  get appPassword(): string | null {
+    return process.env.APP_PASSWORD ?? null;
   },
   get sessionSecret() {
     return required("SESSION_SECRET");

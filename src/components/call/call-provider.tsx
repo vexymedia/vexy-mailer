@@ -12,6 +12,7 @@ import {
 } from "react";
 import type { Call, Device } from "@twilio/voice-sdk";
 import { callErrorCode, callErrorMessage } from "@/lib/telephony/call-state";
+import type { LeadContextView } from "@/lib/lead-context-view";
 
 /**
  * Stav hovoru na úrovni aplikace.
@@ -59,6 +60,8 @@ export interface CallTarget {
 
 export interface CallBriefing {
   position: string | null;
+  /** Loom, poslední e-maily, proč voláme teď a čím začít. */
+  context?: LeadContextView;
   email: string | null;
   reason: string | null;
   priorityLabel: string | null;
@@ -87,6 +90,12 @@ interface CallContextValue {
   error: string | null;
   /** Kód od providera. Do UI se dává jen jako drobná stopa pro podporu. */
   errorCode: number | null;
+  /**
+   * Krátký výpadek spojení, který SDK zkouší samo obnovit. Není to chyba -
+   * hovor pořád běží - ale caller to musí vidět, protože do té doby mluví
+   * do prázdna.
+   */
+  reconnecting: boolean;
   muted: boolean;
   /** Nastavené Twilio? Null = ještě se nezjišťovalo. */
   configured: boolean | null;
@@ -142,6 +151,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null);
   const [errorCode, setErrorCode] = useState<number | null>(null);
   const [muted, setMuted] = useState(false);
+  const [reconnecting, setReconnecting] = useState(false);
   // Poslední cíl, aby šlo po neúspěchu zkusit znovu bez hledání kontaktu.
   const lastTarget = useRef<{ contactId?: string; campaignContactId?: string } | null>(null);
   // Zámek proti dvojímu spuštění. Musí to být ref, ne stav: dvě kliknutí
@@ -222,6 +232,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
       setError(null);
       setErrorCode(null);
       setMuted(false);
+      setReconnecting(false);
       setState("permission");
 
       const fail = (message?: string) => {
@@ -262,17 +273,20 @@ export function CallProvider({ children }: { children: ReactNode }) {
 
         connection.on("ringing", () => setState("ringing"));
         // Krátký výpadek sítě SDK řeší samo. Caller ale musí vědět, že
-        // druhá strana ho teď neslyší - jinak mluví do prázdna.
-        connection.on("reconnecting", () => {
-          setError("Spojení vypadlo, obnovuji… Druhá strana vás teď nemusí slyšet.");
-        });
-        connection.on("reconnected", () => setError(null));
+        // druhá strana ho teď neslyší - jinak mluví do prázdna. Vlastní
+        // příznak, ne chybová hláška: chyba je červená a zůstává viset i
+        // po zavěšení, takže by se u zapisování výsledku tvářila jako
+        // něco, co se pokazilo.
+        connection.on("reconnecting", () => setReconnecting(true));
+        connection.on("reconnected", () => setReconnecting(false));
         connection.on("accept", () => {
+          setReconnecting(false);
           setState("active");
           setCall((current) => (current ? { ...current, answeredAt: Date.now() } : current));
         });
         connection.on("disconnect", () => {
           connectionRef.current = null;
+          setReconnecting(false);
           setState("ended");
           setCall((current) =>
             current
@@ -287,14 +301,17 @@ export function CallProvider({ children }: { children: ReactNode }) {
         });
         connection.on("cancel", () => {
           connectionRef.current = null;
+          setReconnecting(false);
           setState("ended");
         });
         connection.on("reject", () => {
           connectionRef.current = null;
+          setReconnecting(false);
           setState("ended");
         });
         connection.on("error", (callError: unknown) => {
           connectionRef.current = null;
+          setReconnecting(false);
           setError(callErrorMessage(callError));
           setErrorCode(callErrorCode(callError));
           setState("failed");
@@ -343,6 +360,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
     setCall(null);
     setState("idle");
     setError(null);
+    setReconnecting(false);
     setCockpitOpen(false);
   }, []);
 
@@ -352,6 +370,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
       call,
       error,
       errorCode,
+      reconnecting,
       muted,
       configured,
       missingEnv,
@@ -365,7 +384,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
       retry,
       dismiss,
     }),
-    [state, call, error, errorCode, muted, configured, missingEnv, cockpitOpen, start, hangUp, toggleMute, sendDigit, retry, dismiss],
+    [state, call, error, errorCode, reconnecting, muted, configured, missingEnv, cockpitOpen, start, hangUp, toggleMute, sendDigit, retry, dismiss],
   );
 
   return <CallStateContext.Provider value={value}>{children}</CallStateContext.Provider>;

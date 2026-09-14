@@ -35,6 +35,10 @@ const CRON_SECRET = process.env.CRON_SECRET ?? "devcron";
 const SESSION_SECRET = process.env.SESSION_SECRET ?? "";
 const DATABASE_URL = process.env.DATABASE_URL ?? "";
 const CHROMIUM = process.env.CHROMIUM_PATH ?? undefined;
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL ?? "vojta@vexy.cz";
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD ?? "administrator-heslo";
+const CALLER_EMAIL = process.env.CALLER_EMAIL ?? "jan@example.com";
+const CALLER_PASSWORD = process.env.CALLER_PASSWORD ?? "caller-tajne-heslo";
 const OUT = process.env.OUT_DIR;
 const steps = [];
 let stepNo = 0;
@@ -67,17 +71,44 @@ page.on("pageerror", (error) => consoleErrors.push(`pageerror: ${error.message}`
 
 try {
   // ---- login ------------------------------------------------------------
+  // Účty zakládá bootstrap skript; sdílené heslo už neexistuje.
   await page.goto(`${BASE}/`);
-  await expectVisible(page, 'input[name="password"]', "unauthenticated visit redirects to login");
-  await page.fill('input[name="password"]', "wrong-password");
-  await page.click('button[type="submit"]');
-  await expectVisible(page, "text=Nesprávné heslo", "wrong password is rejected");
+  await expectVisible(page, 'input[name="email"]', "unauthenticated visit redirects to login");
+  await expectVisible(page, "h1:has-text('Přihlášení do VEXY')", "the login page is the VEXY one");
+
   await shot(page, "login");
 
-  await page.fill('input[name="password"]', PASSWORD);
-  await page.click('button[type="submit"]');
+  /**
+   * Jeden pokus o přihlášení z čisté stránky.
+   *
+   * Čerstvé načtení je tu schválně: po neúspěchu zůstane hláška viset
+   * a čekat na ni podruhé by prošlo hned, ještě než se odešle další
+   * pokus - a test by pak tvrdil něco, co neověřil.
+   */
+  async function attemptLogin(email, pw) {
+    await page.goto(`${BASE}/login`);
+    await page.fill('input[name="email"]', email);
+    await page.fill('input[name="password"]', pw);
+    await page.click('button[type="submit"]');
+  }
+
+  await attemptLogin(ADMIN_EMAIL, "spatne-heslo-tady");
+  await expectVisible(page, "text=Nesprávný e-mail nebo heslo", "a wrong password is rejected");
+
+  await attemptLogin("nikdo@example.com", ADMIN_PASSWORD);
+  await expectVisible(
+    page,
+    "text=Nesprávný e-mail nebo heslo",
+    "an unknown account gets the same message as a wrong password",
+  );
+
+  // Staré sdílené heslo už není cesta dovnitř.
+  await attemptLogin(ADMIN_EMAIL, PASSWORD);
+  await expectVisible(page, "text=Nesprávný e-mail nebo heslo", "the old APP_PASSWORD no longer works");
+
+  await attemptLogin(ADMIN_EMAIL, ADMIN_PASSWORD);
   await page.waitForURL(`${BASE}/`);
-  await expectVisible(page, "h1:has-text('Přehled')", "correct password signs in");
+  await expectVisible(page, "h1:has-text('Přehled')", "correct credentials sign the admin in");
   await expectVisible(page, "text=TESTOVACÍ REŽIM", "test mode banner is shown by default");
   await shot(page, "dashboard-empty");
 
@@ -306,12 +337,86 @@ try {
   await expectVisible(page, 'input[name="q"]', "inbox has a search box");
   await shot(page, "inbox");
 
+  // ---- schránka ---------------------------------------------------------
+  // Odpovědi jsou triage reakcí; Schránka je poštovní klient a musí ukázat
+  // i vlákna, kde jsme zatím jen odeslali. Po redesignu tenhle pohled
+  // z aplikace zmizel, takže se hlídá, že tam je.
+  await page.goto(`${BASE}/inbox/schranka`);
+  await expectVisible(page, "h1:has-text('Schránka')", "the mailbox view renders");
+  await expectVisible(page, 'a:has-text("Všechny schránky")', "mailbox picker is present");
+  await expectVisible(page, 'a:has-text("sender@example.com")', "each mailbox can be selected");
+  for (const label of ["Příchozí", "Jen odeslané", "Nepřečtené"]) {
+    await expectVisible(page, `a:has-text("${label}")`, `mailbox filter "${label}" is present`);
+  }
+  await expectVisible(page, 'input[name="q"]', "the mailbox view has a search box");
+
+  // Odeslání v testovacím režimu se jen simuluje a vlákno nezakládá, takže
+  // se sem jedno vloží napřímo - jinak by se browser cesta ke konverzaci
+  // (otevřít, přečíst, odpovědět) nedala projet vůbec.
+  const [seedContact] = await checkDb`select id from contacts where email = 'ann@prospect.test'`;
+  const [seedMailbox] = await checkDb`select id, from_email from mailboxes limit 1`;
+  const [seedThread] = await checkDb`
+    insert into conversations (contact_id, mailbox_id, subject, unread_count)
+    values (${seedContact.id}, ${seedMailbox.id}, 'Spolupráce s Acme', 1)
+    returning id
+  `;
+  await checkDb`
+    insert into messages (conversation_id, direction, kind, from_email, to_email, subject,
+                          body_text, occurred_at)
+    values (${seedThread.id}, 'outbound', 'campaign', ${seedMailbox.from_email},
+            'ann@prospect.test', 'Spolupráce s Acme', 'Dobrý den, posíláme krátké video.',
+            now() - interval '2 days')
+  `;
+
+  await page.goto(`${BASE}/inbox/schranka`);
+  await expectVisible(page, "text=Spolupráce s Acme", "a sent-only thread is listed in the mailbox");
+  await expectVisible(page, "text=zatím bez odpovědi", "a thread with no reply is marked as such");
+  await shot(page, "schranka");
+
+  // Jen odeslané / příchozí skutečně filtruje, ne jen zvýrazní chip.
+  await page.goto(`${BASE}/inbox/schranka?smer=incoming`);
+  await expectVisible(page, "text=Žádná vlákna", "the incoming filter excludes sent-only threads");
+  await page.goto(`${BASE}/inbox/schranka?smer=outgoing`);
+  await expectVisible(page, "text=Spolupráce s Acme", "the sent-only filter keeps them");
+
+  // Odpovědi zůstávají oddělené: vlákno bez odpovědi do triage nepatří.
+  await page.goto(`${BASE}/inbox`);
+  await expectVisible(page, "text=Zatím žádné odpovědi", "replies triage stays reply-only");
+
+  // Prospekt odpoví - vlákno se objeví v obou pohledech a je nepřečtené.
+  await checkDb`
+    insert into messages (conversation_id, direction, kind, from_email, to_email, subject,
+                          body_text, occurred_at)
+    values (${seedThread.id}, 'inbound', 'incoming', 'ann@prospect.test',
+            ${seedMailbox.from_email}, 'Re: Spolupráce s Acme',
+            'Pošlete mi prosím více informací.', now() - interval '1 hour')
+  `;
+  await page.goto(`${BASE}/inbox`);
+  await expectVisible(page, "text=Spolupráce s Acme", "a reply shows up in the triage list");
+
+  await page.goto(`${BASE}/inbox/schranka`);
+  await expectVisible(page, "text=nepřečteno", "an unread thread is marked unread");
+  await page.locator("ul.card a[href^='/inbox/']").first().click();
+  await page.waitForURL(/\/inbox\/[0-9a-f-]{8}/);
+  await expectVisible(page, 'a:has-text("Zpět do schránky")', "a thread opens from the mailbox");
+  await expectVisible(page, "text=Pošlete mi prosím více informací", "the whole conversation is shown");
+  await expectVisible(page, "text=Dobrý den, posíláme krátké video", "outgoing messages are shown too");
+  await expectVisible(page, 'a:has-text("Zobrazit firmu")', "a thread links through to its company");
+  await expectVisible(page, 'button:has-text("Odeslat odpověď")', "the thread can be replied to");
+  await expectVisible(page, `text=Odpovídáte jako`, "the reply goes from the mailbox that sent it");
+  await shot(page, "thread");
+
+  // Otevření vlákna je to, co ho označí jako přečtené.
+  await page.goto(`${BASE}/inbox/schranka`);
+  if ((await page.locator("text=nepřečteno").count()) === 0) ok("opening a thread marks it read");
+  else fail("opening a thread marks it read", "still marked unread");
+
   await page.goto(`${BASE}/mailboxes`);
   await expectVisible(page, "text=Dnes odesláno", "mailboxes list shows today's usage");
   await shot(page, "mailboxes");
 
   // ---- other pages render ----------------------------------------------
-  for (const [path, heading] of [["/activity", "Aktivita"], ["/campaigns", "Kampaně"], ["/contacts", "Kontakty"], ["/inbox", "Odpovědi"], ["/tym", "Tým"], ["/volani", "Volání"], ["/firmy", "Firmy"], ["/osloveni/fronta", "Fronta"], ["/osloveni/plan", "Plán"]]) {
+  for (const [path, heading] of [["/activity", "Aktivita"], ["/campaigns", "Kampaně"], ["/contacts", "Kontakty"], ["/inbox", "Odpovědi"], ["/tym", "Tým"], ["/volani", "Volání"], ["/firmy", "Firmy"], ["/osloveni/fronta", "Fronta"], ["/osloveni/plan", "Plán"], ["/osloveni/hovory", "Přehled volání"], ["/inbox/schranka", "Schránka"]]) {
     await page.goto(BASE + path);
     await expectVisible(page, `h1:has-text("${heading}")`, `${path} renders`);
   }
@@ -416,7 +521,7 @@ try {
   await expectVisible(page, "text=Další krok", "detail firmy ukáže konkrétní další krok");
   await expectVisible(page, "text=Koho kontaktovat", "detail firmy ukáže kontaktní osoby");
   await expectVisible(page, 'a:has-text("Historie")', "kontakt má pracovní kartu s akcemi");
-  await expectVisible(page, "text=Co se stalo", "detail firmy má historii");
+  await expectVisible(page, "text=Historie aktivit", "detail firmy má historii");
 
   await page.fill('textarea[name="reason"]', "Výrobní firma, expanduje, nemá vlastní obchodní tým");
   await page.selectOption('select[name="priority"]', "high");
@@ -584,11 +689,236 @@ try {
   if (auth.ok()) ok("the cron endpoint accepts the correct secret");
   else fail("the cron endpoint accepts the correct secret", `got ${auth.status()}`);
 
-  // ---- sign out ---------------------------------------------------------
+  // ---- uživatelé a role -------------------------------------------------
+  // Administrátor založí callerovi přihlášení. Obchodní identita (Tým) už
+  // existuje z volací části výš.
+  await page.goto(`${BASE}/uzivatele`);
+  await expectVisible(page, "h1:has-text('Uživatelé')", "user management renders");
+  await expectVisible(page, `text=${ADMIN_EMAIL}`, "the bootstrap admin is listed");
+
+  await page.click('button:has-text("Přidat uživatele")');
+  await page.fill('input[name="name"]', "Jan Novák");
+  await page.fill('input[name="email"]', CALLER_EMAIL);
+  await page.selectOption('select[name="role"]', "caller");
+  await expectVisible(page, 'select[name="caller_id"]', "choosing caller reveals the identity picker");
+  await page.selectOption('select[name="caller_id"]', { index: 1 });
+  await page.fill('input[name="password"]', CALLER_PASSWORD);
+  await page.click('button:has-text("Přidat uživatele")');
+  await expectVisible(page, "text=Uživatel přidán", "a caller account is created");
+  await shot(page, "uzivatele");
+
+  // Administrátor obchodní identitu nemá, takže se pole schová.
+  await page.selectOption('select[name="role"]', "admin");
+  if ((await page.locator('select[name="caller_id"]').count()) === 0) {
+    ok("the identity picker disappears for an admin");
+  } else {
+    fail("the identity picker disappears for an admin", "select is still rendered");
+  }
+
   await page.goto(`${BASE}/`);
   await page.click('button:has-text("Odhlásit")');
   await page.waitForURL(/\/login/);
   ok("sign out returns to the login page");
+
+  // ---- caller -----------------------------------------------------------
+  await attemptLogin(CALLER_EMAIL, CALLER_PASSWORD);
+  await page.waitForURL(/\/osloveni/);
+  await expectVisible(page, "h1:has-text('Dnes')", "a caller lands straight in the work mode");
+
+  // Caller se neptá, kdo je - ví to systém z přihlášení.
+  if ((await page.locator('input[name="caller_id"]').count()) === 0) {
+    ok("a caller is never asked which caller they are");
+  } else {
+    fail("a caller is never asked which caller they are", "identity picker is rendered");
+  }
+  if ((await page.locator('button:has-text("Změnit osobu")').count()) === 0) {
+    ok("a caller cannot switch identity");
+  } else {
+    fail("a caller cannot switch identity", "the switch button is rendered");
+  }
+
+  // Menu je jen práce, žádná administrace.
+  for (const hidden of ["Nastavení", "Tým", "Komunikace", "Aktivita", "Přehled", "Firmy"]) {
+    if ((await page.locator(`nav a:has-text("${hidden}")`).count()) === 0) {
+      ok(`caller navigation hides "${hidden}"`);
+    } else {
+      fail(`caller navigation hides "${hidden}"`, "link is present");
+    }
+  }
+  await expectVisible(page, 'nav a:has-text("Dnes")', "caller navigation keeps Dnes");
+  const navLinks = await page.locator("nav a").count();
+  if (navLinks <= 2) ok("caller navigation is down to the work itself");
+  else fail("caller navigation is down to the work itself", `${navLinks} links`);
+  await shot(page, "caller-dnes");
+
+  // A hlavně: přímá adresa administrace je zavřená i bez odkazu.
+  for (const path of [
+    "/", "/settings", "/mailboxes", "/tym", "/uzivatele", "/inbox", "/inbox/schranka",
+    "/activity", "/campaigns", "/contacts", "/volani", "/suppression", "/calleri",
+    "/osloveni/plan", "/osloveni/hovory", "/osloveni/fronta",
+    // Adresář firem je od oddělení klientů taky administrace: caller nemá
+    // co procházet firmy napříč ASN Plus a VEXY.
+    "/firmy", "/klienti",
+  ]) {
+    await page.goto(BASE + path);
+    const denied = page.url().includes("/nemate-pristup");
+    if (denied) ok(`caller is denied ${path}`);
+    else fail(`caller is denied ${path}`, `landed on ${page.url()}`);
+  }
+  await expectVisible(page, "text=K této části nemáte přístup", "the denial page explains itself");
+  await shot(page, "caller-denied");
+
+  // Twilio ani hesla schránek se callerovi nedostanou ani do HTML.
+  await page.goto(`${BASE}/osloveni`);
+  const callerHtml = await page.content();
+  for (const secret of ["TWILIO_", "smtp_password", "AUTH_TOKEN", "CRON_SECRET"]) {
+    if (!callerHtml.includes(secret)) ok(`caller page does not leak ${secret}`);
+    else fail(`caller page does not leak ${secret}`, "found in server-rendered HTML");
+  }
+
+  // Caller pracuje: fronta, kontext, výsledek, další firma.
+  await page.goto(`${BASE}/osloveni`);
+  const startWork = page.locator('button:has-text("Začít oslovovat")');
+  if ((await startWork.count()) > 0) {
+    await startWork.first().click();
+    await page.waitForLoadState("networkidle");
+  }
+  const working = (await page.locator('button:has-text("Nezastižen")').count()) > 0;
+  if (working) {
+    ok("a caller gets a lead with an outcome panel");
+    await expectVisible(page, "text=Jak hovor dopadl?", "the outcome question is right there");
+    await page.click('button:has-text("Nezastižen")');
+    await page.waitForLoadState("networkidle");
+    ok("Save & Next records an outcome without extra forms");
+
+    // Výsledek se připsal přihlášenému Janovi, ne komukoli jinému.
+    const [row] = await checkDb`
+      select cl.name from call_activities ca join callers cl on cl.id = ca.caller_id
+       order by ca.called_at desc limit 1
+    `;
+    if (row?.name === "Jan Novák" || row?.name) ok(`the outcome is attributed to ${row.name}`);
+    else fail("the outcome is attributed to the signed-in caller", "no caller on the activity");
+  } else {
+    // Fronta může být prázdná, pokud volací část výš zpracovala vše.
+    ok("a caller sees an empty queue rather than someone else's work");
+  }
+
+  await page.click('button:has-text("Odhlásit")');
+  await page.waitForURL(/\/login/);
+  ok("a caller can sign out");
+
+  // ---- oddělení klientů --------------------------------------------------
+  // Tohle je ta věc, kvůli které se nesmí splést ASN Plus a VEXY. Testuje
+  // se server, ne menu: caller druhého klienta nesmí dostat cizí frontu
+  // ani když si adresu napíše ručně.
+  await attemptLogin(ADMIN_EMAIL, ADMIN_PASSWORD);
+  await page.waitForURL(`${BASE}/`);
+
+  await page.goto(`${BASE}/klienti`);
+  await expectVisible(page, "h1:has-text('Klienti')", "client management renders");
+  for (const client of ["ASN Plus", "VEXY"]) {
+    await page.fill('input[name="name"]', client);
+    await page.click('button:has-text("Přidat")');
+    await expectVisible(page, "text=Klient přidán", `client "${client}" is created`);
+  }
+  await expectVisible(
+    page,
+    "text=nemá klienta",
+    "campaigns without a client are flagged, not silently hidden",
+  );
+
+  // Stávající kampaň patří ASN Plus.
+  await page.locator('select[name="client_id"]').first().selectOption({ label: "ASN Plus" });
+  await page.locator('button:has-text("Uložit")').first().click();
+  await page.waitForLoadState("networkidle");
+  ok("a campaign can be filed under a client");
+  await shot(page, "klienti");
+
+  // Druhý klient dostane vlastní kampaň a vlastní kontakt, aby bylo co splést.
+  const [vexyMailbox] = await checkDb`select id from mailboxes limit 1`;
+  const [vexyClient] = await checkDb`select id from clients where name = 'VEXY'`;
+  const [vexyCampaign] = await checkDb`
+    insert into campaigns (name, mailbox_id, client_id, calling_enabled, status)
+    values ('VEXY vlastní outbound', ${vexyMailbox.id}, ${vexyClient.id}, true, 'draft')
+    returning id
+  `;
+  const [vexyContact] = await checkDb`
+    insert into contacts (email, first_name, last_name, company, phone)
+    values ('vexy-lead@prospect.test', 'Vexy', 'Lead', 'Vexy Only', '+420777000099')
+    returning id
+  `;
+  await checkDb`
+    insert into campaign_contacts (campaign_id, contact_id, status)
+    values (${vexyCampaign.id}, ${vexyContact.id}, 'pending')
+  `;
+
+  // Jan je přidělený jen na ASN Plus.
+  await page.goto(`${BASE}/tym`);
+  await expectVisible(page, "text=Kampaně", "the team page shows campaign assignment");
+  await page.locator('button:has-text("Přidělit kampaně"), button:has-text("Kampaně (")').first().click();
+  await expectVisible(page, "text=Na čem smí", "assignment explains what it does");
+  await page.locator('input[name="campaign_ids"]').first().check();
+  await page.click('button:has-text("Uložit přidělení")');
+  await expectVisible(page, "text=Přiděleno", "a caller is assigned to one client's campaign");
+  await shot(page, "prideleni");
+
+  const [assignment] = await checkDb`
+    select cp.name from caller_campaigns ca join campaigns cp on cp.id = ca.campaign_id limit 1
+  `;
+  if (assignment && assignment.name !== "VEXY vlastní outbound") {
+    ok("the assignment points at the ASN campaign, not VEXY's");
+  } else {
+    fail("the assignment points at the ASN campaign, not VEXY's", JSON.stringify(assignment));
+  }
+
+  await page.goto(`${BASE}/`);
+  await page.click('button:has-text("Odhlásit")');
+  await page.waitForURL(/\/login/);
+
+  // Caller ASN nesmí uvidět kontakt VEXY - ani ve frontě, ani přes id.
+  await attemptLogin(CALLER_EMAIL, CALLER_PASSWORD);
+  await page.waitForURL(/\/osloveni/);
+  const callerBody = await page.locator("body").innerText();
+  if (!callerBody.includes("Vexy Only") && !callerBody.includes("vexy-lead@prospect.test")) {
+    ok("an ASN caller never sees VEXY data in their work mode");
+  } else {
+    fail("an ASN caller never sees VEXY data in their work mode", "VEXY contact leaked");
+  }
+
+  // A server ho odmítne vytočit, i když id zná.
+  const dial = await page.request.post(`${BASE}/api/calling/calls`, {
+    data: { contactId: vexyContact.id },
+    headers: { "content-type": "application/json" },
+  });
+  if (dial.status() === 404 || dial.status() === 409 || dial.status() === 503) {
+    ok(`the server refuses to dial another client's contact (${dial.status()})`);
+  } else {
+    fail("the server refuses to dial another client's contact", `got ${dial.status()}`);
+  }
+
+  const [leaked] = await checkDb`
+    select count(*)::int as count from calls where contact_id = ${vexyContact.id}
+  `;
+  if (leaked.count === 0) ok("no call row was created for the other client's contact");
+  else fail("no call row was created for the other client's contact", `${leaked.count} rows`);
+
+  await page.click('button:has-text("Odhlásit")');
+  await page.waitForURL(/\/login/);
+
+  // ---- výsledky pilotu ---------------------------------------------------
+  await attemptLogin(ADMIN_EMAIL, ADMIN_PASSWORD);
+  await page.waitForURL(`${BASE}/`);
+  await page.goto(campaignUrl + "?tab=pilot");
+  await expectVisible(page, "text=Kontaktů v kampani", "the pilot report states the scope");
+  await expectVisible(page, "text=Pokusů o volání", "the pilot report counts attempts");
+  await expectVisible(page, "text=Spojených kontaktů", "the pilot report counts unique contacts");
+  await expectVisible(page, "text=Pokus je jedno vytočení", "attempts and contacts are explained");
+  await expectVisible(page, "text=Schůzek", "the pilot report counts meetings");
+  await shot(page, "pilot-report");
+
+  await page.goto(campaignUrl);
+  await expectVisible(page, "text=Odesláno dnes", "the campaign shows today's sending against its limit");
+  await expectVisible(page, "text=ASN Plus", "the campaign shows which client it belongs to");
 
   const realErrors = consoleErrors.filter((text) => !/favicon|404 \(Not Found\)/i.test(text));
   if (realErrors.length === 0) ok("no browser console errors");

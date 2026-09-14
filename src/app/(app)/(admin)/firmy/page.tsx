@@ -4,6 +4,7 @@ import { COMPANY_STATUS_LABELS, type CompanyPriority, type CompanyStatus } from 
 import { formatWhen, isOverdue } from "@/lib/datetime";
 import { plural } from "@/lib/plan";
 import { listCallers } from "@/lib/queries/calling";
+import { CompanyCreateForm } from "@/components/company-create-form";
 import {
   PageHeader,
   Table,
@@ -100,6 +101,7 @@ export default async function CompaniesPage({
       <PageHeader
         title="Firmy"
         description={`${plural(total, "firma", "firmy", "firem")}. Kontakt je člověk uvnitř firmy — rozhodujeme se o firmě.`}
+        actions={<CompanyCreateForm />}
       />
 
       <div className="mb-4 flex flex-wrap items-center gap-2">

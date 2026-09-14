@@ -5,14 +5,37 @@ import { redirect } from "next/navigation";
 import { cookies } from "next/headers";
 import { z } from "zod";
 import { sql } from "@/lib/db";
-import { requireAuth, checkPassword, createSessionToken, SESSION_COOKIE, sessionCookieOptions } from "@/lib/auth";
+import {
+  createSessionToken,
+  requireAdmin,
+  requireAuth,
+  SESSION_COOKIE,
+  sessionCookieOptions,
+} from "@/lib/auth";
+import { verifyPassword, passwordProblem } from "@/lib/password";
+import {
+  createUser,
+  getUserForLogin,
+  setUserActive,
+  setUserPassword,
+  updateUser,
+  type UserRole,
+} from "@/lib/queries/users";
 import { logActivity } from "@/lib/activity";
 import { setCallRecordingEnabled, updateSettings } from "@/lib/settings";
 import { parseContactsCsv } from "@/lib/csv";
 import { hhmmToMinutes, assertValidTimezone } from "@/lib/schedule";
 import { findUnknownVariables } from "@/lib/template";
-import { importContacts, suppressEmail, unsuppressEmail } from "@/lib/queries/contacts";
+import {
+  createContact,
+  importContacts,
+  saveOutreachContext,
+  suppressEmail,
+  unsuppressEmail,
+  updateContact,
+} from "@/lib/queries/contacts";
 import { createMailbox, deleteMailbox, testMailbox, testMailboxImap, updateMailbox } from "@/lib/queries/mailboxes";
+import { createClient, getClient, setAssignments } from "@/lib/queries/clients";
 import {
   pauseCampaign,
   skipStepAndResume,
@@ -38,7 +61,7 @@ import {
   updateMeeting,
 } from "@/lib/queries/calling";
 import { clearSelectedCaller, getSelectedCallerId, setSelectedCallerId } from "@/lib/caller-session";
-import { updateCompany } from "@/lib/queries/companies";
+import { createCompany, updateCompany } from "@/lib/queries/companies";
 import {
   COMPANY_PRIORITY_LABELS,
   COMPANY_STATUS_LABELS,
@@ -60,17 +83,48 @@ function fail(error: string, problems?: string[]): ActionState {
   return { error, problems };
 }
 
+/**
+ * Hash, proti kterému se ověřuje heslo u neexistujícího účtu.
+ *
+ * Bez něj by přihlášení na neznámý e-mail odpovědělo znatelně rychleji
+ * než na existující a dalo by se tím vyčíst, kdo v systému je. Je to
+ * scrypt hash náhodného řetězce, který nikdo nezná.
+ */
+const DUMMY_HASH =
+  "scrypt$16384$8$1$AAAAAAAAAAAAAAAAAAAAAA==$" +
+  "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
 // ---------------------------------------------------------------- auth
 
+/**
+ * Přihlášení e-mailem a heslem.
+ *
+ * Chybová hláška je jediná pro všechny případy - neexistující účet,
+ * špatné heslo i deaktivovaný účet. Rozlišovat je by prozradilo, které
+ * e-maily v systému jsou.
+ */
 export async function loginAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  const email = String(formData.get("email") ?? "").trim();
   const password = String(formData.get("password") ?? "");
-  if (!password || !checkPassword(password)) {
-    return fail("Nesprávné heslo.");
+  const wrong = fail("Nesprávný e-mail nebo heslo.");
+  if (!email || !password) return wrong;
+
+  const user = await getUserForLogin(email);
+  if (!user || !user.is_active) {
+    // Heslo se ověří i tak, aby se z rychlosti odpovědi nedalo poznat,
+    // jestli účet existuje.
+    await verifyPassword(password, DUMMY_HASH);
+    return wrong;
   }
+  if (!(await verifyPassword(password, user.password_hash))) return wrong;
+
   const store = await cookies();
-  store.set(SESSION_COOKIE, createSessionToken(), sessionCookieOptions);
-  const next = String(formData.get("next") ?? "/");
-  redirect(next.startsWith("/") ? next : "/");
+  store.set(SESSION_COOKIE, createSessionToken(user.id), sessionCookieOptions);
+
+  const next = String(formData.get("next") ?? "");
+  // Caller nemá co dělat na admin přehledu: jde rovnou do práce.
+  const home = user.role === "caller" ? "/osloveni" : "/";
+  redirect(next.startsWith("/") && next !== "/login" ? next : home);
 }
 
 export async function logoutAction(): Promise<void> {
@@ -88,7 +142,7 @@ const settingsSchema = z.object({
 });
 
 export async function saveSettingsAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  await requireAuth();
+  await requireAdmin();
   const testMode = formData.get("test_mode") === "on";
   const behavior = String(formData.get("test_behavior") ?? "redirect");
   const rawEmail = String(formData.get("test_email") ?? "").trim();
@@ -162,7 +216,7 @@ function mailboxFromForm(formData: FormData) {
 }
 
 export async function saveMailboxAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  await requireAuth();
+  await requireAdmin();
   const id = String(formData.get("id") ?? "");
   const parsed = mailboxFromForm(formData);
   if (!parsed.success) {
@@ -187,7 +241,7 @@ export async function saveMailboxAction(_prev: ActionState, formData: FormData):
 }
 
 export async function testMailboxAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  await requireAuth();
+  await requireAdmin();
   const id = String(formData.get("id") ?? "");
   if (!id) return fail("Nejdřív schránku uložte, pak ji otestujte.");
   try {
@@ -211,7 +265,7 @@ export async function testMailboxAction(_prev: ActionState, formData: FormData):
  * SMTP - which matters when sending already works and only the inbox does not.
  */
 export async function testMailboxImapAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  await requireAuth();
+  await requireAdmin();
   const id = String(formData.get("id") ?? "");
   if (!id) return fail("Nejdřív schránku uložte, pak ji otestujte.");
   try {
@@ -226,7 +280,7 @@ export async function testMailboxImapAction(_prev: ActionState, formData: FormDa
 }
 
 export async function deleteMailboxAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  await requireAuth();
+  await requireAdmin();
   const result = await deleteMailbox(String(formData.get("id") ?? ""));
   revalidatePath("/mailboxes");
   return result.ok ? { success: "Schránka smazána." } : fail(result.error ?? "Smazat se nepodařilo.");
@@ -245,7 +299,7 @@ const campaignSchema = z.object({
 });
 
 export async function saveCampaignAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  await requireAuth();
+  await requireAdmin();
   const id = String(formData.get("id") ?? "");
 
   let startMinute: number;
@@ -333,7 +387,7 @@ export async function saveCampaignAction(_prev: ActionState, formData: FormData)
 }
 
 export async function startCampaignAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  await requireAuth();
+  await requireAdmin();
   const id = String(formData.get("id") ?? "");
   const result = await startCampaign(id);
   revalidatePath(`/campaigns/${id}`);
@@ -343,7 +397,7 @@ export async function startCampaignAction(_prev: ActionState, formData: FormData
 }
 
 export async function pauseCampaignAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  await requireAuth();
+  await requireAdmin();
   const id = String(formData.get("id") ?? "");
   await pauseCampaign(id);
   revalidatePath(`/campaigns/${id}`);
@@ -352,7 +406,7 @@ export async function pauseCampaignAction(_prev: ActionState, formData: FormData
 }
 
 export async function deleteCampaignAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  await requireAuth();
+  await requireAdmin();
   const id = String(formData.get("id") ?? "");
   const [campaign] = await sql<{ status: string }[]>`select status from campaigns where id = ${id}`;
   if (campaign?.status === "active") return fail("Před smazáním kampaň pozastavte.");
@@ -362,14 +416,14 @@ export async function deleteCampaignAction(_prev: ActionState, formData: FormDat
 }
 
 export async function checkReadinessAction(campaignId: string): Promise<string[]> {
-  await requireAuth();
+  await requireAdmin();
   return (await checkCampaignReadiness(campaignId)).problems;
 }
 
 // ------------------------------------------------------- sequence steps
 
 export async function saveStepsAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  await requireAuth();
+  await requireAdmin();
   const campaignId = String(formData.get("campaign_id") ?? "");
   const count = Number(formData.get("step_count") ?? 0);
 
@@ -446,7 +500,7 @@ export async function saveStepsAction(_prev: ActionState, formData: FormData): P
 // ------------------------------------------------------------ contacts
 
 export async function importContactsAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  await requireAuth();
+  await requireAdmin();
   const file = formData.get("file");
   const campaignId = String(formData.get("campaign_id") ?? "") || null;
 
@@ -478,7 +532,7 @@ export async function importContactsAction(_prev: ActionState, formData: FormDat
 }
 
 export async function suppressEmailAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  await requireAuth();
+  await requireAdmin();
   const email = String(formData.get("email") ?? "").trim().toLowerCase();
   if (!email.includes("@")) return fail("Zadejte platnou e-mailovou adresu.");
   await suppressEmail(email, String(formData.get("reason") ?? "manual"), String(formData.get("note") ?? "") || undefined);
@@ -488,14 +542,14 @@ export async function suppressEmailAction(_prev: ActionState, formData: FormData
 }
 
 export async function unsuppressEmailAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  await requireAuth();
+  await requireAdmin();
   await unsuppressEmail(String(formData.get("email") ?? ""));
   revalidatePath("/suppression");
   return { success: "Odebráno ze seznamu Nekontaktovat." };
 }
 
 export async function removeFromCampaignAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  await requireAuth();
+  await requireAdmin();
   const id = String(formData.get("campaign_contact_id") ?? "");
   const [row] = await sql<{ campaign_id: string }[]>`
     select campaign_id from campaign_contacts where id = ${id}
@@ -506,7 +560,7 @@ export async function removeFromCampaignAction(_prev: ActionState, formData: For
 }
 
 export async function skipStepAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  await requireAuth();
+  await requireAdmin();
   const id = String(formData.get("campaign_contact_id") ?? "");
   await skipStepAndResume(id);
   revalidatePath("/campaigns");
@@ -517,7 +571,7 @@ export async function skipStepAction(_prev: ActionState, formData: FormData): Pr
 
 /** Runs one worker tick by hand, for testing the setup from the UI. */
 export async function runWorkerNowAction(_prev: ActionState): Promise<ActionState> {
-  await requireAuth();
+  await requireAdmin();
   const { dispatchTick } = await import("@/lib/engine/dispatch");
   const { pollReplies } = await import("@/lib/engine/replies");
   const dispatch = await dispatchTick();
@@ -534,7 +588,7 @@ export async function runWorkerNowAction(_prev: ActionState): Promise<ActionStat
 // --------------------------------------------------------------- inbox
 
 export async function sendReplyAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  await requireAuth();
+  await requireAdmin();
   const conversationId = String(formData.get("conversation_id") ?? "");
   const body = String(formData.get("body") ?? "").trim();
   if (!body) return fail("Než odešlete, něco napište.");
@@ -550,7 +604,7 @@ export async function classifyConversationAction(
   _prev: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  await requireAuth();
+  await requireAdmin();
   const conversationId = String(formData.get("conversation_id") ?? "");
   const classification = String(formData.get("classification") ?? "unclassified") as Classification;
   await setClassification(conversationId, classification);
@@ -560,7 +614,7 @@ export async function classifyConversationAction(
 }
 
 export async function markReadAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  await requireAuth();
+  await requireAdmin();
   const conversationId = String(formData.get("conversation_id") ?? "");
   await markConversationRead(conversationId);
   revalidatePath("/inbox");
@@ -571,7 +625,7 @@ export async function deleteConversationAction(
   _prev: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  await requireAuth();
+  await requireAdmin();
   await deleteConversation(String(formData.get("conversation_id") ?? ""));
   revalidatePath("/inbox");
   redirect("/inbox");
@@ -585,10 +639,13 @@ export async function deleteConversationAction(
  * whole point of the workspace, so nothing here asks for confirmation.
  */
 export async function logCallAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  await requireAuth();
-  const campaignContactId = String(formData.get("campaign_contact_id") ?? "");
+  const user = await requireAuth();
+  const campaignContactId = String(formData.get("campaign_contact_id") ?? "").trim();
+  // Kontakt mimo kampaň. Každý skutečný hovor musí jít klasifikovat.
+  const contactId = String(formData.get("contact_id") ?? "").trim();
   const outcome = String(formData.get("outcome") ?? "");
   if (!isCallOutcome(outcome)) return fail("Vyberte výsledek hovoru.");
+  if (!campaignContactId && !contactId) return fail("Chybí kontakt.");
 
   const parseWhen = (key: string): Date | null | "invalid" => {
     const raw = String(formData.get(key) ?? "").trim();
@@ -621,7 +678,8 @@ export async function logCallAction(_prev: ActionState, formData: FormData): Pro
   const rawCallId = String(formData.get("call_id") ?? "").trim();
 
   const result = await logCall({
-    campaignContactId,
+    campaignContactId: campaignContactId || null,
+    contactId: contactId || null,
     outcome,
     callerId,
     callId: rawCallId || null,
@@ -643,7 +701,7 @@ export async function logCallAction(_prev: ActionState, formData: FormData): Pro
     const scope = String(formData.get("campaign_scope") ?? "") || null;
     // Režim se přenáší z formuláře, aby blok "follow-up" nepodstrčil
     // callerovi po prvním zápisu úplně nevolanou firmu.
-    await claimNextCall(scope, callerId, readMode(formData));
+    await claimNextCall(scope, callerId, readMode(formData), user.role === "caller");
   }
 
   revalidatePath("/volani", "layout");
@@ -686,7 +744,7 @@ export async function saveCallingSettingsAction(
   _prev: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  await requireAuth();
+  await requireAdmin();
   const id = String(formData.get("campaign_id") ?? "");
   const text = (key: string) => String(formData.get(key) ?? "").trim() || null;
 
@@ -729,7 +787,7 @@ const economicsSchema = z.object({
 });
 
 export async function saveEconomicsAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  await requireAuth();
+  await requireAdmin();
   const id = String(formData.get("campaign_id") ?? "");
   const num = (key: string) => String(formData.get(key) ?? "0").replace(",", ".") || "0";
 
@@ -762,7 +820,7 @@ export async function saveEconomicsAction(_prev: ActionState, formData: FormData
 // -------------------------------------------------------------- calleři
 
 export async function saveCallerAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  await requireAuth();
+  await requireAdmin();
   const name = String(formData.get("name") ?? "").trim();
   if (!name) return fail("Zadejte jméno callera.");
   await createCaller({
@@ -780,7 +838,7 @@ export async function saveCallerAction(_prev: ActionState, formData: FormData): 
  * the campaign's economics, reference the row.
  */
 export async function toggleCallerAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  await requireAuth();
+  await requireAdmin();
   const id = String(formData.get("id") ?? "");
   const active = String(formData.get("active") ?? "") === "yes";
   await setCallerActive(id, active);
@@ -791,7 +849,7 @@ export async function toggleCallerAction(_prev: ActionState, formData: FormData)
 
 /** Records who is at this workstation, for the rest of the shift. */
 export async function selectCallerAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  await requireAuth();
+  await requireAdmin();
   const callerId = String(formData.get("caller_id") ?? "");
   const campaignId = String(formData.get("campaign_id") ?? "");
   if (!callerId) return fail("Vyberte, kdo volá.");
@@ -812,7 +870,7 @@ export async function selectCallerAction(_prev: ActionState, formData: FormData)
  * than left leased, so the next caller is offered them immediately.
  */
 export async function clearCallerAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  await requireAuth();
+  await requireAdmin();
   const holding = String(formData.get("campaign_contact_id") ?? "");
   if (holding) await releaseCall(holding);
   await clearSelectedCaller();
@@ -833,12 +891,18 @@ function readMode(formData: FormData): QueueMode | null {
  * never from a page rendering or a router prefetching it.
  */
 export async function nextCallAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  await requireAuth();
+  const user = await requireAuth();
   const campaignId = String(formData.get("campaign_id") ?? "") || null;
   const callerId = await getSelectedCallerId();
   if (!callerId) return fail("Nejdřív vyberte, kdo volá.");
 
-  const claimed = await claimNextCall(campaignId, callerId, readMode(formData));
+  const claimed = await claimNextCall(
+    campaignId,
+    callerId,
+    readMode(formData),
+    // Caller dostane další firmu jen z přidělených kampaní.
+    user.role === "caller",
+  );
   if (campaignId) revalidatePath(`/volani/${campaignId}`);
   revalidatePath("/osloveni");
   if (!claimed) return { success: "Fronta je prázdná — nikdo další k volání není." };
@@ -910,16 +974,123 @@ export async function setCallRecordingAction(
   _prev: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  await requireAuth();
+  await requireAdmin();
   await setCallRecordingEnabled(formData.get("call_recording_enabled") !== null);
   revalidatePath("/settings");
   return { success: "Uloženo." };
 }
 
+/** Ruční založení firmy před hovorem. */
+export async function createCompanyAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  await requireAuth();
+  const name = String(formData.get("name") ?? "").trim();
+  if (!name) return fail("Vyplňte název firmy.");
+
+  const priority = String(formData.get("priority") ?? "normal");
+  const result = await createCompany({
+    name,
+    website: String(formData.get("website") ?? ""),
+    reason: String(formData.get("reason") ?? ""),
+    priority: priority in COMPANY_PRIORITY_LABELS ? (priority as CompanyPriority) : "normal",
+  });
+  if (!result.ok) {
+    return fail(
+      result.error === "duplicate"
+        ? `Firma „${name}“ už existuje.`
+        : "Firmu se nepodařilo založit.",
+    );
+  }
+
+  revalidatePath("/firmy");
+  revalidatePath("/");
+  redirect(`/firmy/${result.id}`);
+}
+
+const CONTACT_ERRORS: Record<string, string> = {
+  duplicate: "Kontakt s tímhle e-mailem už existuje.",
+  invalid_email: "Zadejte platnou e-mailovou adresu.",
+  invalid_phone:
+    "Telefonní číslo nejde vytočit. Zadejte ho jako 737485738 nebo +420737485738.",
+  invalid_url: "Odkaz na video musí začínat http:// nebo https://.",
+  not_found: "Firma nebo kontakt nebyly nalezeny.",
+};
+
+/** Založení i úprava kontaktu. Jedna akce, aby formulář byl jen jeden. */
+export async function saveContactAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  await requireAuth();
+  const contactId = String(formData.get("contact_id") ?? "").trim();
+  const companyId = String(formData.get("company_id") ?? "").trim();
+
+  const input = {
+    firstName: String(formData.get("first_name") ?? ""),
+    lastName: String(formData.get("last_name") ?? ""),
+    position: String(formData.get("position") ?? ""),
+    email: String(formData.get("email") ?? ""),
+    phone: String(formData.get("phone") ?? ""),
+    isPrimary: formData.get("is_primary") !== null,
+  };
+
+  const result = contactId
+    ? await updateContact(contactId, input)
+    : companyId
+      ? await createContact(companyId, input)
+      : ({ ok: false, error: "not_found" } as const);
+
+  if (!result.ok) return fail(CONTACT_ERRORS[result.error] ?? "Kontakt se nepodařilo uložit.");
+
+  if (companyId) revalidatePath(`/firmy/${companyId}`);
+  revalidatePath("/firmy");
+  return { success: contactId ? "Kontakt upraven." : "Kontakt přidán." };
+}
+
+/**
+ * Co prospekt dostal a čím na to navázat.
+ *
+ * Vlastní akce, ne součást uložení kontaktu: kdo doplňuje Loom, needituje
+ * jméno a telefon - a obráceně. Jedna sloučená akce by při uložení
+ * kontaktu Loom smazala.
+ */
+export async function saveOutreachContextAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  await requireAdmin();
+  const contactId = String(formData.get("contact_id") ?? "").trim();
+  if (!contactId) return fail("Chybí kontakt.");
+  const companyId = String(formData.get("company_id") ?? "").trim();
+
+  const rawSentAt = String(formData.get("loom_sent_at") ?? "").trim();
+  let loomSentAt: Date | null = null;
+  if (rawSentAt) {
+    const parsed = new Date(rawSentAt);
+    if (Number.isNaN(parsed.getTime())) return fail("Datum odeslání videa není platné.");
+    loomSentAt = parsed;
+  }
+
+  const result = await saveOutreachContext(contactId, {
+    loomUrl: String(formData.get("loom_url") ?? ""),
+    loomTitle: String(formData.get("loom_title") ?? ""),
+    loomSentAt,
+    loomNote: String(formData.get("loom_note") ?? ""),
+    opener: String(formData.get("call_opener") ?? ""),
+  });
+  if (!result.ok) return fail(CONTACT_ERRORS[result.error] ?? "Kontext se nepodařilo uložit.");
+
+  if (companyId) revalidatePath(`/firmy/${companyId}`);
+  revalidatePath("/osloveni");
+  return { success: "Kontext oslovení uložen." };
+}
+
 // ----------------------------------------------------------- týdenní plán
 
 export async function createWorkBlockAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  await requireAuth();
+  await requireAdmin();
   const date = String(formData.get("block_date") ?? "").trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return fail("Zadejte datum bloku.");
 
@@ -950,8 +1121,158 @@ export async function createWorkBlockAction(_prev: ActionState, formData: FormDa
 }
 
 export async function deleteWorkBlockAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  await requireAuth();
+  await requireAdmin();
   await deleteWorkBlock(String(formData.get("id") ?? ""));
   revalidatePath("/osloveni/plan");
   return { success: "Blok smazán." };
+}
+
+// -------------------------------------------------------------- uživatelé
+
+const USER_ERRORS: Record<string, string> = {
+  duplicate: "Uživatel s tímhle e-mailem už existuje.",
+  invalid_email: "Zadejte platnou e-mailovou adresu.",
+  caller_required: "Vyberte, které obchodní identitě uživatel odpovídá.",
+  caller_taken: "Tahle obchodní identita už má svoje přihlášení.",
+  last_admin: "Tohle je poslední administrátor — jinak by se do nastavení nedostal nikdo.",
+  not_found: "Uživatel nebyl nalezen.",
+};
+
+function readRole(formData: FormData): UserRole | null {
+  const raw = String(formData.get("role") ?? "");
+  return raw === "admin" || raw === "caller" ? raw : null;
+}
+
+/** Založení i úprava uživatele. Jedna akce, aby byl formulář jen jeden. */
+export async function saveUserAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  await requireAdmin();
+  const role = readRole(formData);
+  if (!role) return fail("Vyberte roli.");
+
+  const userId = String(formData.get("user_id") ?? "").trim();
+  const email = String(formData.get("email") ?? "");
+  const name = String(formData.get("name") ?? "");
+  // Obchodní identita dává smysl jen u callera; u admina se zahazuje,
+  // i kdyby ji formulář poslal.
+  const callerId = role === "caller" ? String(formData.get("caller_id") ?? "") || null : null;
+
+  if (userId) {
+    const result = await updateUser(userId, { email, name, role, callerId });
+    if (!result.ok) return fail(USER_ERRORS[result.error] ?? "Uživatele se nepodařilo uložit.");
+    revalidatePath("/uzivatele");
+    return { success: "Uživatel upraven." };
+  }
+
+  const password = String(formData.get("password") ?? "");
+  const problem = passwordProblem(password);
+  if (problem) return fail(problem);
+
+  const result = await createUser({ email, name, role, callerId, password });
+  if (!result.ok) return fail(USER_ERRORS[result.error] ?? "Uživatele se nepodařilo založit.");
+  revalidatePath("/uzivatele");
+  return { success: "Uživatel přidán." };
+}
+
+export async function setUserPasswordAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  await requireAdmin();
+  const userId = String(formData.get("user_id") ?? "").trim();
+  if (!userId) return fail("Chybí uživatel.");
+
+  const password = String(formData.get("password") ?? "");
+  const problem = passwordProblem(password);
+  if (problem) return fail(problem);
+
+  const result = await setUserPassword(userId, password);
+  if (!result.ok) return fail(USER_ERRORS[result.error] ?? "Heslo se nepodařilo změnit.");
+  revalidatePath("/uzivatele");
+  return { success: "Heslo změněno." };
+}
+
+export async function toggleUserAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  const admin = await requireAdmin();
+  const userId = String(formData.get("user_id") ?? "").trim();
+  if (!userId) return fail("Chybí uživatel.");
+  // Vypnout sám sebe by znamenalo okamžité odhlášení bez cesty zpátky.
+  if (userId === admin.id) return fail("Sami sebe deaktivovat nemůžete.");
+
+  const active = String(formData.get("active") ?? "") === "yes";
+  const result = await setUserActive(userId, active);
+  if (!result.ok) return fail(USER_ERRORS[result.error] ?? "Stav se nepodařilo změnit.");
+  revalidatePath("/uzivatele");
+  return { success: active ? "Uživatel aktivován." : "Uživatel deaktivován." };
+}
+
+// ------------------------------------------------------------------ klienti
+
+/**
+ * Klient a přidělení kampaní.
+ *
+ * Nejmenší věc, která dělá provoz jednoznačným, když v systému vedle sebe
+ * běží ASN Plus a vlastní outbound VEXY.
+ */
+export async function createClientAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  await requireAdmin();
+  const result = await createClient(String(formData.get("name") ?? ""));
+  if (!result.ok) {
+    return fail(
+      result.error === "duplicate"
+        ? "Klient s tímhle názvem už existuje."
+        : "Zadejte název klienta.",
+    );
+  }
+  revalidatePath("/klienti");
+  revalidatePath("/campaigns");
+  return { success: "Klient přidán." };
+}
+
+/** Zařadí kampaň pod klienta. Bez klienta je kampaň jen pro administrátora. */
+export async function setCampaignClientAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  await requireAdmin();
+  const campaignId = String(formData.get("campaign_id") ?? "").trim();
+  if (!campaignId) return fail("Chybí kampaň.");
+  const clientId = String(formData.get("client_id") ?? "").trim() || null;
+
+  if (clientId && !(await getClient(clientId))) return fail("Klient nebyl nalezen.");
+
+  await sql`
+    update campaigns set client_id = ${clientId}, updated_at = now() where id = ${campaignId}
+  `;
+  revalidatePath("/klienti");
+  revalidatePath(`/campaigns/${campaignId}`);
+  return { success: clientId ? "Kampaň zařazena." : "Kampaň bez klienta." };
+}
+
+/**
+ * Které kampaně caller zpracovává.
+ *
+ * Tohle je hranice mezi klienty: bez přidělení caller nedostane žádnou
+ * práci a nic cizího neuvidí.
+ */
+export async function setCallerCampaignsAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  await requireAdmin();
+  const callerId = String(formData.get("caller_id") ?? "").trim();
+  if (!callerId) return fail("Chybí caller.");
+
+  const campaignIds = formData
+    .getAll("campaign_ids")
+    .map((value) => String(value))
+    .filter((value) => /^[0-9a-f-]{36}$/i.test(value));
+
+  await setAssignments(callerId, campaignIds);
+  revalidatePath("/tym");
+  revalidatePath("/osloveni");
+  return {
+    success: campaignIds.length === 0
+      ? "Caller nemá přidělenou žádnou kampaň — frontu uvidí prázdnou."
+      : `Přiděleno: ${campaignIds.length} ${campaignIds.length === 1 ? "kampaň" : campaignIds.length < 5 ? "kampaně" : "kampaní"}.`,
+  };
 }

@@ -145,6 +145,25 @@ export function formatWhen(value: Date | string | null, now: Date = new Date()):
   return `${weekdayFormat.format(date)} ${shortDateFormat.format(date)} ${timeFormat.format(date)}`;
 }
 
+/**
+ * Kdy se něco stalo.
+ *
+ * Protipól `formatWhen`, který je pro TERMÍNY: tam je minulost problém
+ * ("Po termínu"), tady je to prostě historie. Loom odeslaný před čtyřmi
+ * dny není po termínu a označit ho tak je matoucí.
+ */
+export function formatPast(value: Date | string | null, now: Date = new Date()): string {
+  if (!value) return "—";
+  const date = toDate(value);
+  const day = pragueDay(date);
+  const today = pragueDay(now);
+  const yesterday = pragueDay(new Date(now.getTime() - 86_400_000));
+
+  if (day === today) return `Dnes ${timeFormat.format(date)}`;
+  if (day === yesterday) return `Včera ${timeFormat.format(date)}`;
+  return `${shortDateFormat.format(date)} ${timeFormat.format(date)}`;
+}
+
 /** Je termín splatný, tedy dnes nebo dřív? */
 export function isDue(value: Date | string | null, now: Date = new Date()): boolean {
   if (!value) return false;

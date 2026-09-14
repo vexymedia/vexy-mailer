@@ -4,7 +4,7 @@ import { listActivity } from "@/lib/queries/dashboard";
 import { plural } from "@/lib/plan";
 import { PageHeader, StatCard, EmptyState, DateTime } from "@/components/ui";
 import { formatWhen } from "@/lib/datetime";
-import { callRates, formatPercent } from "@/lib/calling";
+import { formatPercent } from "@/lib/calling";
 
 export const dynamic = "force-dynamic";
 
@@ -21,12 +21,9 @@ export default async function OverviewPage() {
     listActivity({ limit: 8 }),
   ]);
 
-  // Dovolatelnost a meeting rate z reálných zápisů hovorů za 7 dní.
-  const rates = callRates({
-    attempts: week.calls,
-    connected: week.connected,
-    meetings: week.meetings_booked,
-  });
+  // Dovolatelnost a meeting rate počítá reporting service, ne tahle
+  // stránka - aby Přehled, Tým i denní postup callera dávaly stejná čísla.
+  const rates = { reach_rate: week.reach_rate, meeting_rate: week.meeting_rate };
 
   const kindLabel: Record<string, string> = {
     overdue: "Po termínu",

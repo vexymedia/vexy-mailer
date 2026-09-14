@@ -3,6 +3,8 @@
 import { useState } from "react";
 import Link from "next/link";
 import { CALL_UI_LABELS, CallTimer, useCalling, type CallUiState } from "./call-provider";
+import { formatDuration } from "@/lib/telephony/call-state";
+import { LeadContextPanels } from "../lead-context";
 import { PostCallPanel } from "./post-call-panel";
 
 /**
@@ -26,8 +28,8 @@ const STATE_TONE: Record<CallUiState, string> = {
 
 const DIGITS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#"];
 
-function StateDot({ state }: { state: CallUiState }) {
-  const live = state === "connecting" || state === "ringing";
+function StateDot({ state, reconnecting = false }: { state: CallUiState; reconnecting?: boolean }) {
+  const live = reconnecting || state === "connecting" || state === "ringing";
   return (
     <span className="relative flex size-2.5 shrink-0">
       {live ? (
@@ -35,7 +37,13 @@ function StateDot({ state }: { state: CallUiState }) {
       ) : null}
       <span
         className={`relative inline-flex size-2.5 rounded-full ${
-          state === "active" ? "bg-emerald-300" : state === "failed" ? "bg-red-300" : "bg-zinc-400"
+          reconnecting
+            ? "bg-white"
+            : state === "active"
+              ? "bg-emerald-300"
+              : state === "failed"
+                ? "bg-red-300"
+                : "bg-zinc-400"
         }`}
       />
     </span>
@@ -45,7 +53,20 @@ function StateDot({ state }: { state: CallUiState }) {
 export function CallSurface() {
   const calling = useCalling();
   const { state, call, cockpitOpen } = calling;
-  if (state === "idle" || !call) return null;
+  if (state === "idle") return null;
+
+  // Než server hovor založí, není co ukazovat v cockpitu - ale něco
+  // ukázat se musí. Bez tohohle klikne caller na Zavolat, mikrofon je
+  // zakázaný a aplikace mlčí: tlačítko se vrátí do původního stavu a
+  // nikde není ani slovo o tom, proč se nic nestalo.
+  if (!call) {
+    return (
+      <>
+        <div aria-hidden className="h-16" />
+        <StartupBar />
+      </>
+    );
+  }
 
   return (
     <>
@@ -57,16 +78,72 @@ export function CallSurface() {
   );
 }
 
+/**
+ * Lišta pro fázi, kdy hovor ještě neexistuje.
+ *
+ * Pokrývá čekání na mikrofon, vytáčení před odpovědí serveru a hlavně
+ * selhání dřív, než se hovor vůbec založil - zakázaný mikrofon, nedostupný
+ * token, odmítnuté číslo. To všechno je pro callera jeden a ten samý
+ * okamžik: "kliknul jsem a co teď".
+ */
+function StartupBar() {
+  const { state, error, errorCode, retry, dismiss } = useCalling();
+  const failed = state === "failed";
+
+  // lg:left-60 je šířka sidebaru. Bez toho leží levý konec lišty pod
+  // navigací a jméno kontaktu zmizí za odznakem uživatele.
+
+  return (
+    <div
+      className={`fixed inset-x-0 bottom-0 z-30 text-white shadow-lg lg:left-60 ${
+        failed ? "bg-red-800" : "bg-zinc-900"
+      }`}
+      role={failed ? "alert" : undefined}
+    >
+      <div className="mx-auto flex w-full max-w-[1400px] flex-wrap items-center gap-x-4 gap-y-2 px-4 py-2.5 sm:px-6">
+        <StateDot state={state} />
+        <p className="min-w-0 flex-1 text-sm">
+          <span className="font-medium">
+            {failed ? "Hovor se nepodařilo spustit" : CALL_UI_LABELS[state]}
+          </span>
+          {error ? <span className="ml-2 text-white/80">{error}</span> : null}
+          {failed && errorCode ? (
+            <span className="ml-2 text-xs text-white/60">(kód {errorCode})</span>
+          ) : null}
+        </p>
+        {failed ? (
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              type="button"
+              onClick={retry}
+              className="rounded-md bg-white px-3 py-1.5 text-sm font-medium text-zinc-900 hover:bg-zinc-100"
+            >
+              Zkusit znovu
+            </button>
+            <button
+              type="button"
+              onClick={dismiss}
+              className="rounded-md px-3 py-1.5 text-sm ring-1 ring-inset ring-white/25 hover:bg-white/10"
+            >
+              Zavřít
+            </button>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 function CallBar() {
-  const { state, call, muted, hangUp, toggleMute, openCockpit, cockpitOpen } = useCalling();
+  const { state, call, muted, reconnecting, hangUp, toggleMute, openCockpit, cockpitOpen } = useCalling();
   if (!call) return null;
   const ongoing = state === "connecting" || state === "ringing" || state === "active" || state === "ending";
 
   return (
     <div
-      className={`fixed inset-x-0 bottom-0 z-30 text-white shadow-lg ${STATE_TONE[state]} ${
-        cockpitOpen ? "hidden" : ""
-      }`}
+      className={`fixed inset-x-0 bottom-0 z-30 text-white shadow-lg lg:left-60 ${
+        reconnecting ? "bg-amber-600" : STATE_TONE[state]
+      } ${cockpitOpen ? "hidden" : ""}`}
     >
       <div className="mx-auto flex w-full max-w-[1400px] flex-wrap items-center gap-x-4 gap-y-2 px-4 py-2.5 sm:px-6">
         <button
@@ -74,7 +151,7 @@ function CallBar() {
           onClick={openCockpit}
           className="flex min-w-0 flex-1 items-center gap-3 text-left"
         >
-          <StateDot state={state} />
+          <StateDot state={state} reconnecting={reconnecting} />
           <span className="min-w-0">
             <span className="block truncate text-sm font-medium">{call.target.contactName}</span>
             <span className="block truncate text-xs text-white/70">
@@ -82,8 +159,12 @@ function CallBar() {
             </span>
           </span>
           <span className="ml-auto shrink-0 text-sm font-medium sm:ml-4">
-            {state === "active" ? (
+            {reconnecting ? (
+              "Obnovuji spojení…"
+            ) : state === "active" ? (
               <CallTimer since={call.answeredAt} />
+            ) : state === "ended" && call.durationSeconds !== null ? (
+              `${CALL_UI_LABELS[state]} · ${formatDuration(call.durationSeconds)}`
             ) : (
               CALL_UI_LABELS[state]
             )}
@@ -126,7 +207,7 @@ function CallBar() {
 }
 
 function CallCockpit() {
-  const { state, call, error, errorCode, muted, hangUp, toggleMute, sendDigit, closeCockpit, retry, dismiss } =
+  const { state, call, error, errorCode, muted, reconnecting, hangUp, toggleMute, sendDigit, closeCockpit, retry, dismiss } =
     useCalling();
   const [keypadOpen, setKeypadOpen] = useState(false);
   if (!call) return null;
@@ -140,9 +221,15 @@ function CallCockpit() {
       <div className="mx-auto min-h-full w-full max-w-5xl p-3 sm:p-6">
         <div className="card overflow-hidden">
           {/* --------------------------------------------------- hlavička */}
-          <div className={`flex flex-wrap items-center gap-3 px-5 py-3 text-white ${STATE_TONE[state]}`}>
-            <StateDot state={state} />
-            <span className="text-sm font-medium">{CALL_UI_LABELS[state]}</span>
+          <div
+            className={`flex flex-wrap items-center gap-3 px-5 py-3 text-white ${
+              reconnecting ? "bg-amber-600" : STATE_TONE[state]
+            }`}
+          >
+            <StateDot state={state} reconnecting={reconnecting} />
+            <span className="text-sm font-medium">
+              {reconnecting ? "Obnovuji spojení…" : CALL_UI_LABELS[state]}
+            </span>
             {state === "active" ? (
               <span className="text-sm font-medium">
                 <CallTimer since={call.answeredAt} />
@@ -162,6 +249,15 @@ function CallCockpit() {
               Skrýt
             </button>
           </div>
+
+          {reconnecting ? (
+            <div className="border-b border-amber-200 bg-amber-50 px-5 py-3" role="status">
+              <p className="text-sm text-amber-900">
+                Spojení vypadlo, obnovuji ho. Druhá strana vás teď nemusí slyšet — počkejte,
+                než se obnoví.
+              </p>
+            </div>
+          ) : null}
 
           {error ? (
             <div className="flex flex-wrap items-center gap-3 border-b border-red-200 bg-red-50 px-5 py-3">
@@ -224,6 +320,15 @@ function CallCockpit() {
                   <p className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-zinc-900">
                     {briefing.reason}
                   </p>
+                </div>
+              ) : null}
+
+              {/* Loom, poslední e-mail a úvodní věta musí být po ruce i
+                  během hovoru - caller se na ně odvolává uprostřed věty
+                  a nemůže kvůli tomu odejít z cockpitu. */}
+              {briefing?.context ? (
+                <div className="mt-4">
+                  <LeadContextPanels view={briefing.context} />
                 </div>
               ) : null}
 
@@ -297,6 +402,7 @@ function CallCockpit() {
                 <PostCallPanel
                   callId={call.target.callId}
                   campaignContactId={call.target.campaignContactId}
+                  contactId={call.target.contactId}
                   qualification={briefing?.qualification ?? null}
                   onDone={dismiss}
                 />

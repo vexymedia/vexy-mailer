@@ -1,9 +1,10 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { isAuthenticated } from "@/lib/auth";
+import { currentUser } from "@/lib/auth";
 import { getSelectedCallerId } from "@/lib/caller-session";
 import { startCall, logCallStarted } from "@/lib/queries/calls";
 import { isTwilioConfigured } from "@/lib/telephony/twilio";
 import { buildCockpitBriefing } from "@/lib/telephony/briefing";
+import { sql } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
@@ -16,7 +17,10 @@ export const dynamic = "force-dynamic";
  * číslo, ani kdyby někdo zprávu podstrčil.
  */
 export async function POST(request: NextRequest) {
-  if (!(await isAuthenticated())) {
+  // Přihlášení se ověřuje první. Nepřihlášený se nemá dozvědět ani to,
+  // jestli je telefonie nastavená.
+  const user = await currentUser();
+  if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
   if (!isTwilioConfigured()) {
@@ -43,8 +47,32 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Chybí kontakt." }, { status: 400 });
   }
 
+  /**
+   * Hovor musí mít od první vteřiny majitele.
+   *
+   * Attribution se nedá spolehlivě doplnit zpětně - z ownera firmy ani
+   * z poslední aktivity se nepozná, kdo doopravdy mačkal tlačítko. Radši
+   * se tedy hovor nezaloží a caller se nejdřív představí, než aby vznikl
+   * telefonát, který se pak nedá nikomu připsat.
+   */
   const callerId = await getSelectedCallerId();
-  const result = await startCall({ contactId, campaignContactId, callerId });
+  if (!callerId) {
+    return NextResponse.json(
+      {
+        error: "Nejdřív vyberte v Oslovení, kdo volá. Bez toho se hovor nedá nikomu připsat.",
+        code: "no_caller",
+      },
+      { status: 409 },
+    );
+  }
+
+  const result = await startCall({
+    contactId,
+    campaignContactId,
+    callerId,
+    // Administrátor smí volat komukoliv; caller jen tomu, co má přidělené.
+    scopedToAssignments: user.role === "caller",
+  });
   if (!result.ok) {
     const status = result.code === "not_found" ? 404 : 409;
     return NextResponse.json({ error: result.error, code: result.code }, { status });
@@ -58,10 +86,12 @@ export async function POST(request: NextRequest) {
 
   // Kontext se posílá spolu s hovorem: cockpit ho potřebuje hned, ne až
   // po dalším kole dotazů.
+  const [caller] = await sql<{ name: string }[]>`select name from callers where id = ${callerId}`;
   const briefing = await buildCockpitBriefing({
     contactId: result.call.contactId,
     companyId: result.call.companyId,
     campaignContactId: result.call.campaignContactId,
+    callerName: caller?.name ?? null,
   });
 
   return NextResponse.json(

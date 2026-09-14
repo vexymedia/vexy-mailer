@@ -186,8 +186,12 @@ describe("historie firmy", () => {
     const [company] = await sql<{ id: string }[]>`select id from companies where name = 'Acme'`;
     const timeline = await companies.getCompanyTimeline(company.id);
 
-    expect(timeline.some((e) => e.kind === "call")).toBe(true);
+    // Zapsaný výsledek hovoru je "outcome"; "call" je samotný telefonát
+    // bez výsledku. Tady se logoval výsledek, takže se čeká první.
+    expect(timeline.some((e) => e.kind === "outcome")).toBe(true);
     expect(timeline.some((e) => e.kind === "email")).toBe(true);
+    // Autor u sebe: historie bez jména je k ničemu.
+    expect(timeline.find((e) => e.kind === "outcome")?.actor).toBe("Jan");
     // Nejnovější nahoře.
     for (let i = 1; i < timeline.length; i++) {
       expect(timeline[i - 1].occurred_at.getTime()).toBeGreaterThanOrEqual(timeline[i].occurred_at.getTime());
