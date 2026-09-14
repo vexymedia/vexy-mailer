@@ -15,6 +15,7 @@ import {
   type MeetingOutcome,
 } from "../calling";
 import { isCompanyStatus, nextCompanyStatus } from "../companies";
+import { getCallMetrics, getMetricsByCaller } from "./reporting";
 import type { Campaign } from "../types";
 
 /**
@@ -350,17 +351,42 @@ export async function getCallerDayProgress(
   callerId: string,
   campaignId: string | null = null,
   mode: QueueMode | null = null,
-): Promise<{ processed: number; remaining: number; total: number }> {
+): Promise<{
+  processed: number;
+  remaining: number;
+  total: number;
+  attempts: number;
+  connected: number;
+  meetings: number;
+}> {
+  const dayStart = new Date();
+  dayStart.setHours(0, 0, 0, 0);
+
+  // "Zpracováno" je počet firem, které dnes caller odbavil - tedy zapsané
+  // výsledky. "Pokusy/spojené/schůzky" jsou provozní čísla a musí souhlasit
+  // s Přehledem i s Týmem, takže je počítá reporting service. Dřív tu byl
+  // vlastní dotaz nad call_activities, který ad-hoc hovory (bez kampaně)
+  // slil do jednoho a skutečné hovory bez výsledku neviděl vůbec.
   const [row] = await sql<{ processed: number }[]>`
-    select count(distinct ca.campaign_contact_id)::int as processed
+    select count(*)::int as processed
       from call_activities ca
      where ca.caller_id = ${callerId}
-       and ca.called_at >= date_trunc('day', now())
+       and ca.called_at >= ${dayStart}
        and (${campaignId}::uuid is null or ca.campaign_id = ${campaignId}::uuid)
   `;
-  const queue = await listCallQueue(campaignId, { limit: 500, callerId, mode });
+  const [metrics, queue] = await Promise.all([
+    getCallMetrics({ from: dayStart, callerId }),
+    listCallQueue(campaignId, { limit: 500, callerId, mode }),
+  ]);
   const processed = row?.processed ?? 0;
-  return { processed, remaining: queue.length, total: processed + queue.length };
+  return {
+    processed,
+    remaining: queue.length,
+    total: processed + queue.length,
+    attempts: metrics.attempts,
+    connected: metrics.connected,
+    meetings: metrics.meetings,
+  };
 }
 
 // -------------------------------------------------------------- logging
@@ -980,7 +1006,7 @@ export async function listCallContacts(
 
 // ---------------------------------------------------------------- timeline
 
-export type TimelineKind = "call" | "email" | "reply";
+export type TimelineKind = "call" | "email" | "reply" | "loom" | "outcome";
 
 export interface TimelineEntry {
   id: string;
@@ -989,6 +1015,12 @@ export interface TimelineEntry {
   title: string;
   detail: string | null;
   note: string | null;
+  /** Kdo to udělal. Null u událostí, které nikdo neinicioval ručně. */
+  actor?: string | null;
+  /** Kam vede proklik - vlákno, nahrávka, video. Null = nikam. */
+  href?: string | null;
+  /** Výsledek/stav ve zkratce, když ho událost má. */
+  status?: string | null;
 }
 
 /**
@@ -1104,8 +1136,12 @@ export interface Caller {
 }
 
 export interface CallerRow extends Caller {
+  /** Pokusy o volání. Definice viz queries/reporting.ts. */
+  attempts: number;
   connected_calls: number;
   meetings_booked: number;
+  talk_seconds: number;
+  reach_rate: number | null;
 }
 
 export async function listCallers(options: { activeOnly?: boolean } = {}): Promise<Caller[]> {
@@ -1124,15 +1160,27 @@ export async function listCallers(options: { activeOnly?: boolean } = {}): Promi
  * these are the same counters the campaign economics already divide by.
  */
 export async function listCallersWithTotals(): Promise<CallerRow[]> {
-  return sql<CallerRow[]>`
-    select c.id, c.name, c.active, c.email, c.phone, c.created_at,
-           (select count(*)::int from call_activities ca
-             where ca.caller_id = c.id and ca.connected) as connected_calls,
-           (select count(*)::int from call_activities ca
-             where ca.caller_id = c.id and ca.outcome = 'meeting_booked') as meetings_booked
-      from callers c
-     order by c.active desc, c.name
-  `;
+  // Čísla nepočítá tenhle dotaz, ale reporting service - jinak by Tým
+  // tvrdil něco jiného než Přehled. Členové bez jediného hovoru dostanou
+  // nuly, ne prázdno.
+  const [people, metrics] = await Promise.all([
+    sql<Caller[]>`
+      select id, name, active, email, phone, created_at
+        from callers order by active desc, name
+    `,
+    getMetricsByCaller(),
+  ]);
+  return people.map((person) => {
+    const stats = metrics.get(person.id);
+    return {
+      ...person,
+      attempts: stats?.attempts ?? 0,
+      connected_calls: stats?.connected ?? 0,
+      meetings_booked: stats?.meetings ?? 0,
+      talk_seconds: stats?.talk_seconds ?? 0,
+      reach_rate: stats?.reach_rate ?? null,
+    };
+  });
 }
 
 export async function createCaller(input: {

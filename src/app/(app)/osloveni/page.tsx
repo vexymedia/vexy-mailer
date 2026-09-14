@@ -83,7 +83,12 @@ export default async function OsloveniPage({
         ).qualification,
       }
     : null;
-  const briefing = held ? await buildCallBriefing(held.prospect, held.campaign.name) : null;
+  const briefing = held
+    ? await buildCallBriefing(held.prospect, held.campaign.name, {
+        callerName: caller.name,
+        campaignOpening: held.script.opening,
+      })
+    : null;
   // Jestli jde volat z prohlížeče, ví server.
   const browserCalling = isTwilioConfigured();
 
@@ -113,13 +118,27 @@ export default async function OsloveniPage({
         />
       ) : null}
 
-      <WorkProgress processed={progress.processed} total={progress.total} />
+      <WorkProgress
+        processed={progress.processed}
+        total={progress.total}
+        metrics={{
+          attempts: progress.attempts,
+          connected: progress.connected,
+          meetings: progress.meetings,
+        }}
+      />
 
       {!held ? (
         progress.remaining === 0 ? (
           <EmptyState
-            title={progress.processed > 0 ? "Hotovo, dnešní fronta je prázdná" : "Na dnešek nemáte nikoho k oslovení"}
-            description="Jakmile připravíme nové firmy nebo nastane čas naplánovaného follow-upu, objeví se tady. Zbytek fronty najdete na záložce Fronta."
+            title={progress.processed > 0 ? "Pro dnešek hotovo" : "Na dnešek nemáte nikoho k oslovení"}
+            description={
+              progress.processed > 0
+                ? `Dnes jste udělali ${progress.attempts} ${plural(progress.attempts, "pokus", "pokusy", "pokusů")}, ` +
+                  `dovolali se ${progress.connected}× a domluvili ${plural(progress.meetings, "schůzku", "schůzky", "schůzek")}. ` +
+                  "Další follow-upy se objeví, až nastane jejich čas."
+                : "Jakmile připravíme nové firmy nebo nastane čas naplánovaného follow-upu, objeví se tady. Zbytek fronty najdete na záložce Fronta."
+            }
             action={{ href: "/firmy", label: "Projít firmy" }}
           />
         ) : (
@@ -156,8 +175,10 @@ export default async function OsloveniPage({
             </p>
           </div>
 
+          {/* Úvodní věta tu schválně není: je v „Jak začít“ přímo nad
+              tlačítkem Zavolat, kde ji caller čte. Dvakrát tentýž text by
+              ho jen nutil porovnávat, jestli se náhodou neliší. */}
           <aside className="space-y-4">
-            <ScriptPanel title="Úvod" text={held.script.opening} />
             <ScriptPanel title="Hodnota / nabídka" text={held.script.value} />
             <ScriptPanel title="Námitky" text={held.script.objections} />
             <ScriptPanel title="Zakončení" text={held.script.closing} />

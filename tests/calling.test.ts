@@ -31,12 +31,16 @@ describe("the call outcomes", () => {
   });
 
   it("keeps the primary buttons down to the handful a caller uses all day", () => {
+    // Šest tlačítek, která caller mačká celý den. "Špatný kontakt" mezi
+    // nimi je schválně: bez něj sáhne po "Nemá zájem" a kvůli jednomu
+    // špatnému číslu zabije celou firmu.
     expect(PRIMARY_CALL_OUTCOMES.map((o) => o.value)).toEqual([
       "meeting_booked",
       "callback",
       "no_answer",
-      "not_interested",
       "send_info",
+      "not_interested",
+      "wrong_number",
     ]);
     expect(PRIMARY_CALL_OUTCOMES.length + SECONDARY_CALL_OUTCOMES.length).toBe(
       CALL_OUTCOMES.length,

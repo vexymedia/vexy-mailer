@@ -1,6 +1,7 @@
 import { listCallersWithTotals } from "@/lib/queries/calling";
 import { saveCallerAction, toggleCallerAction } from "@/lib/actions";
 import { PageHeader, Table, DateTime, EmptyState } from "@/components/ui";
+import { formatPercent } from "@/lib/calling";
 import { ActionForm, SubmitButton } from "@/components/action-form";
 
 export const dynamic = "force-dynamic";
@@ -17,7 +18,7 @@ export default async function TeamPage() {
     <>
       <PageHeader
         title="Tým"
-        description="Kdo zpracovává oslovení. Člověk se nemaže, jen deaktivuje — historie a výsledky se na něj odkazují."
+        description="Kdo zpracovává oslovení. Čísla jsou za celou historii a počítají se stejně jako v Přehledu — jeden klik na Zavolat je jeden pokus."
       />
 
       <div className="mb-6 max-w-2xl">
@@ -54,7 +55,9 @@ export default async function TeamPage() {
               <th className="th">Jméno</th>
               <th className="th">Kontakt</th>
               <th className="th">Stav</th>
-              <th className="th text-right">Dovolané hovory</th>
+              <th className="th text-right">Pokusy o volání</th>
+              <th className="th text-right">Spojené hovory</th>
+              <th className="th text-right">Dovolatelnost</th>
               <th className="th text-right">Domluvené schůzky</th>
               <th className="th">Přidán</th>
               <th className="th"></th>
@@ -75,8 +78,18 @@ export default async function TeamPage() {
                   <span className="badge bg-zinc-50 text-zinc-500 ring-zinc-200">neaktivní</span>
                 )}
               </td>
+              <td className="td text-right tabular-nums">{member.attempts}</td>
               <td className="td text-right tabular-nums">{member.connected_calls}</td>
-              <td className="td text-right tabular-nums">{member.meetings_booked}</td>
+              <td className="td text-right tabular-nums text-zinc-600">
+                {formatPercent(member.reach_rate)}
+              </td>
+              <td
+                className={`td text-right tabular-nums ${
+                  member.meetings_booked > 0 ? "font-medium text-emerald-700" : ""
+                }`}
+              >
+                {member.meetings_booked}
+              </td>
               <td className="td text-xs"><DateTime value={member.created_at} /></td>
               <td className="td text-right">
                 <ActionForm action={toggleCallerAction} hideMessages>

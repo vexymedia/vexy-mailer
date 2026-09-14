@@ -1,8 +1,10 @@
 import { callOutcomeLabel } from "./calling";
-import { formatWhen, isOverdue } from "./datetime";
+import { formatPast, formatWhen, isOverdue } from "./datetime";
 import { getContactTimeline, type CallQueueRow } from "./queries/calling";
 import { getCompanyContext } from "./queries/companies";
+import { buildOpener, buildWhyNow, getLeadContext } from "./queries/lead-context";
 import { companyPriorityLabel, companyStatusLabel } from "./companies";
+import { toLeadContextView } from "./lead-context-view";
 import type { CallBriefing } from "@/components/call-workspace";
 
 /**
@@ -15,15 +17,17 @@ import type { CallBriefing } from "@/components/call-workspace";
 export async function buildCallBriefing(
   prospect: CallQueueRow,
   campaignName: string | null,
+  options: { callerName?: string | null; campaignOpening?: string | null } = {},
 ): Promise<CallBriefing> {
-  const [company, timeline] = await Promise.all([
+  const [company, timeline, leadContext] = await Promise.all([
     getCompanyContext(prospect.company_id),
     getContactTimeline(prospect.id),
+    getLeadContext({ contactId: prospect.contact_id, campaignContactId: prospect.id }),
   ]);
 
   const recent = timeline.slice(0, 3).map((entry) => ({
     id: entry.id,
-    when: formatWhen(entry.occurred_at),
+    when: formatPast(entry.occurred_at),
     text:
       entry.kind === "call"
         ? `hovor — ${callOutcomeLabel(entry.title)}`
@@ -32,8 +36,24 @@ export async function buildCallBriefing(
           : `e-mail — ${entry.title}`,
   }));
 
+  const contactName =
+    [prospect.first_name, prospect.last_name].filter(Boolean).join(" ").trim() || null;
+
   return {
     companyName: company?.name ?? prospect.company ?? null,
+    context: toLeadContextView({
+      whyNow: buildWhyNow(leadContext),
+      loom: leadContext.loom,
+      lastOutbound: leadContext.last_outbound,
+      lastInbound: leadContext.last_inbound,
+      opener: buildOpener({
+        context: leadContext,
+        contactName,
+        companyName: company?.name ?? prospect.company ?? null,
+        callerName: options.callerName ?? null,
+        campaignOpening: options.campaignOpening ?? null,
+      }),
+    }),
     reason: company?.reason ?? null,
     priority: company?.priority ?? null,
     priorityLabel: company ? companyPriorityLabel(company.priority) : null,

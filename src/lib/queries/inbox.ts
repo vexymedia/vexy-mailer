@@ -144,12 +144,24 @@ export interface InboxFilters {
   campaignId?: string | null;
   mailboxId?: string | null;
   search?: string | null;
+  /**
+   * Co se má vypsat.
+   *
+   * "replies" je triage odpovědí - jen vlákna, kde prospekt něco napsal.
+   * "all" je schránka: i vlákna, kde jsme zatím jen odeslali. Redesign
+   * nechal v aplikaci jen první variantu, takže odeslaná pošta v UI
+   * neexistovala a celá Schránka se jevila jako ztracená.
+   */
+  scope?: "replies" | "all";
+  /** Jen konverzace jednoho kontaktu. Pro pohled z detailu firmy. */
+  contactId?: string | null;
 }
 
 /** The inbox list. One row per conversation, newest activity first. */
 export async function listConversations(filters: InboxFilters = {}): Promise<ConversationRow[]> {
   const search = filters.search?.trim() ? `%${filters.search.trim().toLowerCase()}%` : null;
   const filter = filters.filter ?? "all";
+  const scope = filters.scope ?? "replies";
   return sql<ConversationRow[]>`
     select cv.id, cv.unread_count, cv.classification, cv.last_message_at, cv.last_inbound_at,
            cv.subject,
@@ -160,10 +172,13 @@ export async function listConversations(filters: InboxFilters = {}): Promise<Con
            cv.campaign_id,
            mb.from_email as mailbox_email,
            mb.id as mailbox_id,
+           c.company_id,
            (select m.to_email from messages m
              where m.conversation_id = cv.id and m.direction = 'inbound'
              order by m.occurred_at desc limit 1) as replied_to_email,
-           (select count(*)::int from messages m where m.conversation_id = cv.id) as message_count
+           (select count(*)::int from messages m where m.conversation_id = cv.id) as message_count,
+           exists (select 1 from messages m
+                    where m.conversation_id = cv.id and m.direction = 'inbound') as has_inbound
       from conversations cv
       join contacts c on c.id = cv.contact_id
       join mailboxes mb on mb.id = cv.mailbox_id
@@ -172,10 +187,12 @@ export async function listConversations(filters: InboxFilters = {}): Promise<Con
      -- last_inbound_at. Nothing recomputes that column when messages or the
      -- replies behind them are deleted, so trusting it left conversations with
      -- no inbound message at all sitting in the inbox.
-     where exists (
+     where (${scope} = 'all' or exists (
              select 1 from messages m
               where m.conversation_id = cv.id and m.direction = 'inbound'
-           )
+           ))
+       and (${filters.contactId ?? null}::uuid is null
+            or cv.contact_id = ${filters.contactId ?? null}::uuid)
        and (${filter} <> 'unread' or cv.unread_count > 0)
        and (${filter} <> 'positive' or cv.classification = 'positive')
        and (${filter} <> 'needs_action'
@@ -198,7 +215,7 @@ export async function getConversation(id: string): Promise<ConversationDetail | 
            cv.campaign_contact_id, cv.contact_id, cv.mailbox_id,
            c.email as contact_email,
            trim(coalesce(c.first_name, '') || ' ' || coalesce(c.last_name, '')) as contact_name,
-           c.company, c.website,
+           c.company, c.company_id, c.website,
            cp.name as campaign_name,
            mb.from_email as mailbox_email, mb.from_name as mailbox_from_name, mb.enabled as mailbox_enabled,
            cc.status as contact_status

@@ -293,6 +293,11 @@ export interface CompanyContact {
    * nemá telefon.
    */
   callable: boolean;
+  loom_url: string | null;
+  loom_title: string | null;
+  loom_sent_at: Date | null;
+  loom_note: string | null;
+  call_opener: string | null;
 }
 
 export interface CompanyDetail extends CompanyRow {
@@ -347,6 +352,7 @@ export async function getCompany(id: string): Promise<CompanyDetail | null> {
 export async function listCompanyContacts(companyId: string): Promise<CompanyContact[]> {
   return sql<CompanyContact[]>`
     select c.id, c.email, c.phone, c.first_name, c.last_name, c.position, c.is_primary,
+           c.loom_url, c.loom_title, c.loom_sent_at, c.loom_note, c.call_opener,
            cc.id as campaign_contact_id, cp.name as campaign_name,
            cc.call_status, cc.call_attempts, cc.next_call_at,
            cc.last_call_at, cc.last_call_outcome,
@@ -373,15 +379,29 @@ export async function listCompanyContacts(companyId: string): Promise<CompanyCon
   `;
 }
 
+/**
+ * Jednotná historie firmy.
+ *
+ * Chronologie, kterou caller i obchodník čtou shora dolů: kdo, kdy, co a
+ * kam se z toho dá kliknout. Skládá se ze zdrojů, které v systému reálně
+ * jsou - nic se tu nedopočítává a nebuduje se kvůli tomu žádný event log.
+ *
+ * Telefonáty jsou tu dvakrát ze dvou různých důvodů a nesmí se slít:
+ * `call_activities` je obchodní výsledek, `calls` je samotný telefonát.
+ * Hovor bez zapsaného výsledku existuje jen v `calls` - a právě ten se
+ * z timeline dřív ztrácel, takže firma vypadala, že se s ní nic nedělo.
+ */
 export async function getCompanyTimeline(companyId: string): Promise<TimelineEntry[]> {
   return sql<TimelineEntry[]>`
-    select ca.id::text as id, 'call' as kind, ca.called_at as occurred_at,
+    select ca.id::text as id, 'outcome' as kind, ca.called_at as occurred_at,
            ca.outcome as title,
-           concat_ws(' · ', coalesce(c.first_name || ' ' || coalesce(c.last_name, ''), c.email),
-                     'pokus ' || ca.attempt_number,
-                     case when ca.connected then 'dovoláno' else 'nedovoláno' end,
-                     cl.name) as detail,
-           ca.note
+           concat_ws(' · ', coalesce(nullif(btrim(coalesce(c.first_name, '') || ' ' ||
+                                                  coalesce(c.last_name, '')), ''), c.email),
+                     'pokus ' || ca.attempt_number) as detail,
+           ca.note,
+           cl.name as actor,
+           null::text as href,
+           case when ca.connected then 'dovoláno' else 'nedovoláno' end as status
       from call_activities ca
       join contacts c on c.id = ca.contact_id
       left join callers cl on cl.id = ca.caller_id
@@ -389,22 +409,72 @@ export async function getCompanyTimeline(companyId: string): Promise<TimelineEnt
 
     union all
 
+    -- Telefonát bez zapsaného výsledku. S výsledkem už ho popisuje řádek
+    -- výš a dvakrát v historii být nemá.
+    select cal.id::text, 'call', cal.started_at,
+           cal.destination,
+           coalesce(nullif(btrim(coalesce(c.first_name, '') || ' ' ||
+                                 coalesce(c.last_name, '')), ''), c.email),
+           null,
+           cl.name,
+           '/volani/' || cal.id::text,
+           case
+             when cal.answered_at is not null and cal.duration_seconds is not null
+               then 'spojeno · ' || to_char((cal.duration_seconds || ' seconds')::interval, 'MI:SS')
+             when cal.answered_at is not null then 'spojeno'
+             else 'nedovoláno'
+           end
+      from calls cal
+      join contacts c on c.id = cal.contact_id
+      left join callers cl on cl.id = cal.caller_id
+     where cal.company_id = ${companyId}
+       and cal.call_activity_id is null
+       and cal.provider_call_sid is not null
+
+    union all
+
     select es.id::text, 'email', coalesce(es.sent_at, es.claimed_at),
            es.subject,
-           concat_ws(' · ', es.intended_email, 'krok ' || es.step_number, es.status),
-           null
+           concat_ws(' · ', es.intended_email, 'krok ' || es.step_number),
+           null,
+           mb.from_email,
+           (select cv.id::text from conversations cv
+             where cv.campaign_contact_id = cc.id order by cv.created_at limit 1),
+           es.status
       from email_sends es
       join campaign_contacts cc on cc.id = es.campaign_contact_id
       join contacts c on c.id = cc.contact_id
+      left join campaigns cp on cp.id = es.campaign_id
+      left join mailboxes mb on mb.id = cp.mailbox_id
      where c.company_id = ${companyId}
 
     union all
 
     select r.id::text, 'reply', r.received_at,
-           coalesce(r.subject, 'Odpověď'), r.from_email, r.snippet
+           coalesce(r.subject, 'Odpověď'), r.from_email, r.snippet,
+           null,
+           (select cv.id::text from conversations cv
+             where cv.contact_id = r.contact_id order by cv.created_at limit 1),
+           null
       from replies r
       join contacts c on c.id = r.contact_id
      where c.company_id = ${companyId}
+
+    union all
+
+    -- Loom je taky událost: prospekt ho dostal a caller na něj navazuje.
+    select c.id::text, 'loom', c.loom_sent_at,
+           coalesce(c.loom_title, 'Video pro prospekta'),
+           coalesce(nullif(btrim(coalesce(c.first_name, '') || ' ' ||
+                                 coalesce(c.last_name, '')), ''), c.email),
+           c.loom_note,
+           null,
+           c.loom_url,
+           null
+      from contacts c
+     where c.company_id = ${companyId}
+       and c.loom_url is not null
+       and c.loom_sent_at is not null
 
      order by occurred_at desc
      limit 200

@@ -4,6 +4,7 @@ import { getSelectedCallerId } from "@/lib/caller-session";
 import { startCall, logCallStarted } from "@/lib/queries/calls";
 import { isTwilioConfigured } from "@/lib/telephony/twilio";
 import { buildCockpitBriefing } from "@/lib/telephony/briefing";
+import { sql } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
@@ -43,7 +44,25 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Chybí kontakt." }, { status: 400 });
   }
 
+  /**
+   * Hovor musí mít od první vteřiny majitele.
+   *
+   * Attribution se nedá spolehlivě doplnit zpětně - z ownera firmy ani
+   * z poslední aktivity se nepozná, kdo doopravdy mačkal tlačítko. Radši
+   * se tedy hovor nezaloží a caller se nejdřív představí, než aby vznikl
+   * telefonát, který se pak nedá nikomu připsat.
+   */
   const callerId = await getSelectedCallerId();
+  if (!callerId) {
+    return NextResponse.json(
+      {
+        error: "Nejdřív vyberte v Oslovení, kdo volá. Bez toho se hovor nedá nikomu připsat.",
+        code: "no_caller",
+      },
+      { status: 409 },
+    );
+  }
+
   const result = await startCall({ contactId, campaignContactId, callerId });
   if (!result.ok) {
     const status = result.code === "not_found" ? 404 : 409;
@@ -58,10 +77,12 @@ export async function POST(request: NextRequest) {
 
   // Kontext se posílá spolu s hovorem: cockpit ho potřebuje hned, ne až
   // po dalším kole dotazů.
+  const [caller] = await sql<{ name: string }[]>`select name from callers where id = ${callerId}`;
   const briefing = await buildCockpitBriefing({
     contactId: result.call.contactId,
     companyId: result.call.companyId,
     campaignContactId: result.call.campaignContactId,
+    callerName: caller?.name ?? null,
   });
 
   return NextResponse.json(

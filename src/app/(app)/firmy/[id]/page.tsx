@@ -19,6 +19,8 @@ import { isTwilioConfigured } from "@/lib/telephony/twilio";
 import { listCallsForCompany } from "@/lib/queries/calls";
 import { CallHistory } from "@/components/call/call-history";
 import { ContactFormToggle } from "@/components/contact-form";
+import { ActivityTimeline } from "@/components/activity-timeline";
+import { OutreachForm } from "@/components/outreach-form";
 
 export const dynamic = "force-dynamic";
 
@@ -268,6 +270,43 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
                           Tento člověk je na seznamu „nevolat“. Volat mu nelze a nedostane se do fronty.
                         </p>
                       ) : null}
+
+                      {/* Co prospekt dostal. Caller to čte v Oslovení, vyplňuje se tady. */}
+                      <div className="mt-3">
+                        {contact.loom_url ? (
+                          <p className="mb-2 text-xs text-zinc-500">
+                            Loom:{" "}
+                            <a
+                              href={contact.loom_url}
+                              target="_blank"
+                              rel="noreferrer noopener"
+                              className="text-zinc-700 underline underline-offset-2"
+                            >
+                              {contact.loom_title ?? "video"}
+                            </a>
+                            {contact.loom_sent_at ? (
+                              <> · odesláno <DateTime value={contact.loom_sent_at} /></>
+                            ) : null}
+                          </p>
+                        ) : null}
+                        <OutreachForm
+                          contactId={contact.id}
+                          companyId={company.id}
+                          contactLabel={
+                            [contact.first_name, contact.last_name].filter(Boolean).join(" ") ||
+                            contact.email
+                          }
+                          loomUrl={contact.loom_url ?? ""}
+                          loomTitle={contact.loom_title ?? ""}
+                          loomSentAt={
+                            contact.loom_sent_at
+                              ? new Date(contact.loom_sent_at).toISOString().slice(0, 10)
+                              : ""
+                          }
+                          loomNote={contact.loom_note ?? ""}
+                          opener={contact.call_opener ?? ""}
+                        />
+                      </div>
                     </li>
                   );
                 })}
@@ -278,46 +317,13 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
           <CallHistory calls={callRecords} />
 
           <section>
-            <h2 className="section-title mb-3">Co se stalo</h2>
+            <h2 className="section-title mb-3">Historie aktivit</h2>
             {timeline.length === 0 ? (
               <p className="card px-5 py-8 text-center text-sm text-zinc-500">
-                {/* Hovor bez zapsaného výsledku žádnou aktivitu nezaloží. Tvrdit
-                    pod seznamem telefonátů, že jsme nekomunikovali, by ale byl
-                    zjevný nesmysl - ta věta platí jen tehdy, když opravdu nic
-                    nebylo. */}
-                {callRecords.length > 0
-                  ? "Telefonáty jsou výše, ale žádný z nich nemá zapsaný výsledek. Dopište ho v Oslovení > Dnes."
-                  : "S touto firmou jsme zatím nekomunikovali."}
+                S touto firmou jsme zatím nekomunikovali.
               </p>
             ) : (
-              <ol className="space-y-2">
-                {timeline.map((entry) => (
-                  <li
-                    key={`${entry.kind}-${entry.id}`}
-                    className={`card border-l-4 p-4 ${
-                      entry.kind === "call"
-                        ? "border-l-sky-500"
-                        : entry.kind === "reply"
-                          ? "border-l-emerald-500"
-                          : "border-l-zinc-300"
-                    }`}
-                  >
-                    <div className="mb-1 flex flex-wrap items-baseline justify-between gap-2">
-                      <span className="text-sm font-medium text-zinc-900">
-                        {entry.kind === "call" ? "Hovor" : entry.kind === "reply" ? "Odpověď" : "E-mail"}
-                        <span className="ml-2 font-normal text-zinc-700">
-                          {entry.kind === "call" ? callOutcomeLabel(entry.title) : entry.title}
-                        </span>
-                      </span>
-                      <span className="text-xs text-zinc-500"><DateTime value={entry.occurred_at} /></span>
-                    </div>
-                    {entry.detail ? <p className="text-xs text-zinc-500">{entry.detail}</p> : null}
-                    {entry.note ? (
-                      <p className="mt-2 whitespace-pre-wrap text-sm text-zinc-700">{entry.note}</p>
-                    ) : null}
-                  </li>
-                ))}
-              </ol>
+              <ActivityTimeline entries={timeline} />
             )}
           </section>
         </div>

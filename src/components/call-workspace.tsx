@@ -5,6 +5,8 @@ import { useFormStatus } from "react-dom";
 import { logCallAction } from "@/lib/actions";
 import { ActionForm } from "./action-form";
 import { CallButton } from "./call/call-button";
+import { LeadContextPanels } from "./lead-context";
+import type { LeadContextView } from "@/lib/lead-context-view";
 import {
   PRIMARY_CALL_OUTCOMES,
   SECONDARY_CALL_OUTCOMES,
@@ -40,6 +42,8 @@ export interface CallProspect {
 export interface CallBriefing {
   /** Název firmy, pokud ho známe lépe než z textu na kontaktu. */
   companyName: string | null;
+  /** Loom, poslední e-maily, proč voláme teď a čím začít. */
+  context?: LeadContextView;
   reason: string | null;
   priorityLabel: string | null;
   priority: string | null;
@@ -291,6 +295,14 @@ export function CallWorkspace({
           <p className="mt-5 rounded-md bg-zinc-50 px-3 py-2 text-sm text-zinc-700">
             <span className="font-medium">Poslední poznámka:</span> {prospect.call_note}
           </p>
+        ) : null}
+
+        {/* Kontext těsně nad tlačítkem: caller ho čte jako poslední věc
+            před vytočením, takže dál od Zavolat nemá co dělat. */}
+        {briefing?.context ? (
+          <div className="mt-5">
+            <LeadContextPanels view={briefing.context} />
+          </div>
         ) : null}
 
         <div className="mt-6 flex flex-wrap items-center gap-2">

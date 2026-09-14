@@ -12,6 +12,7 @@ export function OsloveniTabs({ active }: { active: string }) {
         { href: "/osloveni", label: "Dnes" },
         { href: "/osloveni/fronta", label: "Fronta" },
         { href: "/osloveni/plan", label: "Plán" },
+        { href: "/osloveni/hovory", label: "Přehled volání" },
       ]}
     />
   );

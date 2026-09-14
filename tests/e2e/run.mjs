@@ -306,12 +306,86 @@ try {
   await expectVisible(page, 'input[name="q"]', "inbox has a search box");
   await shot(page, "inbox");
 
+  // ---- schránka ---------------------------------------------------------
+  // Odpovědi jsou triage reakcí; Schránka je poštovní klient a musí ukázat
+  // i vlákna, kde jsme zatím jen odeslali. Po redesignu tenhle pohled
+  // z aplikace zmizel, takže se hlídá, že tam je.
+  await page.goto(`${BASE}/inbox/schranka`);
+  await expectVisible(page, "h1:has-text('Schránka')", "the mailbox view renders");
+  await expectVisible(page, 'a:has-text("Všechny schránky")', "mailbox picker is present");
+  await expectVisible(page, 'a:has-text("sender@example.com")', "each mailbox can be selected");
+  for (const label of ["Příchozí", "Jen odeslané", "Nepřečtené"]) {
+    await expectVisible(page, `a:has-text("${label}")`, `mailbox filter "${label}" is present`);
+  }
+  await expectVisible(page, 'input[name="q"]', "the mailbox view has a search box");
+
+  // Odeslání v testovacím režimu se jen simuluje a vlákno nezakládá, takže
+  // se sem jedno vloží napřímo - jinak by se browser cesta ke konverzaci
+  // (otevřít, přečíst, odpovědět) nedala projet vůbec.
+  const [seedContact] = await checkDb`select id from contacts where email = 'ann@prospect.test'`;
+  const [seedMailbox] = await checkDb`select id, from_email from mailboxes limit 1`;
+  const [seedThread] = await checkDb`
+    insert into conversations (contact_id, mailbox_id, subject, unread_count)
+    values (${seedContact.id}, ${seedMailbox.id}, 'Spolupráce s Acme', 1)
+    returning id
+  `;
+  await checkDb`
+    insert into messages (conversation_id, direction, kind, from_email, to_email, subject,
+                          body_text, occurred_at)
+    values (${seedThread.id}, 'outbound', 'campaign', ${seedMailbox.from_email},
+            'ann@prospect.test', 'Spolupráce s Acme', 'Dobrý den, posíláme krátké video.',
+            now() - interval '2 days')
+  `;
+
+  await page.goto(`${BASE}/inbox/schranka`);
+  await expectVisible(page, "text=Spolupráce s Acme", "a sent-only thread is listed in the mailbox");
+  await expectVisible(page, "text=zatím bez odpovědi", "a thread with no reply is marked as such");
+  await shot(page, "schranka");
+
+  // Jen odeslané / příchozí skutečně filtruje, ne jen zvýrazní chip.
+  await page.goto(`${BASE}/inbox/schranka?smer=incoming`);
+  await expectVisible(page, "text=Žádná vlákna", "the incoming filter excludes sent-only threads");
+  await page.goto(`${BASE}/inbox/schranka?smer=outgoing`);
+  await expectVisible(page, "text=Spolupráce s Acme", "the sent-only filter keeps them");
+
+  // Odpovědi zůstávají oddělené: vlákno bez odpovědi do triage nepatří.
+  await page.goto(`${BASE}/inbox`);
+  await expectVisible(page, "text=Zatím žádné odpovědi", "replies triage stays reply-only");
+
+  // Prospekt odpoví - vlákno se objeví v obou pohledech a je nepřečtené.
+  await checkDb`
+    insert into messages (conversation_id, direction, kind, from_email, to_email, subject,
+                          body_text, occurred_at)
+    values (${seedThread.id}, 'inbound', 'incoming', 'ann@prospect.test',
+            ${seedMailbox.from_email}, 'Re: Spolupráce s Acme',
+            'Pošlete mi prosím více informací.', now() - interval '1 hour')
+  `;
+  await page.goto(`${BASE}/inbox`);
+  await expectVisible(page, "text=Spolupráce s Acme", "a reply shows up in the triage list");
+
+  await page.goto(`${BASE}/inbox/schranka`);
+  await expectVisible(page, "text=nepřečteno", "an unread thread is marked unread");
+  await page.locator("ul.card a[href^='/inbox/']").first().click();
+  await page.waitForURL(/\/inbox\/[0-9a-f-]{8}/);
+  await expectVisible(page, 'a:has-text("Zpět do schránky")', "a thread opens from the mailbox");
+  await expectVisible(page, "text=Pošlete mi prosím více informací", "the whole conversation is shown");
+  await expectVisible(page, "text=Dobrý den, posíláme krátké video", "outgoing messages are shown too");
+  await expectVisible(page, 'a:has-text("Zobrazit firmu")', "a thread links through to its company");
+  await expectVisible(page, 'button:has-text("Odeslat odpověď")', "the thread can be replied to");
+  await expectVisible(page, `text=Odpovídáte jako`, "the reply goes from the mailbox that sent it");
+  await shot(page, "thread");
+
+  // Otevření vlákna je to, co ho označí jako přečtené.
+  await page.goto(`${BASE}/inbox/schranka`);
+  if ((await page.locator("text=nepřečteno").count()) === 0) ok("opening a thread marks it read");
+  else fail("opening a thread marks it read", "still marked unread");
+
   await page.goto(`${BASE}/mailboxes`);
   await expectVisible(page, "text=Dnes odesláno", "mailboxes list shows today's usage");
   await shot(page, "mailboxes");
 
   // ---- other pages render ----------------------------------------------
-  for (const [path, heading] of [["/activity", "Aktivita"], ["/campaigns", "Kampaně"], ["/contacts", "Kontakty"], ["/inbox", "Odpovědi"], ["/tym", "Tým"], ["/volani", "Volání"], ["/firmy", "Firmy"], ["/osloveni/fronta", "Fronta"], ["/osloveni/plan", "Plán"]]) {
+  for (const [path, heading] of [["/activity", "Aktivita"], ["/campaigns", "Kampaně"], ["/contacts", "Kontakty"], ["/inbox", "Odpovědi"], ["/tym", "Tým"], ["/volani", "Volání"], ["/firmy", "Firmy"], ["/osloveni/fronta", "Fronta"], ["/osloveni/plan", "Plán"], ["/osloveni/hovory", "Přehled volání"], ["/inbox/schranka", "Schránka"]]) {
     await page.goto(BASE + path);
     await expectVisible(page, `h1:has-text("${heading}")`, `${path} renders`);
   }
@@ -416,7 +490,7 @@ try {
   await expectVisible(page, "text=Další krok", "detail firmy ukáže konkrétní další krok");
   await expectVisible(page, "text=Koho kontaktovat", "detail firmy ukáže kontaktní osoby");
   await expectVisible(page, 'a:has-text("Historie")', "kontakt má pracovní kartu s akcemi");
-  await expectVisible(page, "text=Co se stalo", "detail firmy má historii");
+  await expectVisible(page, "text=Historie aktivit", "detail firmy má historii");
 
   await page.fill('textarea[name="reason"]', "Výrobní firma, expanduje, nemá vlastní obchodní tým");
   await page.selectOption('select[name="priority"]', "high");

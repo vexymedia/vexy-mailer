@@ -4,6 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { CALL_UI_LABELS, CallTimer, useCalling, type CallUiState } from "./call-provider";
 import { formatDuration } from "@/lib/telephony/call-state";
+import { LeadContextPanels } from "../lead-context";
 import { PostCallPanel } from "./post-call-panel";
 
 /**
@@ -319,6 +320,15 @@ function CallCockpit() {
                   <p className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-zinc-900">
                     {briefing.reason}
                   </p>
+                </div>
+              ) : null}
+
+              {/* Loom, poslední e-mail a úvodní věta musí být po ruce i
+                  během hovoru - caller se na ně odvolává uprostřed věty
+                  a nemůže kvůli tomu odejít z cockpitu. */}
+              {briefing?.context ? (
+                <div className="mt-4">
+                  <LeadContextPanels view={briefing.context} />
                 </div>
               ) : null}
 

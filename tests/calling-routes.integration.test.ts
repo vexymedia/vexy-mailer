@@ -143,6 +143,13 @@ describe("zahájení hovoru", () => {
 
   it("ignoruje číslo poslané klientem a vezme si ho z databáze", async () => {
     const seeded = await seed();
+    // Hovor bez vybraného callera se od téhle verze nezaloží vůbec - viz
+    // test níž. Tady jde o něco jiného, takže caller prostě vybraný je.
+    selectedCaller = await (await import("@/lib/queries/calling")).createCaller({
+      name: "Jan",
+      email: null,
+      phone: null,
+    });
     const { POST } = await import("@/app/api/calling/calls/route");
     const response = await POST(
       new NextRequest(`${BASE}/api/calling/calls`, {
@@ -162,6 +169,29 @@ describe("zahájení hovoru", () => {
 
     const [row] = await sql<{ destination: string }[]>`select destination from calls`;
     expect(row.destination).toBe("+420777123456");
+  });
+
+  it("bez vybraného callera hovor nezaloží", async () => {
+    const seeded = await seed();
+    selectedCaller = null;
+
+    const { POST } = await import("@/app/api/calling/calls/route");
+    const response = await POST(
+      new NextRequest(`${BASE}/api/calling/calls`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ campaignContactId: seeded.campaignContactId }),
+      }),
+    );
+
+    // Hovor, který se nedá nikomu připsat, je pro reporting ztracený.
+    // Radši se nezaloží, než aby vznikl bez majitele.
+    expect(response.status).toBe(409);
+    const body = (await response.json()) as { code: string };
+    expect(body.code).toBe("no_caller");
+
+    const [row] = await sql<{ count: number }[]>`select count(*)::int as count from calls`;
+    expect(row.count).toBe(0);
   });
 
   it("odmítne nesmyslné id", async () => {

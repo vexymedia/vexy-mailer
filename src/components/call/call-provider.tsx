@@ -12,6 +12,7 @@ import {
 } from "react";
 import type { Call, Device } from "@twilio/voice-sdk";
 import { callErrorCode, callErrorMessage } from "@/lib/telephony/call-state";
+import type { LeadContextView } from "@/lib/lead-context-view";
 
 /**
  * Stav hovoru na úrovni aplikace.
@@ -59,6 +60,8 @@ export interface CallTarget {
 
 export interface CallBriefing {
   position: string | null;
+  /** Loom, poslední e-maily, proč voláme teď a čím začít. */
+  context?: LeadContextView;
   email: string | null;
   reason: string | null;
   priorityLabel: string | null;

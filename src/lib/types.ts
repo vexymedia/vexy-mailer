@@ -243,6 +243,10 @@ export interface ConversationRow {
   /** The address the prospect actually replied to. */
   replied_to_email: string | null;
   message_count: number;
+  /** Firma kontaktu, když je navázaná. Odkaz do CRM, ne dohadování podle jména. */
+  company_id: string | null;
+  /** Má vlákno vůbec nějakou příchozí zprávu? Odlišuje odpověď od pouhého odeslání. */
+  has_inbound: boolean;
 }
 
 export interface ConversationDetail {
@@ -257,6 +261,7 @@ export interface ConversationDetail {
   contact_email: string;
   contact_name: string | null;
   company: string | null;
+  company_id: string | null;
   website: string | null;
   campaign_name: string | null;
   mailbox_email: string;

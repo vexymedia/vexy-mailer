@@ -15,6 +15,9 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
   // Opening a conversation is what marks it read.
   if (conversation.unread_count > 0) await markConversationRead(id);
   const messages = await listMessages(id);
+  // Odeslané vlákno a vlákno s odpovědí se chovají jinak vůči kadenci,
+  // takže si nemůžou nést stejnou poznámku.
+  const hasInbound = messages.some((message) => message.direction === "inbound");
 
   return (
     <>
@@ -33,7 +36,14 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
           <>
             <ClassificationBadge value={conversation.classification} />
             {conversation.contact_status ? <StatusBadge status={conversation.contact_status} /> : null}
-            <Link href="/inbox" className="btn-secondary">Zpět do pošty</Link>
+            {/* Vazba na CRM jen tam, kde skutečně existuje. Dohadovat firmu
+                podle jména by dřív nebo později spojilo špatné dvě. */}
+            {conversation.company_id ? (
+              <Link href={`/firmy/${conversation.company_id}`} className="btn-secondary">
+                Zobrazit firmu
+              </Link>
+            ) : null}
+            <Link href="/inbox/schranka" className="btn-secondary">Zpět do schránky</Link>
           </>
         }
       />
@@ -116,10 +126,17 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
               ) : null}
             </dl>
           </div>
-          <p className="px-1 text-xs text-zinc-500">
-            Tento prospekt odpověděl, takže automatické follow-upy se zastavily. Odpověď odsud ho
-            do sekvence nevrátí.
-          </p>
+          {hasInbound ? (
+            <p className="px-1 text-xs text-zinc-500">
+              Tento prospekt odpověděl, takže automatické follow-upy se zastavily. Odpověď odsud ho
+              do sekvence nevrátí.
+            </p>
+          ) : (
+            <p className="px-1 text-xs text-zinc-500">
+              Zatím jsme jen psali — prospekt neodpověděl. Kampaňová sekvence běží dál; ruční
+              odpověď odsud ji nezastaví.
+            </p>
+          )}
 
           <div className="card p-4">
             <h2 className="mb-1 text-sm font-semibold text-zinc-900">Odebrat</h2>

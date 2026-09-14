@@ -14,6 +14,7 @@ import { findUnknownVariables } from "@/lib/template";
 import {
   createContact,
   importContacts,
+  saveOutreachContext,
   suppressEmail,
   unsuppressEmail,
   updateContact,
@@ -960,6 +961,7 @@ const CONTACT_ERRORS: Record<string, string> = {
   invalid_email: "Zadejte platnou e-mailovou adresu.",
   invalid_phone:
     "Telefonní číslo nejde vytočit. Zadejte ho jako 737485738 nebo +420737485738.",
+  invalid_url: "Odkaz na video musí začínat http:// nebo https://.",
   not_found: "Firma nebo kontakt nebyly nalezeny.",
 };
 
@@ -992,6 +994,44 @@ export async function saveContactAction(
   if (companyId) revalidatePath(`/firmy/${companyId}`);
   revalidatePath("/firmy");
   return { success: contactId ? "Kontakt upraven." : "Kontakt přidán." };
+}
+
+/**
+ * Co prospekt dostal a čím na to navázat.
+ *
+ * Vlastní akce, ne součást uložení kontaktu: kdo doplňuje Loom, needituje
+ * jméno a telefon - a obráceně. Jedna sloučená akce by při uložení
+ * kontaktu Loom smazala.
+ */
+export async function saveOutreachContextAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  await requireAuth();
+  const contactId = String(formData.get("contact_id") ?? "").trim();
+  if (!contactId) return fail("Chybí kontakt.");
+  const companyId = String(formData.get("company_id") ?? "").trim();
+
+  const rawSentAt = String(formData.get("loom_sent_at") ?? "").trim();
+  let loomSentAt: Date | null = null;
+  if (rawSentAt) {
+    const parsed = new Date(rawSentAt);
+    if (Number.isNaN(parsed.getTime())) return fail("Datum odeslání videa není platné.");
+    loomSentAt = parsed;
+  }
+
+  const result = await saveOutreachContext(contactId, {
+    loomUrl: String(formData.get("loom_url") ?? ""),
+    loomTitle: String(formData.get("loom_title") ?? ""),
+    loomSentAt,
+    loomNote: String(formData.get("loom_note") ?? ""),
+    opener: String(formData.get("call_opener") ?? ""),
+  });
+  if (!result.ok) return fail(CONTACT_ERRORS[result.error] ?? "Kontext se nepodařilo uložit.");
+
+  if (companyId) revalidatePath(`/firmy/${companyId}`);
+  revalidatePath("/osloveni");
+  return { success: "Kontext oslovení uložen." };
 }
 
 // ----------------------------------------------------------- týdenní plán

@@ -1,8 +1,10 @@
 import { sql } from "../db";
 import { callOutcomeLabel } from "../calling";
 import { companyPriorityLabel, companyStatusLabel } from "../companies";
-import { formatWhen } from "../datetime";
+import { formatPast, formatWhen } from "../datetime";
 import { getContactTimeline } from "../queries/calling";
+import { buildOpener, buildWhyNow, getLeadContext } from "../queries/lead-context";
+import { toLeadContextView } from "../lead-context-view";
 import type { CallBriefing } from "@/components/call/call-provider";
 
 /**
@@ -15,6 +17,8 @@ export async function buildCockpitBriefing(input: {
   contactId: string;
   companyId: string | null;
   campaignContactId: string | null;
+  /** Kdo volá. Jde jen do úvodní věty, nikam se neukládá. */
+  callerName?: string | null;
 }): Promise<CallBriefing> {
   const [row] = await sql<
     {
@@ -46,9 +50,13 @@ export async function buildCockpitBriefing(input: {
      where c.id = ${input.contactId}
   `;
 
-  const timeline = input.campaignContactId
-    ? await getContactTimeline(input.campaignContactId)
-    : [];
+  const [timeline, leadContext] = await Promise.all([
+    input.campaignContactId ? getContactTimeline(input.campaignContactId) : [],
+    // Během hovoru je to potřeba stejně jako před ním: caller se na Loom
+    // nebo na poslední e-mail odvolává uprostřed věty a nesmí kvůli tomu
+    // odejít z cockpitu na jinou obrazovku.
+    getLeadContext({ contactId: input.contactId, campaignContactId: input.campaignContactId }),
+  ]);
 
   const script = [
     { title: "Úvod", text: row?.script_opening },
@@ -70,7 +78,7 @@ export async function buildCockpitBriefing(input: {
     script,
     recent: timeline.slice(0, 3).map((entry) => ({
       id: entry.id,
-      when: formatWhen(entry.occurred_at),
+      when: formatPast(entry.occurred_at),
       text:
         entry.kind === "call"
           ? `hovor — ${callOutcomeLabel(entry.title)}`
@@ -79,5 +87,18 @@ export async function buildCockpitBriefing(input: {
             : `e-mail — ${entry.title}`,
     })),
     nextStep: row?.next_call_at ? `Zavolat · ${formatWhen(row.next_call_at)}` : null,
+    context: toLeadContextView({
+      whyNow: buildWhyNow(leadContext),
+      loom: leadContext.loom,
+      lastOutbound: leadContext.last_outbound,
+      lastInbound: leadContext.last_inbound,
+      opener: buildOpener({
+        context: leadContext,
+        contactName: null,
+        companyName: null,
+        callerName: input.callerName ?? null,
+        campaignOpening: row?.script_opening ?? null,
+      }),
+    }),
   };
 }

@@ -7,6 +7,7 @@ export function KomunikaceTabs({ active }: { active: string }) {
       active={active}
       items={[
         { href: "/inbox", label: "Odpovědi" },
+        { href: "/inbox/schranka", label: "Schránka" },
         { href: "/campaigns", label: "Kampaně" },
       ]}
     />
