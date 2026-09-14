@@ -21,6 +21,7 @@ export default async function NewCampaignPage() {
             // a deliberate act, not a default.
             mailbox_ids: [],
             daily_limit: 50,
+            new_ratio: 70,
             send_days: [1, 2, 3, 4, 5],
             send_start: "08:00",
             send_end: "16:00",

@@ -52,6 +52,18 @@ export function ReplyComposer({
   );
 }
 
+/**
+ * Rychlé zařazení odpovědi.
+ *
+ * Tlačítka místo rozbalovacího seznamu s tlačítkem Uložit: triage
+ * odpovědi je jedno rozhodnutí, ne formulář. Nejčastější volby jsou
+ * napřed, zbytek zůstává v seznamu pod nimi.
+ *
+ * Kliknutí zároveň udělá to, co z rozhodnutí plyne - odhlásí, zastaví
+ * sekvenci - takže se kvůli jedné odpovědi neotevírají další obrazovky.
+ */
+const QUICK: Classification[] = ["positive", "later", "not_interested", "wrong_person", "unsubscribe"];
+
 export function ClassificationPicker({
   conversationId,
   value,
@@ -62,12 +74,32 @@ export function ClassificationPicker({
   return (
     <ActionForm action={classifyConversationAction} hideMessages>
       <input type="hidden" name="conversation_id" value={conversationId} />
+      <div className="mb-2 flex flex-wrap gap-1.5">
+        {QUICK.map((key) => {
+          const label = CLASSIFICATIONS.find((c) => c.value === key)?.label ?? key;
+          return (
+            <SubmitButton
+              key={key}
+              name="classification"
+              value={key}
+              className={`!px-2.5 !py-1 text-xs ${
+                value === key
+                  ? "btn-primary"
+                  : "btn-secondary"
+              }`}
+              pendingLabel="…"
+            >
+              {label}
+            </SubmitButton>
+          );
+        })}
+      </div>
       <select name="classification" defaultValue={value} className="input text-sm">
         {CLASSIFICATIONS.map((c) => (
           <option key={c.value} value={c.value}>{c.label}</option>
         ))}
       </select>
-      <SubmitButton className="btn-secondary mt-2 w-full" pendingLabel="Ukládám…">Uložit stav</SubmitButton>
+      <SubmitButton className="btn-secondary mt-2 w-full" pendingLabel="Ukládám…">Uložit jiný stav</SubmitButton>
     </ActionForm>
   );
 }

@@ -2,15 +2,17 @@ import Link from "next/link";
 import { sql } from "@/lib/db";
 import { listMailboxes } from "@/lib/queries/mailboxes";
 import { allMailboxCapacity } from "@/lib/engine/allocation";
+import { listMailboxHealth, mailboxProblem } from "@/lib/queries/deliverability";
 import { PageHeader, Table, EmptyState, DateTime } from "@/components/ui";
 import { NastaveniTabs } from "@/components/section-tabs";
 
 export const dynamic = "force-dynamic";
 
 export default async function MailboxesPage() {
-  const [mailboxes, capacity, campaignCounts] = await Promise.all([
+  const [mailboxes, capacity, health, campaignCounts] = await Promise.all([
     listMailboxes(),
     allMailboxCapacity(sql),
+    listMailboxHealth(),
     sql<{ mailbox_id: string; count: number }[]>`
       select cm.mailbox_id, count(*)::int as count
         from campaign_mailboxes cm
@@ -21,16 +23,39 @@ export default async function MailboxesPage() {
   ]);
 
   const usage = new Map(capacity.map((c) => [c.mailbox_id, c]));
+  const healthById = new Map(health.map((h) => [h.mailbox_id, h]));
+  const problems = health
+    .map((h) => ({ mailbox: h, problem: mailboxProblem(h) }))
+    .filter((p): p is { mailbox: (typeof health)[number]; problem: string } => p.problem !== null);
   const activeCampaigns = new Map(campaignCounts.map((c) => [c.mailbox_id, c.count]));
 
   return (
     <>
       <PageHeader
         title="Schránky"
-        description="Každá schránka má vlastní denní limit, který platí napříč všemi kampaněmi."
         actions={<Link href="/mailboxes/new" className="btn-primary">Přidat schránku</Link>}
       />
       <NastaveniTabs active={"/mailboxes"} />
+
+      {/* Problémy nahoru. Sloupec s čísly je k ničemu, když člověk musí
+          sám poznat, že tři reputation bloky jsou víc než nula. */}
+      {problems.length > 0 ? (
+        <div className="mb-5 rounded-md border border-amber-200 bg-amber-50 px-4 py-3">
+          <p className="text-sm font-medium text-amber-900">
+            {problems.length === 1 ? "1 schránka vyžaduje pozornost" : `${problems.length} schránek vyžaduje pozornost`}
+          </p>
+          <ul className="mt-1 space-y-0.5">
+            {problems.map((p) => (
+              <li key={p.mailbox.mailbox_id} className="text-sm text-amber-900">
+                <Link href={`/mailboxes/${p.mailbox.mailbox_id}`} className="font-medium underline underline-offset-2">
+                  {p.mailbox.from_email}
+                </Link>{" "}
+                — {p.problem}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
       {mailboxes.length === 0 ? (
         <EmptyState
@@ -46,9 +71,9 @@ export default async function MailboxesPage() {
               <th className="th">SMTP</th>
               <th className="th">IMAP</th>
               <th className="th">Dnes odesláno</th>
+              <th className="th" title="Za posledních 7 dní">Nedoručeno (7 dní)</th>
               <th className="th text-right">Kampaně</th>
               <th className="th">Poslední odeslání</th>
-              <th className="th">Poslední kontrola pošty</th>
             </tr>
           }
         >
@@ -104,9 +129,36 @@ export default async function MailboxesPage() {
                     />
                   </div>
                 </td>
+                <td className="td text-xs">
+                  {(() => {
+                    const h = healthById.get(mailbox.id);
+                    if (!h) return <span className="text-zinc-400">—</span>;
+                    if (h.hard_invalid + h.temporary + h.reputation_blocks === 0) {
+                      return <span className="text-zinc-400">bez chyb</span>;
+                    }
+                    return (
+                      <span className="space-x-2 tabular-nums">
+                        {h.hard_invalid > 0 ? (
+                          <span className="text-red-600" title="Adresa neexistuje">
+                            {h.hard_invalid} neexistuje
+                          </span>
+                        ) : null}
+                        {h.temporary > 0 ? (
+                          <span className="text-zinc-600" title="Dočasná chyba doručení">
+                            {h.temporary} dočasně
+                          </span>
+                        ) : null}
+                        {h.reputation_blocks > 0 ? (
+                          <span className="font-medium text-amber-700" title="Reputace nebo politika serveru">
+                            {h.reputation_blocks} reputace
+                          </span>
+                        ) : null}
+                      </span>
+                    );
+                  })()}
+                </td>
                 <td className="td text-right tabular-nums">{activeCampaigns.get(mailbox.id) ?? 0}</td>
                 <td className="td text-xs"><DateTime value={mailbox.last_send_at} fallback="nikdy" /></td>
-                <td className="td text-xs"><DateTime value={mailbox.imap_last_checked_at} fallback="nikdy" /></td>
               </tr>
             );
           })}

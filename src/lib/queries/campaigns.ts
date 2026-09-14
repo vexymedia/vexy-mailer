@@ -241,6 +241,8 @@ export async function setCampaignMailboxes(
 
 export interface CampaignScheduleInput {
   daily_limit: number;
+  /** Podíl nových kontaktů. Když chybí, zůstává, co je uložené. */
+  new_ratio?: number;
   send_days: number[];
   send_start_minute: number;
   send_end_minute: number;
@@ -278,6 +280,7 @@ export async function saveCampaignSchedule(
   await sql`
     update campaigns
        set daily_limit = ${input.daily_limit},
+           new_ratio = coalesce(${input.new_ratio ?? null}::int, new_ratio),
            send_days = ${input.send_days},
            send_start_minute = ${input.send_start_minute},
            send_end_minute = ${input.send_end_minute},

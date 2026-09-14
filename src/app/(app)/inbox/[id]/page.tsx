@@ -6,6 +6,10 @@ import { callerMaySeeConversation } from "@/lib/queries/clients";
 import { PageHeader, DateTime, StatusBadge } from "@/components/ui";
 import { ClassificationBadge } from "@/components/inbox-bits";
 import { ClassificationPicker, DeleteConversationButton, ReplyComposer } from "@/components/conversation-actions";
+import { CallButton } from "@/components/call/call-button";
+import { isTwilioConfigured } from "@/lib/telephony/twilio";
+import { callStatusLabel } from "@/lib/calling";
+import { formatWhen } from "@/lib/datetime";
 
 export const dynamic = "force-dynamic";
 
@@ -22,6 +26,8 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
   const { id } = await params;
   const user = await requireUser();
   const canManage = user.role === "admin";
+  // Jestli jde volat z prohlížeče, ví server. Klient si to nevymýšlí.
+  const browserCalling = isTwilioConfigured();
 
   // Caller vidí jen konverzace kontaktů ze svých kampaní. Odkaz na vlákno
   // dostane z pracovní karty, ale id se dá napsat i ručně - a cizí klient
@@ -139,6 +145,37 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
             <h2 className="mb-3 text-sm font-semibold text-zinc-900">Detaily</h2>
             <dl className="space-y-2 text-xs">
               <div><dt className="text-zinc-500">Kontakt</dt><dd className="text-zinc-900">{conversation.contact_email}</dd></div>
+              {/* Telefon je tu schválně: na část odpovědí se líp reaguje
+                  hovorem než dalším e-mailem, a přepínat se kvůli tomu na
+                  jinou obrazovku je zbytečné. */}
+              {conversation.phone ? (
+                <div>
+                  <dt className="text-zinc-500">Telefon</dt>
+                  <dd className="flex flex-wrap items-center gap-2">
+                    <span className="tabular-nums text-zinc-900">{conversation.phone}</span>
+                    <CallButton
+                      phone={conversation.phone}
+                      contactId={conversation.contact_id}
+                      campaignContactId={conversation.campaign_contact_id ?? undefined}
+                      browserCalling={browserCalling}
+                      className="btn-go !px-2 !py-1 text-xs"
+                    >
+                      Zavolat
+                    </CallButton>
+                  </dd>
+                </div>
+              ) : null}
+              {conversation.call_status ? (
+                <div>
+                  <dt className="text-zinc-500">Stav volání</dt>
+                  <dd className="text-zinc-900">
+                    {callStatusLabel(conversation.call_status)}
+                    {conversation.next_call_at ? (
+                      <span className="text-zinc-500"> · {formatWhen(conversation.next_call_at)}</span>
+                    ) : null}
+                  </dd>
+                </div>
+              ) : null}
               {conversation.company ? (
                 <div><dt className="text-zinc-500">Firma</dt><dd className="text-zinc-900">{conversation.company}</dd></div>
               ) : null}

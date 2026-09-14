@@ -20,10 +20,7 @@ export default async function TeamPage() {
 
   return (
     <>
-      <PageHeader
-        title="Tým"
-        description="Kdo zpracovává oslovení a na kterých kampaních. Bez přidělené kampaně caller nedostane žádnou práci."
-      />
+      <PageHeader title="Tým" description="Bez přidělené kampaně caller nedostane práci." />
 
       <div className="mb-6 max-w-2xl">
         <ActionForm action={saveCallerAction} className="card p-5">

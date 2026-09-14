@@ -186,6 +186,7 @@ const mailboxSchema = z.object({
   imap_password: z.string().nullable(),
   imap_secure: z.boolean(),
   daily_limit: z.coerce.number().int().min(1).max(2000),
+  new_ratio: z.coerce.number().int().min(0).max(100).default(70),
   timezone: z.string().min(1),
   enabled: z.boolean(),
 });
@@ -210,6 +211,7 @@ function mailboxFromForm(formData: FormData) {
     imap_password: text("imap_password"),
     imap_secure: formData.get("imap_secure") === "on",
     daily_limit: formData.get("daily_limit"),
+    new_ratio: formData.get("new_ratio") ?? 70,
     timezone: String(formData.get("mailbox_timezone") ?? "Europe/Prague"),
     enabled: formData.get("enabled") === "on",
   });
@@ -292,6 +294,7 @@ const campaignSchema = z.object({
   name: z.string().min(1, "Pojmenujte kampaň."),
   mailbox_ids: z.array(z.string().uuid()).min(1, "Vyberte alespoň jednu odesílací schránku."),
   daily_limit: z.coerce.number().int().min(1).max(2000),
+  new_ratio: z.coerce.number().int().min(0).max(100).default(70),
   timezone: z.string().min(1),
   send_days: z.array(z.number().int().min(1).max(7)).min(1, "Vyberte alespoň jeden den odesílání."),
   send_start_minute: z.number().int().min(0).max(1439),
@@ -323,6 +326,7 @@ export async function saveCampaignAction(_prev: ActionState, formData: FormData)
     name: String(formData.get("name") ?? "").trim(),
     mailbox_ids: formData.getAll("mailbox_ids").map(String).filter(Boolean),
     daily_limit: formData.get("daily_limit"),
+    new_ratio: formData.get("new_ratio") ?? 70,
     timezone,
     send_days: formData.getAll("send_days").map(Number),
     send_start_minute: startMinute,
@@ -341,6 +345,7 @@ export async function saveCampaignAction(_prev: ActionState, formData: FormData)
     // keep the campaign parked under settings that no longer apply.
     ({ cursorCleared } = await saveCampaignSchedule(id, {
       daily_limit: data.daily_limit,
+      new_ratio: data.new_ratio,
       send_days: data.send_days,
       send_start_minute: data.send_start_minute,
       send_end_minute: data.send_end_minute,
@@ -349,9 +354,9 @@ export async function saveCampaignAction(_prev: ActionState, formData: FormData)
   } else {
     // Always draft. A new campaign never starts on its own.
     const [row] = await sql<{ id: string }[]>`
-      insert into campaigns (name, daily_limit, send_days,
+      insert into campaigns (name, daily_limit, new_ratio, send_days,
                              send_start_minute, send_end_minute, timezone, status)
-      values (${data.name}, ${data.daily_limit}, ${data.send_days},
+      values (${data.name}, ${data.daily_limit}, ${data.new_ratio}, ${data.send_days},
               ${data.send_start_minute}, ${data.send_end_minute}, ${data.timezone}, 'draft')
       returning id
     `;
@@ -548,6 +553,28 @@ export async function unsuppressEmailAction(_prev: ActionState, formData: FormDa
   return { success: "Odebráno ze seznamu Nekontaktovat." };
 }
 
+/**
+ * Hromadné vrácení do oběhu.
+ *
+ * Odhlášení, stížnosti na spam a ruční bloky neprojdou - a není to
+ * kontrola v UI, kterou by šlo obejít jinou cestou: odmítá je sama
+ * `restoreSuppressed`.
+ */
+export async function restoreSuppressedAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  await requireAdmin();
+  const { restoreSuppressed, SUPPRESSION_LABELS } = await import("@/lib/queries/suppression");
+  const code = String(formData.get("reason_code") ?? "") as
+    import("@/lib/queries/suppression").SuppressionReasonCode;
+  if (!(code in SUPPRESSION_LABELS)) return fail("Neznámý důvod.");
+
+  const result = await restoreSuppressed(code);
+  revalidatePath("/suppression");
+  if (result.refused) {
+    return fail("Odhlášení, stížnosti na spam ani ruční bloky se hromadně nevracejí.");
+  }
+  return { success: `Vráceno do oběhu: ${result.restored}.` };
+}
+
 export async function removeFromCampaignAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
   await requireAdmin();
   const id = String(formData.get("campaign_contact_id") ?? "");
@@ -600,6 +627,22 @@ export async function sendReplyAction(_prev: ActionState, formData: FormData): P
   return { success: "Odpověď odeslána." };
 }
 
+/**
+ * Zařazení odpovědi - a všechno, co z něj plyne.
+ *
+ * Dřív to jen přepsalo štítek. Člověk pak musel zvlášť zastavit sekvenci
+ * a zvlášť odhlásit adresu, tedy otevřít další dvě obrazovky kvůli jedné
+ * odpovědi. Teď se to udělá zároveň, protože jinak to udělat nedává
+ * smysl:
+ *
+ *   Odhlásit    → globální suppression (a tím i konec všech sekvencí)
+ *   Nemá zájem  → konec sekvencí u tohohle kontaktu
+ *   Špatná osoba → konec sekvence JEN u tohohle kontaktu, ne u firmy
+ *
+ * Pozitivní a Později sekvenci nezastavují nad rámec toho, co už udělala
+ * samotná odpověď: kontakt je od ní `replied` a žádný další automat mu
+ * nic nepošle.
+ */
 export async function classifyConversationAction(
   _prev: ActionState,
   formData: FormData,
@@ -607,10 +650,33 @@ export async function classifyConversationAction(
   await requireAdmin();
   const conversationId = String(formData.get("conversation_id") ?? "");
   const classification = String(formData.get("classification") ?? "unclassified") as Classification;
+
+  const { getConversation } = await import("@/lib/queries/inbox");
+  const conversation = await getConversation(conversationId);
+  if (!conversation) return fail("Konverzace nebyla nalezena.");
+
   await setClassification(conversationId, classification);
+
+  if (classification === "unsubscribe") {
+    const { suppressEmail } = await import("@/lib/queries/contacts");
+    await suppressEmail(conversation.contact_email, "unsubscribe", "Zařazeno ručně v Komunikaci.", {
+      reasonCode: "unsubscribe",
+      source: "inbox",
+    });
+  } else if (classification === "not_interested" || classification === "wrong_person") {
+    // Konec automatiky na tomhle kontaktu. Firma se NEuzavírá: "špatná
+    // osoba" znamená špatnou osobu, ne špatnou firmu.
+    await sql`
+      update campaign_contacts
+         set next_send_at = null, updated_at = now()
+       where contact_id = ${conversation.contact_id}
+         and status in ('pending', 'scheduled', 'sent')
+    `;
+  }
+
   revalidatePath(`/inbox/${conversationId}`);
   revalidatePath("/inbox");
-  return { success: "Stav uložen." };
+  return { success: "Uloženo." };
 }
 
 export async function markReadAction(_prev: ActionState, formData: FormData): Promise<ActionState> {

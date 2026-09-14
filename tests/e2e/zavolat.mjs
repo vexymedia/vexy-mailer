@@ -49,6 +49,14 @@ function check(label, condition, detail = "") {
 }
 
 const sql = postgres(DATABASE_URL, { max: 1, prepare: false });
+
+// Koho se čeká v cockpitu, se čte z databáze, ne z konstanty ve skriptu:
+// jinak by se skript dal pustit jen proti jednomu konkrétnímu seedu.
+const [expected] = await sql`
+  select coalesce(nullif(btrim(coalesce(first_name,'') || ' ' || coalesce(last_name,'')), ''), email) as name,
+         phone
+    from contacts where id = ${CONTACT_ID}
+`;
 const browser = await chromium.launch({
   ...(CHROMIUM ? { executablePath: CHROMIUM } : {}),
   // Mikrofon bez hardwaru: prohlížeč podstrčí tichý vstup. Nenahrazuje to
@@ -94,9 +102,12 @@ try {
   const telLinks = await page.locator('a[href^="tel:"]').count();
   check("na detailu firmy není žádný odkaz tel:", telLinks === 0, `nalezeno ${telLinks}`);
 
+  // Hlavičkové CTA + jedno tlačítko na každý kontakt s telefonem, takže
+  // přesný počet závisí na datech. Podstatné je, že jich je aspoň dvě
+  // (obě varianty z detailu firmy) a že žádné z nich není odkaz.
   const buttons = page.locator("button[data-call-button='twilio']");
   const buttonCount = await buttons.count();
-  check("obě tlačítka Zavolat jsou <button>", buttonCount === 2, `nalezeno ${buttonCount}`);
+  check("obě varianty tlačítka Zavolat jsou <button>", buttonCount >= 2, `nalezeno ${buttonCount}`);
 
   const tagNames = await buttons.evaluateAll((nodes) => nodes.map((n) => n.tagName));
   check("žádné z nich není <a>", tagNames.every((t) => t === "BUTTON"), tagNames.join(", "));
@@ -129,7 +140,8 @@ try {
   check("hovor sedí na správný kontakt", row?.contact_id === CONTACT_ID, String(row?.contact_id));
   check("hovor sedí na správnou firmu", row?.company_id === COMPANY_ID, String(row?.company_id));
   check("hovor má přiřazeného callera", row?.caller_id === CALLER_ID, String(row?.caller_id));
-  check("vytáčí se číslo z databáze", row?.destination === "+420777123456", String(row?.destination));
+  check("vytáčí se číslo z databáze", row?.destination === expected?.phone,
+    `${row?.destination} != ${expected?.phone}`);
 
   check(
     "prohlížeč otevřel Twilio signalizační WebSocket",
@@ -142,8 +154,8 @@ try {
   check("otevřel se cockpit hovoru", (await cockpit.count()) === 1, "cockpit na stránce není");
 
   const text = (await cockpit.count()) ? await cockpit.innerText() : await page.locator("body").innerText();
-  check("cockpit ukazuje volaný kontakt", text.includes("Ana Nováková"), text.slice(0, 400));
-  check("cockpit ukazuje vytáčené číslo", text.includes("+420777123456"), text.slice(0, 400));
+  check("cockpit ukazuje volaný kontakt", text.includes(expected?.name ?? "\u0000"), text.slice(0, 400));
+  check("cockpit ukazuje vytáčené číslo", text.includes(expected?.phone ?? "\u0000"), text.slice(0, 400));
   const stateVisible = ["Vytáčím", "Vyzvání", "Hovor", "Nepodařilo se", "Hovor ukončen"]
     .filter((label) => text.includes(label));
   check("stav hovoru je vidět", stateVisible.length > 0, text.slice(0, 400));

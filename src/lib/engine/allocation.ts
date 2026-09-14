@@ -27,8 +27,19 @@ type Db = Sql | TransactionSql;
  * should never be blocked because a cold-email quota ran out.
  */
 
-/** Statuses that consume quota. `unknown` counts because it may have been delivered. */
-export const QUOTA_CONSUMING_STATUSES = ["sent", "unknown", "skipped"] as const;
+/**
+ * Statuses that consume quota.
+ *
+ * `sending` counts, and that is the whole of the concurrency guarantee.
+ * A claimed row is a RESERVED slot: it has been committed, it will turn
+ * into sent / unknown / skipped (all of which count), and until it does,
+ * a second worker must already see it. Leaving it out is what let two
+ * workers both read 99 of 100 and both send.
+ *
+ * `unknown` counts because it may have been delivered. `failed` does not:
+ * the server refused it, so the slot is genuinely free again.
+ */
+export const QUOTA_CONSUMING_STATUSES = ["sending", "sent", "unknown", "skipped"] as const;
 
 export interface MailboxCapacity {
   mailbox_id: string;

@@ -27,6 +27,8 @@ import { ImportForm } from "@/components/import-form";
 import { ContactRowActions } from "@/components/contact-row-actions";
 import { CallingSettingsForm } from "@/components/calling-settings-form";
 import { EconomicsForm } from "@/components/economics-form";
+import { SendingStatusPanel } from "@/components/sending-status";
+import { getSendingStatus } from "@/lib/queries/sending-status";
 import { CallButton } from "@/components/call/call-button";
 import { isTwilioConfigured } from "@/lib/telephony/twilio";
 import type { Campaign } from "@/lib/types";
@@ -117,7 +119,7 @@ export default async function CampaignDetailPage({
       </div>
 
       {tab === "prehled" ? (
-        <OverviewTab campaignId={id} stats={stats} campaignDailyLimit={campaign.daily_limit} />
+        <OverviewTab campaignId={id} stats={stats} />
       ) : null}
       {tab === "pilot" ? <PilotTab campaignId={id} /> : null}
       {tab === "kontakty" ? <ContactsTab campaignId={id} /> : null}
@@ -132,39 +134,26 @@ export default async function CampaignDetailPage({
 async function OverviewTab({
   campaignId,
   stats,
-  campaignDailyLimit,
 }: {
   campaignId: string;
   stats: Awaited<ReturnType<typeof listCampaignStats>>[number] | undefined;
-  campaignDailyLimit: number;
 }) {
-  const readiness = await checkCampaignReadiness(campaignId);
+  const [readiness, sending] = await Promise.all([
+    checkCampaignReadiness(campaignId),
+    getSendingStatus(campaignId),
+  ]);
   const replyRate = stats && stats.sent > 0 ? `${((stats.replies / stats.sent) * 100).toFixed(1)} %` : "—";
 
   return (
     <div className="space-y-6">
       <Readiness problems={readiness.problems} />
 
-      {/* Dnešní odeslání je provozní otázka číslo jedna: běží to, a kolik
-          ještě dnes odejde? Počítá se stejně jako v odesílači - v časové
-          zóně kampaně a včetně simulovaných odeslání - aby se obrazovka
+      {/* Dnešek jako první věc na obrazovce: kolik odešlo, jak se to dělí
+          mezi nové a follow-upy, co čeká a jestli je něco rozbité.
+          Počítá se stejnými podmínkami jako v odesílači - v časové zóně
+          kampaně a včetně rezervovaných odeslání - aby se obrazovka
           a worker nemohly rozejít. */}
-      <div className="card flex flex-wrap items-baseline justify-between gap-3 p-6">
-        <div>
-          <p className="text-xs text-zinc-500">Odesláno dnes</p>
-          <p className="mt-0.5 text-2xl font-semibold tabular-nums text-zinc-900">
-            {stats?.sent_today ?? 0}{" "}
-            <span className="text-base font-normal text-zinc-400">
-              / {campaignDailyLimit}
-            </span>
-          </p>
-        </div>
-        <p className="text-sm text-zinc-500">
-          {(stats?.sent_today ?? 0) >= campaignDailyLimit
-            ? "Dnešní limit je vyčerpaný, další e-maily odejdou zítra."
-            : `Dnes ještě může odejít ${campaignDailyLimit - (stats?.sent_today ?? 0)} e-mailů.`}
-        </p>
-      </div>
+      {sending ? <SendingStatusPanel status={sending} /> : null}
 
       <div className="card grid grid-cols-2 gap-6 p-6 sm:grid-cols-3 lg:grid-cols-6">
         <Stat label="Kontakty" value={stats?.contacts ?? 0} />

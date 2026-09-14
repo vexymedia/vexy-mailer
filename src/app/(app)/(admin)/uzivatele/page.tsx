@@ -30,7 +30,7 @@ export default async function UsersPage() {
     <>
       <PageHeader
         title="Uživatelé"
-        description="Kdo se může přihlásit. Caller vidí jen svoji práci, administrátor i nastavení."
+        description="Kdo se může přihlásit."
       />
       <NastaveniTabs active="/uzivatele" />
 

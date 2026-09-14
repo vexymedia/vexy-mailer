@@ -6,6 +6,8 @@ import { classifyImapError, fetchNewMessages, hasImapConfigured, type InboxMessa
 import { withLock } from "./locks";
 import type { Mailbox } from "../types";
 import { recordInboundMessage } from "../queries/inbox";
+import { classifyInbound, parseReturnDate } from "../inbound";
+import { recordBounce } from "../queries/deliverability";
 
 /**
  * Reply detection.
@@ -18,8 +20,17 @@ import { recordInboundMessage } from "../queries/inbox";
  *      clients that drop threading headers, forwarded replies and replies sent
  *      from an alias-free "reply all".
  *
- * Either way the effect is the same and immediate: the contact is marked
- * replied and drops out of every remaining follow-up.
+ * Co se s nálezem stane, ale záleží na tom, CO přišlo. Dřív se každá
+ * příchozí zpráva zpracovala jako lidská odpověď - takže "jsem do 15. 8.
+ * mimo kancelář" natrvalo ukončilo sekvenci a postmaster s bouncem seděl
+ * v sales inboxu vedle skutečných odpovědí. Klasifikace je v
+ * `src/lib/inbound.ts`, tady se z ní jen vyvozují důsledky:
+ *
+ *   human       → kontakt označen replied, sekvence končí, do inboxu
+ *   unsubscribe → totéž + globální suppression
+ *   ooo         → sekvence se ODLOŽÍ, nekončí; mimo "K vyřízení"
+ *   bounce      → zpracuje se jako nedoručení, do inboxu vůbec nejde
+ *   auto        → uloží se do vlákna, sekvencí ani inboxem nehne
  */
 
 const REPLY_LOCK_TTL_MS = 120_000;
@@ -127,6 +138,15 @@ async function processMailbox(mailbox: Mailbox): Promise<ReplyPollSummary["mailb
       const target = (await matchByThread(message)) ?? (await matchBySender(message, mailbox.id));
       const contactId = target?.contact_id ?? (await findContactId(message.from));
 
+      // CO to je. Tohle rozhoduje o všem, co následuje.
+      const verdict = classifyInbound({
+        from: message.from,
+        subject: message.subject,
+        bodyText: message.bodyText,
+        headers: message.headers,
+        contentType: message.contentType,
+      });
+
       // Record the reply first. The unique (mailbox_id, imap_message_id) index
       // makes re-processing the same physical message a no-op.
       const inserted = await sql<{ id: string }[]>`
@@ -139,6 +159,26 @@ async function processMailbox(mailbox: Mailbox): Promise<ReplyPollSummary["mailb
         returning id
       `;
       if (inserted.length === 0) continue; // already seen
+
+      // ------------------------------------------------------------ bounce
+      //
+      // Hlášení od poštovního serveru není konverzace. Nezakládá vlákno,
+      // neobjeví se v sales inboxu a rozhodně neoznačí kontakt za toho,
+      // kdo odpověděl. Jde do deliverability, kde se z něj dá něco
+      // vyvodit o naší doméně.
+      if (verdict.class === "bounce") {
+        await recordBounce({
+          mailboxId: mailbox.id,
+          contactId,
+          campaignContactId: target?.campaign_contact_id ?? null,
+          subject: message.subject,
+          bodyText: message.bodyText,
+          headers: message.headers ?? {},
+          fromEmail: mailbox.from_email,
+          receivedAt: message.receivedAt,
+        });
+        continue;
+      }
 
       // Persist into the unified inbox. Only possible when we know who wrote:
       // a conversation is keyed on (mailbox, contact).
@@ -158,11 +198,57 @@ async function processMailbox(mailbox: Mailbox): Promise<ReplyPollSummary["mailb
           references: message.references,
           replyId: inserted[0].id,
           receivedAt: message.receivedAt,
+          messageClass: verdict.class,
         });
       }
 
       if (!target) continue; // a reply from someone who is not in a campaign
 
+      // --------------------------------------------------- mimo kancelář
+      //
+      // Není to odpověď a není to konec. Sekvence se ODLOŽÍ - na datum
+      // návratu, když ho zpráva uvádí, jinak o bezpečný týden. Ukončit ji
+      // kvůli automatické odpovědi znamená ztratit lead, který o nás
+      // zatím vůbec nerozhodl.
+      if (verdict.class === "ooo") {
+        const returnDate = parseReturnDate(message.bodyText, message.receivedAt);
+        const resumeAt = returnDate && returnDate.getTime() > message.receivedAt.getTime()
+          ? new Date(returnDate.getTime() + 86_400_000)
+          : new Date(message.receivedAt.getTime() + 7 * 86_400_000);
+        await sql`
+          update campaign_contacts
+             set next_send_at = greatest(next_send_at, ${resumeAt}), updated_at = now()
+           where id = ${target.campaign_contact_id}
+             and status in ('scheduled', 'sent')
+        `;
+        await logActivity({
+          action: "Automatická odpověď o nepřítomnosti",
+          detail: `${message.from}: sekvence odložena na ${resumeAt.toISOString().slice(0, 10)}` +
+                  (returnDate ? " (datum návratu ze zprávy)" : " (datum návratu nebylo uvedeno)"),
+          campaignId: target.campaign_id,
+          contactId: target.contact_id,
+          campaignContactId: target.campaign_contact_id,
+        });
+        continue;
+      }
+
+      // ----------------------------------------------- automatická zpráva
+      //
+      // Potvrzení z ticketovacího systému, notifikace, no-reply. Uloží se
+      // do vlákna kvůli historii, ale nic nespouští.
+      if (verdict.class === "auto") continue;
+
+      // ------------------------------------------------------- odhlášení
+      if (verdict.class === "unsubscribe" && message.from) {
+        const { suppressEmail } = await import("../queries/contacts");
+        await suppressEmail(message.from, "unsubscribe", "Vyžádáno v odpovědi na e-mail.", {
+          reasonCode: "unsubscribe",
+          source: "reply",
+        });
+      }
+
+      // ---------------------------------------------------- lidská odpověď
+      //
       // Immediate removal from the sequence: next_send_at is cleared, so the
       // dispatcher's candidate query can never pick this contact up again.
       //

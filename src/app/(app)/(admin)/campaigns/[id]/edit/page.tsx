@@ -29,6 +29,7 @@ export default async function EditCampaignPage({ params }: { params: Promise<{ i
             name: campaign.name,
             mailbox_ids: selected,
             daily_limit: campaign.daily_limit,
+            new_ratio: campaign.new_ratio,
             send_days: campaign.send_days,
             send_start: minutesToHHMM(campaign.send_start_minute),
             send_end: minutesToHHMM(campaign.send_end_minute),

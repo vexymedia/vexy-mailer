@@ -105,6 +105,8 @@ export interface InboundMessageInput {
   references?: string | null;
   replyId?: string | null;
   receivedAt: Date;
+  /** Druh zprávy podle `src/lib/inbound.ts`. Řídí, co se objeví v inboxu. */
+  messageClass?: import("../inbound").MessageClass;
 }
 
 /** Stores an incoming reply and marks the conversation unread. */
@@ -119,28 +121,55 @@ export async function recordInboundMessage(input: InboundMessageInput): Promise<
   const inserted = await sql<{ id: string }[]>`
     insert into messages (conversation_id, direction, kind, from_email, to_email, subject,
                           body_text, body_html, message_id, in_reply_to, message_references,
-                          reply_id, occurred_at, is_read)
+                          reply_id, occurred_at, is_read, message_class)
     values (${conversationId}, 'inbound', 'incoming', ${input.fromEmail}, ${input.toEmail},
             ${input.subject}, ${input.bodyText}, ${input.bodyHtml}, ${input.messageId},
             ${input.inReplyTo ?? null}, ${input.references ?? null}, ${input.replyId ?? null},
-            ${input.receivedAt}, false)
+            ${input.receivedAt}, false, ${input.messageClass ?? "human"})
     on conflict (conversation_id, message_id) where message_id is not null do nothing
     returning id
   `;
   if (inserted.length === 0) return; // already stored
 
+  // Nepřečtené se počítá jen u toho, co má člověk skutečně číst.
+  // Automatická odpověď nemá rozsvítit "1 nepřečtená" v sales inboxu.
+  const countsAsUnread = (input.messageClass ?? "human") === "human" ||
+    input.messageClass === "unsubscribe";
   await sql`
     update conversations
        set last_message_at = greatest(last_message_at, ${input.receivedAt}),
            last_inbound_at = greatest(coalesce(last_inbound_at, ${input.receivedAt}), ${input.receivedAt}),
-           unread_count = unread_count + 1,
+           unread_count = unread_count + ${countsAsUnread ? 1 : 0},
+           classification = case
+             when ${input.messageClass ?? "human"} = 'ooo' and classification = 'unclassified'
+               then 'ooo'
+             else classification
+           end,
            updated_at = now()
      where id = ${conversationId}
   `;
 }
 
+/**
+ * Pohledy na Komunikaci.
+ *
+ * Výchozí je "todo" - K vYŘÍZENÍ. Sto padesát vláken, kde jsme jen něco
+ * poslali a nikdo neodpověděl, není pracovní inbox; je to seznam, který
+ * nikdo neprojde. Co vyžaduje člověka, je úzká množina: skutečné lidské
+ * odpovědi, které ještě nikdo nezařadil.
+ */
+export type InboxView = "todo" | "positive" | "later" | "resolved" | "all" | "unread";
+
+export const INBOX_VIEWS: { key: InboxView; label: string }[] = [
+  { key: "todo", label: "K vyřízení" },
+  { key: "positive", label: "Pozitivní" },
+  { key: "later", label: "Později / mimo kancelář" },
+  { key: "resolved", label: "Vyřešené" },
+  { key: "all", label: "Vše" },
+];
+
 export interface InboxFilters {
-  filter?: "all" | "unread" | "positive" | "needs_action";
+  view?: InboxView;
   campaignId?: string | null;
   mailboxId?: string | null;
   search?: string | null;
@@ -157,11 +186,47 @@ export interface InboxFilters {
   contactId?: string | null;
 }
 
+/**
+ * Podmínka pohledu. Jeden fragment, který se používá i pro počty, aby se
+ * číslo na záložce nemohlo rozejít s tím, co je pod ní.
+ *
+ * "K vyřízení" stojí na DVOU věcech současně: přišla lidská zpráva
+ * (`message_class = 'human'`), a nikdo ji ještě nezařadil. Bounce, OOO
+ * ani automatické potvrzení tuhle podmínku nesplní, takže se do sales
+ * inboxu nedostanou vůbec - a odeslaná pošta bez odpovědi taky ne.
+ */
+function viewCondition(db: Db, view: InboxView) {
+  const humanInbound = db`exists (
+    select 1 from messages m
+     where m.conversation_id = cv.id
+       and m.direction = 'inbound'
+       and m.message_class in ('human', 'unsubscribe')
+  )`;
+  switch (view) {
+    case "todo":
+      return db`${humanInbound} and cv.classification = 'unclassified'`;
+    case "positive":
+      return db`cv.classification = 'positive'`;
+    case "later":
+      return db`cv.classification in ('later', 'ooo')`;
+    case "resolved":
+      return db`cv.classification in ('not_interested', 'wrong_person', 'unsubscribe', 'other')`;
+    case "unread":
+      return db`cv.unread_count > 0`;
+    case "all":
+    default:
+      return db`true`;
+  }
+}
+
 /** The inbox list. One row per conversation, newest activity first. */
 export async function listConversations(filters: InboxFilters = {}): Promise<ConversationRow[]> {
   const search = filters.search?.trim() ? `%${filters.search.trim().toLowerCase()}%` : null;
-  const filter = filters.filter ?? "all";
   const scope = filters.scope ?? "replies";
+  // Výchozí pohled závisí na rozsahu. Schránka (`scope: "all"`) ukazuje
+  // i vlákna, kde jsme jen odeslali - tam "K vyřízení" nedává smysl,
+  // protože ta podmínka vyžaduje lidskou zprávu.
+  const view = filters.view ?? (scope === "all" ? "all" : "todo");
   return sql<ConversationRow[]>`
     select cv.id, cv.unread_count, cv.classification, cv.last_message_at, cv.last_inbound_at,
            cv.subject,
@@ -193,10 +258,7 @@ export async function listConversations(filters: InboxFilters = {}): Promise<Con
            ))
        and (${filters.contactId ?? null}::uuid is null
             or cv.contact_id = ${filters.contactId ?? null}::uuid)
-       and (${filter} <> 'unread' or cv.unread_count > 0)
-       and (${filter} <> 'positive' or cv.classification = 'positive')
-       and (${filter} <> 'needs_action'
-            or cv.classification in ('unclassified', 'positive', 'later'))
+       and (${viewCondition(sql, view)})
        and (${filters.campaignId ?? null}::uuid is null or cv.campaign_id = ${filters.campaignId ?? null}::uuid)
        and (${filters.mailboxId ?? null}::uuid is null or cv.mailbox_id = ${filters.mailboxId ?? null}::uuid)
        and (${search}::text is null
@@ -215,7 +277,9 @@ export async function getConversation(id: string): Promise<ConversationDetail | 
            cv.campaign_contact_id, cv.contact_id, cv.mailbox_id,
            c.email as contact_email,
            trim(coalesce(c.first_name, '') || ' ' || coalesce(c.last_name, '')) as contact_name,
-           c.company, c.company_id, c.website,
+           c.company, c.company_id, c.website, c.phone,
+           cc.call_status,
+           cc.next_call_at,
            cp.name as campaign_name,
            mb.from_email as mailbox_email, mb.from_name as mailbox_from_name, mb.enabled as mailbox_enabled,
            cc.status as contact_status
@@ -327,19 +391,20 @@ export async function buildReplyHeaders(conversationId: string): Promise<ThreadH
   };
 }
 
-export interface InboxCounts {
-  all: number;
-  unread: number;
-  positive: number;
-  needs_action: number;
-}
+export type InboxCounts = Record<InboxView, number>;
 
+/**
+ * Počty na záložkách. Počítají se stejnými podmínkami jako samotné
+ * výpisy - jinak by záložka slibovala tři položky a otevřela jednu.
+ */
 export async function getInboxCounts(): Promise<InboxCounts> {
   const [row] = await sql<InboxCounts[]>`
-    select count(*)::int as all,
-           count(*) filter (where unread_count > 0)::int as unread,
-           count(*) filter (where classification = 'positive')::int as positive,
-           count(*) filter (where classification in ('unclassified','positive','later'))::int as needs_action
+    select count(*) filter (where ${viewCondition(sql, "todo")})::int as todo,
+           count(*) filter (where ${viewCondition(sql, "positive")})::int as positive,
+           count(*) filter (where ${viewCondition(sql, "later")})::int as later,
+           count(*) filter (where ${viewCondition(sql, "resolved")})::int as resolved,
+           count(*) filter (where ${viewCondition(sql, "unread")})::int as unread,
+           count(*)::int as all
       from conversations cv
      where exists (
              select 1 from messages m

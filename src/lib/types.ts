@@ -87,7 +87,13 @@ export interface Campaign {
   /** @deprecated superseded by campaign_mailboxes; retained for history. */
   mailbox_id: string | null;
   status: CampaignStatus;
+  /** Tvrdý strop: kolik e-mailů smí kampaň za den odeslat CELKEM. */
   daily_limit: number;
+  /**
+   * Kolik procent denního limitu si drží nové kontakty. Follow-upy
+   * dostanou zbytek - jedno číslo, ne dvě, aby nešlo nastavit 70 + 40.
+   */
+  new_ratio: number;
   send_days: number[];
   send_start_minute: number;
   send_end_minute: number;
@@ -265,6 +271,11 @@ export interface ConversationDetail {
   company: string | null;
   company_id: string | null;
   website: string | null;
+  /** Telefon prospekta. Odpověď se často řeší líp hovorem než dalším e-mailem. */
+  phone: string | null;
+  /** Stav z telefonní půlky, ať se nemusí otevírat další obrazovka. */
+  call_status: string | null;
+  next_call_at: Date | null;
   campaign_name: string | null;
   mailbox_email: string;
   mailbox_from_name: string;
