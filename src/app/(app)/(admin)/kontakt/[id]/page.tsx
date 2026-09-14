@@ -4,6 +4,8 @@ import { getCallContact, getContactTimeline } from "@/lib/queries/calling";
 import { MEETING_OUTCOME_LABELS, callOutcomeLabel, callStatusLabel, formatCzk } from "@/lib/calling";
 import { PageHeader, Stat, StatusBadge, DateTime } from "@/components/ui";
 import { MeetingActions } from "@/components/meeting-actions";
+import { CallButton } from "@/components/call/call-button";
+import { isTwilioConfigured } from "@/lib/telephony/twilio";
 
 export const dynamic = "force-dynamic";
 
@@ -16,6 +18,8 @@ export default async function ContactTimelinePage({ params }: { params: Promise<
   const contact = await getCallContact(id);
   if (!contact) notFound();
   const timeline = await getContactTimeline(id);
+  // Jestli jde volat z prohlížeče, ví server. Klient si to nevymýšlí.
+  const browserCalling = isTwilioConfigured();
 
   const name = [contact.first_name, contact.last_name].filter(Boolean).join(" ") || contact.email;
 
@@ -34,9 +38,14 @@ export default async function ContactTimelinePage({ params }: { params: Promise<
         }
         actions={
           contact.phone ? (
-            <a href={`tel:${contact.phone.replace(/\s+/g, "")}`} className="btn-go">
+            <CallButton
+              phone={contact.phone}
+              contactId={contact.contact_id}
+              campaignContactId={contact.id}
+              browserCalling={browserCalling}
+            >
               VOLAT {contact.phone}
-            </a>
+            </CallButton>
           ) : null
         }
       />

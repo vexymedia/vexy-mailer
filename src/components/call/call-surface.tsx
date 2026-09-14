@@ -95,6 +95,7 @@ function StartupBar() {
 
   return (
     <div
+      data-call-surface="startup"
       className={`fixed inset-x-0 bottom-0 z-30 text-white shadow-lg lg:left-60 ${
         failed ? "bg-red-800" : "bg-zinc-900"
       }`}
@@ -141,6 +142,7 @@ function CallBar() {
 
   return (
     <div
+      data-call-surface="bar"
       className={`fixed inset-x-0 bottom-0 z-30 text-white shadow-lg lg:left-60 ${
         reconnecting ? "bg-amber-600" : STATE_TONE[state]
       } ${cockpitOpen ? "hidden" : ""}`}
@@ -217,7 +219,10 @@ function CallCockpit() {
   const finished = state === "ended" || state === "failed";
 
   return (
-    <div className="fixed inset-0 z-40 overflow-y-auto bg-zinc-950/50 backdrop-blur-[1px]">
+    <div
+      data-call-surface="cockpit"
+      className="fixed inset-0 z-40 overflow-y-auto bg-zinc-950/50 backdrop-blur-[1px]"
+    >
       <div className="mx-auto min-h-full w-full max-w-5xl p-3 sm:p-6">
         <div className="card overflow-hidden">
           {/* --------------------------------------------------- hlavička */}

@@ -3,6 +3,8 @@ import { listContactOverview } from "@/lib/queries/contacts";
 import { PageHeader, StatusBadge, Table, DateTime } from "@/components/ui";
 import { ImportForm } from "@/components/import-form";
 import { SuppressButton } from "@/components/suppress-button";
+import { CallButton } from "@/components/call/call-button";
+import { isTwilioConfigured } from "@/lib/telephony/twilio";
 
 export const dynamic = "force-dynamic";
 
@@ -20,6 +22,8 @@ export default async function ContactsPage({
     offset: (pageNumber - 1) * limit,
   });
   const pages = Math.max(1, Math.ceil(total / limit));
+  // Jestli jde volat z prohlížeče, ví server. Klient si to nevymýšlí.
+  const browserCalling = isTwilioConfigured();
 
   return (
     <>
@@ -77,9 +81,14 @@ export default async function ContactsPage({
               <td className="td">{row.company ?? "—"}</td>
               <td className="td text-xs">
                 {row.phone ? (
-                  <a href={`tel:${row.phone.replace(/\s+/g, "")}`} className="text-zinc-900 hover:underline">
+                  <CallButton
+                    phone={row.phone}
+                    contactId={row.id}
+                    browserCalling={browserCalling}
+                    className="text-left text-zinc-900 underline-offset-2 hover:underline disabled:no-underline"
+                  >
                     {row.phone}
-                  </a>
+                  </CallButton>
                 ) : (
                   <span className="text-zinc-400">—</span>
                 )}

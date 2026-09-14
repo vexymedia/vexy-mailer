@@ -27,6 +27,8 @@ import { ImportForm } from "@/components/import-form";
 import { ContactRowActions } from "@/components/contact-row-actions";
 import { CallingSettingsForm } from "@/components/calling-settings-form";
 import { EconomicsForm } from "@/components/economics-form";
+import { CallButton } from "@/components/call/call-button";
+import { isTwilioConfigured } from "@/lib/telephony/twilio";
 import type { Campaign } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -266,6 +268,8 @@ async function CallingTab({ campaign, filter: rawFilter }: { campaign: Campaign;
     getCampaignCallingReport(campaign.id),
     listCallContacts(campaign.id, filter),
   ]);
+  // Jestli jde volat z prohlížeče, ví server. Klient si to nevymýšlí.
+  const browserCalling = isTwilioConfigured();
 
   const tile = (key: CallFilter, label: string, value: number, tone?: "good" | "danger") => (
     <Link key={key} href={`/campaigns/${campaign.id}?tab=volani&filter=${key}`} className="block rounded-md p-1 hover:bg-zinc-50">
@@ -409,9 +413,14 @@ async function CallingTab({ campaign, filter: rawFilter }: { campaign: Campaign;
                 </td>
                 <td className="td text-xs">
                   {row.phone ? (
-                    <a href={`tel:${row.phone.replace(/\s+/g, "")}`} className="text-zinc-900 hover:underline">
+                    <CallButton
+                      phone={row.phone}
+                      campaignContactId={row.id}
+                      browserCalling={browserCalling}
+                      className="text-left text-zinc-900 underline-offset-2 hover:underline disabled:no-underline"
+                    >
                       {row.phone}
-                    </a>
+                    </CallButton>
                   ) : (
                     <span className="badge bg-amber-50 text-amber-700 ring-amber-200">chybí</span>
                   )}

@@ -40,6 +40,7 @@
     "dotenv": "^17.4.2",
     "eslint": "^9.39.5",
     "eslint-config-next": "^15.5.25",
+    "jsdom": "^30.0.1",
     "playwright": "^1.63.0",
     "postcss": "^8.5.28",
     "smtp-server": "^3.19.9",
