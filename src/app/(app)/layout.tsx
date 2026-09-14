@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { requireAuth } from "@/lib/auth";
+import { requireUser } from "@/lib/auth";
 import { getSettings } from "@/lib/settings";
 import { MobileNav, SidebarRail } from "@/components/sidebar";
 import { CallProvider } from "@/components/call/call-provider";
@@ -15,7 +15,7 @@ export const dynamic = "force-dynamic";
  * práci - tedy špatně nastavené přesměrování.
  */
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
-  await requireAuth();
+  const user = await requireUser();
   const settings = await getSettings();
 
   const misconfigured = settings.test_mode && settings.test_behavior === "redirect" && !settings.test_email;
@@ -27,9 +27,9 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     // stránka, takže přechod na jinou obrazovku ho nepoloží.
     <CallProvider>
       <div className="flex min-h-screen bg-zinc-50">
-        <SidebarRail modeLabel={modeLabel} modeTone={modeTone} />
+        <SidebarRail modeLabel={modeLabel} modeTone={modeTone} role={user.role} userName={user.name} />
         <div className="flex min-w-0 flex-1 flex-col">
-          <MobileNav modeLabel={modeLabel} modeTone={modeTone} />
+          <MobileNav modeLabel={modeLabel} modeTone={modeTone} role={user.role} userName={user.name} />
           {misconfigured ? (
             <div className="border-b border-amber-200 bg-amber-50 px-6 py-2 text-sm text-amber-900">
               Je zvolené přesměrování, ale chybí testovací adresa — nic se neodešle.{" "}

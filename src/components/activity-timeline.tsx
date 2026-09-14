@@ -34,7 +34,6 @@ function title(entry: TimelineEntry): string {
 }
 
 function linkLabel(kind: TimelineKind): string {
-  if (kind === "call") return "Nahrávka a přepis";
   if (kind === "loom") return "Otevřít video";
   return "Otevřít konverzaci";
 }

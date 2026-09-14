@@ -39,7 +39,11 @@ function Icon({ d }: { d: string }) {
   );
 }
 
-const ITEMS: Item[] = [
+/**
+ * Menu administrátora. Sedm položek podle toho, jak den probíhá:
+ * co se děje → koho řešíme → co mám udělat → co přišlo → co se stalo.
+ */
+const ADMIN_ITEMS: Item[] = [
   { href: "/", label: "Přehled", icon: <Icon d="M3 12h6v9H3zM9 3h6v18H9zM15 8h6v13h-6z" /> },
   { href: "/firmy", label: "Firmy", also: ["/kontakt", "/contacts"], icon: <Icon d="M3 21h18M5 21V7l7-4 7 4v14M9 9h.01M15 9h.01M9 13h.01M15 13h.01M9 17h.01M15 17h.01" /> },
   { href: "/osloveni", label: "Oslovení", also: ["/volani"], icon: <Icon d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.1 9.9a16 16 0 0 0 6 6l1.26-1.26a2 2 0 0 1 2.11-.45c.9.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z" /> },
@@ -47,6 +51,18 @@ const ITEMS: Item[] = [
   { href: "/activity", label: "Aktivita", icon: <Icon d="M3 12h4l3 8 4-16 3 8h4" /> },
   { href: "/tym", label: "Tým", also: ["/calleri"], icon: <Icon d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" /> },
   { href: "/settings", label: "Nastavení", also: ["/mailboxes", "/suppression"], icon: <Icon d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /> },
+];
+
+/**
+ * Menu callera.
+ *
+ * Dvě položky, protože víc jich k práci nepotřebuje. Zbytek aplikace je
+ * administrace a schovávat ji za šest nedostupných řádků by callera jen
+ * nutil hádat, co smí. Odhlášení zůstává dole jako u admina.
+ */
+const CALLER_ITEMS: Item[] = [
+  { href: "/osloveni", label: "Dnes", icon: <Icon d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.1 9.9a16 16 0 0 0 6 6l1.26-1.26a2 2 0 0 1 2.11-.45c.9.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z" /> },
+  { href: "/firmy", label: "Firmy", also: ["/kontakt"], icon: <Icon d="M3 21h18M5 21V7l7-4 7 4v14M9 9h.01M15 9h.01M9 13h.01M15 13h.01M9 17h.01M15 17h.01" /> },
 ];
 
 function isActive(pathname: string, item: Item): boolean {
@@ -58,10 +74,14 @@ function isActive(pathname: string, item: Item): boolean {
 function NavList({
   modeLabel,
   modeTone,
+  role,
+  userName,
   onNavigate,
 }: {
   modeLabel: string;
   modeTone: "live" | "test" | "warn";
+  role: "admin" | "caller";
+  userName: string;
   onNavigate?: () => void;
 }) {
   const pathname = usePathname();
@@ -76,14 +96,18 @@ function NavList({
   return (
     <nav className="flex h-full flex-col">
       <div className="px-5 py-5">
-        <Link href="/" className="text-[15px] font-semibold tracking-tight text-white" onClick={onNavigate}>
+        <Link
+          href={role === "admin" ? "/" : "/osloveni"}
+          className="text-[15px] font-semibold tracking-tight text-white"
+          onClick={onNavigate}
+        >
           VEXY
         </Link>
         <p className="mt-0.5 text-[11px] text-zinc-500">Obchodní příprava a oslovení</p>
       </div>
 
       <ul className="flex-1 space-y-0.5 px-3">
-        {ITEMS.map((item) => {
+        {(role === "admin" ? ADMIN_ITEMS : CALLER_ITEMS).map((item) => {
           const active = isActive(pathname, item);
           return (
             <li key={item.href}>
@@ -106,12 +130,15 @@ function NavList({
       </ul>
 
       <div className="space-y-3 border-t border-white/10 px-5 py-4">
-        <Link href="/settings" onClick={onNavigate} className={`badge w-full justify-center ring-1 ${toneClass}`}>
-          {modeLabel}
-        </Link>
+        {role === "admin" ? (
+          <Link href="/settings" onClick={onNavigate} className={`badge w-full justify-center ring-1 ${toneClass}`}>
+            {modeLabel}
+          </Link>
+        ) : null}
+        <p className="truncate text-xs text-zinc-300">{userName}</p>
         <form action={logoutAction}>
           <button type="submit" className="text-xs text-zinc-500 transition-colors hover:text-zinc-200">
-            Odhlásit
+            Odhlásit se
           </button>
         </form>
       </div>
@@ -120,7 +147,14 @@ function NavList({
 }
 
 /** Pevná navigace na desktopu. */
-export function SidebarRail(props: { modeLabel: string; modeTone: "live" | "test" | "warn" }) {
+export interface NavProps {
+  modeLabel: string;
+  modeTone: "live" | "test" | "warn";
+  role: "admin" | "caller";
+  userName: string;
+}
+
+export function SidebarRail(props: NavProps) {
   return (
     <aside className="hidden w-60 shrink-0 border-r border-zinc-800 bg-zinc-900 lg:block">
       <div className="sticky top-0 h-screen">
@@ -136,7 +170,7 @@ export function SidebarRail(props: { modeLabel: string; modeTone: "live" | "test
  * Patří dovnitř obsahového sloupce, ne vedle sidebaru - jako flex sourozenec
  * by obsah odsunula do strany a stránka by přetékala do šířky.
  */
-export function MobileNav(props: { modeLabel: string; modeTone: "live" | "test" | "warn" }) {
+export function MobileNav(props: NavProps) {
   const [open, setOpen] = useState(false);
 
   return (

@@ -28,9 +28,28 @@ const TWILIO_ENV = {
 let authenticated = true;
 let selectedCaller: string | null = null;
 
+/**
+ * Přihlášený administrátor. Tenhle soubor testuje routy, ne oprávnění -
+ * ta mají vlastní testy v authorization.integration.test.ts.
+ */
+const SIGNED_IN_ADMIN = {
+  id: "00000000-0000-0000-0000-0000000000ad",
+  email: "admin@vexy.cz",
+  name: "Admin",
+  role: "admin" as const,
+  caller_id: null,
+  is_active: true,
+  created_at: new Date(),
+};
+
 vi.mock("@/lib/auth", async () => {
   const actual = await vi.importActual<typeof import("@/lib/auth")>("@/lib/auth");
-  return { ...actual, isAuthenticated: async () => authenticated, requireAuth: async () => {} };
+  return {
+    ...actual,
+    isAuthenticated: async () => authenticated,
+    currentUser: async () => (authenticated ? SIGNED_IN_ADMIN : null),
+    requireAuth: async () => SIGNED_IN_ADMIN,
+  };
 });
 vi.mock("@/lib/caller-session", () => ({
   getSelectedCallerId: async () => selectedCaller,

@@ -21,6 +21,7 @@ export function NastaveniTabs({ active }: { active: string }) {
       active={active}
       items={[
         { href: "/settings", label: "Obecné" },
+        { href: "/uzivatele", label: "Uživatelé" },
         { href: "/mailboxes", label: "Schránky" },
         { href: "/suppression", label: "Vyloučené firmy" },
       ]}

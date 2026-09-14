@@ -162,9 +162,17 @@ export default async function CallReportPage({
                 )}
               </td>
               <td className="td text-right">
-                <Link href={`/volani/${row.id}`} className="text-xs text-zinc-500 underline underline-offset-2 hover:text-zinc-900">
-                  Detail
-                </Link>
+                {/* Nahrávka, přepis i rozbor jsou na detailu firmy. Vlastní
+                    stránka hovoru neexistuje a vyrábět ji kvůli jednomu
+                    odkazu by bylo víc práce než užitku. */}
+                {row.company_id ? (
+                  <Link
+                    href={`/firmy/${row.company_id}`}
+                    className="text-xs text-zinc-500 underline underline-offset-2 hover:text-zinc-900"
+                  >
+                    Detail
+                  </Link>
+                ) : null}
               </td>
             </tr>
           ))}

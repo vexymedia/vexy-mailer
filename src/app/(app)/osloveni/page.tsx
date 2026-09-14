@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { getCallerDayProgress, getHeldCall, listCallers } from "@/lib/queries/calling";
 import { getSelectedCallerId } from "@/lib/caller-session";
+import { requireUser } from "@/lib/auth";
 import { clearCallerAction, nextCallAction } from "@/lib/actions";
 import { PageHeader, EmptyState } from "@/components/ui";
 import { ActionForm, SubmitButton } from "@/components/action-form";
@@ -40,13 +41,35 @@ export default async function OsloveniPage({
   const modeLabel =
     mode === "first" ? "První oslovení" : mode === "followup" ? "Follow-up" : null;
 
-  const [selectedCallerId, team] = await Promise.all([
+  /**
+   * Kdo zpracovává frontu.
+   *
+   * Caller se neptá a nevybírá - identitu má z přihlášení. Výběr osoby
+   * zůstává jen administrátorovi, který může volat pod libovolnou
+   * obchodní identitou (třeba když si chce sám vyzkoušet frontu).
+   */
+  const [user, selectedCallerId, team] = await Promise.all([
+    requireUser(),
     getSelectedCallerId(),
     listCallers({ activeOnly: true }),
   ]);
+  const isAdmin = user.role === "admin";
   const caller = team.find((c) => c.id === selectedCallerId) ?? null;
 
   if (!caller) {
+    // Callerovi chybí obchodní identita jen tehdy, když ji někdo mezitím
+    // deaktivoval. Vybírat si ji sám nesmí - musí to spravit administrátor.
+    if (!isAdmin) {
+      return (
+        <>
+          <PageHeader title="Dnes" description="Zpracování fronty." />
+          <EmptyState
+            title="Váš účet zatím nemá přiřazenou obchodní identitu"
+            description="Bez ní se hovory nedají zapsat. Požádejte administrátora, aby vám ji přiřadil."
+          />
+        </>
+      );
+    }
     return (
       <>
         <PageHeader title="Oslovení" description="Kdo dnes zpracovává frontu." />
@@ -96,16 +119,18 @@ export default async function OsloveniPage({
     <>
       <PageHeader
         title={modeLabel ? `Dnes · ${modeLabel}` : "Dnes"}
-        description={`Zpracovává ${caller.name}.`}
+        description={isAdmin ? `Zpracovává ${caller.name}.` : "Vaše dnešní fronta."}
         actions={
-          <ActionForm action={clearCallerAction} hideMessages>
-            <input type="hidden" name="next" value={backHref} />
-            {held ? <input type="hidden" name="campaign_contact_id" value={held.prospect.id} /> : null}
-            <SubmitButton className="btn-secondary">Změnit osobu</SubmitButton>
-          </ActionForm>
+          isAdmin ? (
+            <ActionForm action={clearCallerAction} hideMessages>
+              <input type="hidden" name="next" value={backHref} />
+              {held ? <input type="hidden" name="campaign_contact_id" value={held.prospect.id} /> : null}
+              <SubmitButton className="btn-secondary">Změnit osobu</SubmitButton>
+            </ActionForm>
+          ) : null
         }
       />
-      <OsloveniTabs active="/osloveni" />
+      {isAdmin ? <OsloveniTabs active="/osloveni" /> : null}
 
       {recovery ? (
         <CallRecovery
@@ -134,12 +159,14 @@ export default async function OsloveniPage({
             title={progress.processed > 0 ? "Pro dnešek hotovo" : "Na dnešek nemáte nikoho k oslovení"}
             description={
               progress.processed > 0
-                ? `Dnes jste udělali ${progress.attempts} ${plural(progress.attempts, "pokus", "pokusy", "pokusů")}, ` +
+                ? `Dnes jste udělali ${plural(progress.attempts, "pokus", "pokusy", "pokusů")}, ` +
                   `dovolali se ${progress.connected}× a domluvili ${plural(progress.meetings, "schůzku", "schůzky", "schůzek")}. ` +
                   "Další follow-upy se objeví, až nastane jejich čas."
-                : "Jakmile připravíme nové firmy nebo nastane čas naplánovaného follow-upu, objeví se tady. Zbytek fronty najdete na záložce Fronta."
+                : isAdmin
+                  ? "Jakmile připravíme nové firmy nebo nastane čas naplánovaného follow-upu, objeví se tady. Zbytek fronty najdete na záložce Fronta."
+                  : "Jakmile nastane čas dalšího follow-upu, objeví se tady sám. Nic hledat nemusíte."
             }
-            action={{ href: "/firmy", label: "Projít firmy" }}
+            action={isAdmin ? { href: "/firmy", label: "Projít firmy" } : undefined}
           />
         ) : (
           <ActionForm action={nextCallAction} className="card max-w-md p-6">

@@ -417,7 +417,10 @@ export async function getCompanyTimeline(companyId: string): Promise<TimelineEnt
                                  coalesce(c.last_name, '')), ''), c.email),
            null,
            cl.name,
-           '/volani/' || cal.id::text,
+           -- Nahrávka i přepis jsou na detailu firmy hned nad timeline;
+           -- samostatná stránka hovoru neexistuje a odkaz na /volani/<id>
+           -- by mířil na pracovní plochu kampaně, ne na hovor.
+           null::text,
            case
              when cal.answered_at is not null and cal.duration_seconds is not null
                then 'spojeno · ' || to_char((cal.duration_seconds || ' seconds')::interval, 'MI:SS')

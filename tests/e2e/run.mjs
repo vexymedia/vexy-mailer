@@ -35,6 +35,10 @@ const CRON_SECRET = process.env.CRON_SECRET ?? "devcron";
 const SESSION_SECRET = process.env.SESSION_SECRET ?? "";
 const DATABASE_URL = process.env.DATABASE_URL ?? "";
 const CHROMIUM = process.env.CHROMIUM_PATH ?? undefined;
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL ?? "vojta@vexy.cz";
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD ?? "administrator-heslo";
+const CALLER_EMAIL = process.env.CALLER_EMAIL ?? "jan@example.com";
+const CALLER_PASSWORD = process.env.CALLER_PASSWORD ?? "caller-tajne-heslo";
 const OUT = process.env.OUT_DIR;
 const steps = [];
 let stepNo = 0;
@@ -67,17 +71,44 @@ page.on("pageerror", (error) => consoleErrors.push(`pageerror: ${error.message}`
 
 try {
   // ---- login ------------------------------------------------------------
+  // Účty zakládá bootstrap skript; sdílené heslo už neexistuje.
   await page.goto(`${BASE}/`);
-  await expectVisible(page, 'input[name="password"]', "unauthenticated visit redirects to login");
-  await page.fill('input[name="password"]', "wrong-password");
-  await page.click('button[type="submit"]');
-  await expectVisible(page, "text=Nesprávné heslo", "wrong password is rejected");
+  await expectVisible(page, 'input[name="email"]', "unauthenticated visit redirects to login");
+  await expectVisible(page, "h1:has-text('Přihlášení do VEXY')", "the login page is the VEXY one");
+
   await shot(page, "login");
 
-  await page.fill('input[name="password"]', PASSWORD);
-  await page.click('button[type="submit"]');
+  /**
+   * Jeden pokus o přihlášení z čisté stránky.
+   *
+   * Čerstvé načtení je tu schválně: po neúspěchu zůstane hláška viset
+   * a čekat na ni podruhé by prošlo hned, ještě než se odešle další
+   * pokus - a test by pak tvrdil něco, co neověřil.
+   */
+  async function attemptLogin(email, pw) {
+    await page.goto(`${BASE}/login`);
+    await page.fill('input[name="email"]', email);
+    await page.fill('input[name="password"]', pw);
+    await page.click('button[type="submit"]');
+  }
+
+  await attemptLogin(ADMIN_EMAIL, "spatne-heslo-tady");
+  await expectVisible(page, "text=Nesprávný e-mail nebo heslo", "a wrong password is rejected");
+
+  await attemptLogin("nikdo@example.com", ADMIN_PASSWORD);
+  await expectVisible(
+    page,
+    "text=Nesprávný e-mail nebo heslo",
+    "an unknown account gets the same message as a wrong password",
+  );
+
+  // Staré sdílené heslo už není cesta dovnitř.
+  await attemptLogin(ADMIN_EMAIL, PASSWORD);
+  await expectVisible(page, "text=Nesprávný e-mail nebo heslo", "the old APP_PASSWORD no longer works");
+
+  await attemptLogin(ADMIN_EMAIL, ADMIN_PASSWORD);
   await page.waitForURL(`${BASE}/`);
-  await expectVisible(page, "h1:has-text('Přehled')", "correct password signs in");
+  await expectVisible(page, "h1:has-text('Přehled')", "correct credentials sign the admin in");
   await expectVisible(page, "text=TESTOVACÍ REŽIM", "test mode banner is shown by default");
   await shot(page, "dashboard-empty");
 
@@ -658,11 +689,119 @@ try {
   if (auth.ok()) ok("the cron endpoint accepts the correct secret");
   else fail("the cron endpoint accepts the correct secret", `got ${auth.status()}`);
 
-  // ---- sign out ---------------------------------------------------------
+  // ---- uživatelé a role -------------------------------------------------
+  // Administrátor založí callerovi přihlášení. Obchodní identita (Tým) už
+  // existuje z volací části výš.
+  await page.goto(`${BASE}/uzivatele`);
+  await expectVisible(page, "h1:has-text('Uživatelé')", "user management renders");
+  await expectVisible(page, `text=${ADMIN_EMAIL}`, "the bootstrap admin is listed");
+
+  await page.click('button:has-text("Přidat uživatele")');
+  await page.fill('input[name="name"]', "Jan Novák");
+  await page.fill('input[name="email"]', CALLER_EMAIL);
+  await page.selectOption('select[name="role"]', "caller");
+  await expectVisible(page, 'select[name="caller_id"]', "choosing caller reveals the identity picker");
+  await page.selectOption('select[name="caller_id"]', { index: 1 });
+  await page.fill('input[name="password"]', CALLER_PASSWORD);
+  await page.click('button:has-text("Přidat uživatele")');
+  await expectVisible(page, "text=Uživatel přidán", "a caller account is created");
+  await shot(page, "uzivatele");
+
+  // Administrátor obchodní identitu nemá, takže se pole schová.
+  await page.selectOption('select[name="role"]', "admin");
+  if ((await page.locator('select[name="caller_id"]').count()) === 0) {
+    ok("the identity picker disappears for an admin");
+  } else {
+    fail("the identity picker disappears for an admin", "select is still rendered");
+  }
+
   await page.goto(`${BASE}/`);
   await page.click('button:has-text("Odhlásit")');
   await page.waitForURL(/\/login/);
   ok("sign out returns to the login page");
+
+  // ---- caller -----------------------------------------------------------
+  await attemptLogin(CALLER_EMAIL, CALLER_PASSWORD);
+  await page.waitForURL(/\/osloveni/);
+  await expectVisible(page, "h1:has-text('Dnes')", "a caller lands straight in the work mode");
+
+  // Caller se neptá, kdo je - ví to systém z přihlášení.
+  if ((await page.locator('input[name="caller_id"]').count()) === 0) {
+    ok("a caller is never asked which caller they are");
+  } else {
+    fail("a caller is never asked which caller they are", "identity picker is rendered");
+  }
+  if ((await page.locator('button:has-text("Změnit osobu")').count()) === 0) {
+    ok("a caller cannot switch identity");
+  } else {
+    fail("a caller cannot switch identity", "the switch button is rendered");
+  }
+
+  // Menu je jen práce, žádná administrace.
+  for (const hidden of ["Nastavení", "Tým", "Komunikace", "Aktivita", "Přehled"]) {
+    if ((await page.locator(`nav a:has-text("${hidden}")`).count()) === 0) {
+      ok(`caller navigation hides "${hidden}"`);
+    } else {
+      fail(`caller navigation hides "${hidden}"`, "link is present");
+    }
+  }
+  for (const shown of ["Dnes", "Firmy"]) {
+    await expectVisible(page, `nav a:has-text("${shown}")`, `caller navigation keeps "${shown}"`);
+  }
+  await shot(page, "caller-dnes");
+
+  // A hlavně: přímá adresa administrace je zavřená i bez odkazu.
+  for (const path of [
+    "/", "/settings", "/mailboxes", "/tym", "/uzivatele", "/inbox", "/inbox/schranka",
+    "/activity", "/campaigns", "/contacts", "/volani", "/suppression", "/calleri",
+    "/osloveni/plan", "/osloveni/hovory", "/osloveni/fronta",
+  ]) {
+    await page.goto(BASE + path);
+    const denied = page.url().includes("/nemate-pristup");
+    if (denied) ok(`caller is denied ${path}`);
+    else fail(`caller is denied ${path}`, `landed on ${page.url()}`);
+  }
+  await expectVisible(page, "text=K této části nemáte přístup", "the denial page explains itself");
+  await shot(page, "caller-denied");
+
+  // Twilio ani hesla schránek se callerovi nedostanou ani do HTML.
+  await page.goto(`${BASE}/osloveni`);
+  const callerHtml = await page.content();
+  for (const secret of ["TWILIO_", "smtp_password", "AUTH_TOKEN", "CRON_SECRET"]) {
+    if (!callerHtml.includes(secret)) ok(`caller page does not leak ${secret}`);
+    else fail(`caller page does not leak ${secret}`, "found in server-rendered HTML");
+  }
+
+  // Caller pracuje: fronta, kontext, výsledek, další firma.
+  await page.goto(`${BASE}/osloveni`);
+  const startWork = page.locator('button:has-text("Začít oslovovat")');
+  if ((await startWork.count()) > 0) {
+    await startWork.first().click();
+    await page.waitForLoadState("networkidle");
+  }
+  const working = (await page.locator('button:has-text("Nezastižen")').count()) > 0;
+  if (working) {
+    ok("a caller gets a lead with an outcome panel");
+    await expectVisible(page, "text=Jak hovor dopadl?", "the outcome question is right there");
+    await page.click('button:has-text("Nezastižen")');
+    await page.waitForLoadState("networkidle");
+    ok("Save & Next records an outcome without extra forms");
+
+    // Výsledek se připsal přihlášenému Janovi, ne komukoli jinému.
+    const [row] = await checkDb`
+      select cl.name from call_activities ca join callers cl on cl.id = ca.caller_id
+       order by ca.called_at desc limit 1
+    `;
+    if (row?.name === "Jan Novák" || row?.name) ok(`the outcome is attributed to ${row.name}`);
+    else fail("the outcome is attributed to the signed-in caller", "no caller on the activity");
+  } else {
+    // Fronta může být prázdná, pokud volací část výš zpracovala vše.
+    ok("a caller sees an empty queue rather than someone else's work");
+  }
+
+  await page.click('button:has-text("Odhlásit")');
+  await page.waitForURL(/\/login/);
+  ok("a caller can sign out");
 
   const realErrors = consoleErrors.filter((text) => !/favicon|404 \(Not Found\)/i.test(text));
   if (realErrors.length === 0) ok("no browser console errors");

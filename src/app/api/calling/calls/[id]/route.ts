@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { isAuthenticated } from "@/lib/auth";
+import { currentUser } from "@/lib/auth";
 import { getCall } from "@/lib/queries/calls";
 
 export const dynamic = "force-dynamic";
@@ -10,12 +10,20 @@ export const dynamic = "force-dynamic";
  * během hovoru.
  */
 export async function GET(_request: Request, context: { params: Promise<{ id: string }> }) {
-  if (!(await isAuthenticated())) {
+  const user = await currentUser();
+  if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
   const { id } = await context.params;
   const call = await getCall(id);
   if (!call) return NextResponse.json({ error: "Hovor nebyl nalezen." }, { status: 404 });
+
+  // Caller se ptá jen na svoje hovory. Nic dramatického by se neprozradilo,
+  // ale uhodnuté id cizího hovoru mu nemá vracet vůbec nic - a stojí to
+  // jedno porovnání.
+  if (user.role === "caller" && call.caller_id !== user.caller_id) {
+    return NextResponse.json({ error: "Hovor nebyl nalezen." }, { status: 404 });
+  }
 
   // Odkaz na nahrávku se ven nepouští: je za basic auth Twilia a do
   // prohlížeče nemá co dělat. Stačí, že víme, jestli existuje.

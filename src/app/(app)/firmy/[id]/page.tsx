@@ -20,6 +20,7 @@ import { listCallsForCompany } from "@/lib/queries/calls";
 import { CallHistory } from "@/components/call/call-history";
 import { ContactFormToggle } from "@/components/contact-form";
 import { ActivityTimeline } from "@/components/activity-timeline";
+import { requireUser } from "@/lib/auth";
 import { OutreachForm } from "@/components/outreach-form";
 
 export const dynamic = "force-dynamic";
@@ -34,7 +35,8 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
   const company = await getCompany(id);
   if (!company) notFound();
 
-  const [contacts, timeline, team, nextStep, callRecords] = await Promise.all([
+  const [user, contacts, timeline, team, nextStep, callRecords] = await Promise.all([
+    requireUser(),
     listCompanyContacts(id),
     getCompanyTimeline(id),
     listCallers({ activeOnly: true }),
@@ -43,6 +45,7 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
   ]);
   // Jestli jde volat z prohlížeče, ví server. Klient si to nevymýšlí.
   const browserCalling = isTwilioConfigured();
+  const isAdmin = user.role === "admin";
 
   // Primární CTA jen tam, kde volání skutečně dává smysl. Zavádějící
   // "Zavolat" u člověka na do-not-call listu je horší než žádné tlačítko.
@@ -92,7 +95,7 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
                 browserCalling={browserCalling}
               />
             ) : null}
-            {queued ? (
+            {queued && isAdmin ? (
               <Link href="/osloveni" className="btn-secondary">Otevřít v oslovení</Link>
             ) : null}
             <Link href="/firmy" className="btn-secondary">Zpět na firmy</Link>
@@ -271,7 +274,8 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
                         </p>
                       ) : null}
 
-                      {/* Co prospekt dostal. Caller to čte v Oslovení, vyplňuje se tady. */}
+                      {/* Co prospekt dostal. Caller to čte v Oslovení; vyplňuje
+                          to ten, kdo oslovení připravuje, tedy administrátor. */}
                       <div className="mt-3">
                         {contact.loom_url ? (
                           <p className="mb-2 text-xs text-zinc-500">
@@ -289,6 +293,7 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
                             ) : null}
                           </p>
                         ) : null}
+                        {isAdmin ? (
                         <OutreachForm
                           contactId={contact.id}
                           companyId={company.id}
@@ -306,6 +311,7 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
                           loomNote={contact.loom_note ?? ""}
                           opener={contact.call_opener ?? ""}
                         />
+                        ) : null}
                       </div>
                     </li>
                   );

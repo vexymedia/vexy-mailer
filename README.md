@@ -138,10 +138,23 @@ git clone <this repo> && cd vexy-mailer
 npm install
 cp .env.example .env.local     # then fill it in — see below
 npm run db:migrate
+npm run user:create-admin      # první administrátor, heslo se zadá interaktivně
 npm run dev
 ```
 
-Open <http://localhost:3000> and sign in with `APP_PASSWORD`.
+Open <http://localhost:3000> and sign in with that e-mail and password.
+
+Every account lives in the `users` table and has one of two roles:
+
+| Role    | Co vidí                                                          |
+| ------- | ---------------------------------------------------------------- |
+| `admin` | celou aplikaci včetně nastavení, schránek, kampaní a uživatelů    |
+| `caller`| jen Oslovení a Firmy — svoji práci, žádnou konfiguraci            |
+
+A caller account is created in **Nastavení → Uživatelé** and points at a row
+in `callers`, which is the business identity calls and reporting hang off.
+The caller never picks that identity: it comes from their login, so they
+cannot record a call under somebody else's name.
 
 ### Filling in `.env.local`
 
@@ -154,8 +167,11 @@ openssl rand -hex 32      # CRON_SECRET
 ```
 
 `DATABASE_URL` comes from Supabase — see
-[docs/SETUP_SUPABASE.md](docs/SETUP_SUPABASE.md). `APP_PASSWORD` is whatever
-you want to type at the login screen.
+[docs/SETUP_SUPABASE.md](docs/SETUP_SUPABASE.md).
+
+`APP_PASSWORD` is no longer used for anything: logging in goes against the
+`users` table. The variable can be deleted from the environment once the
+first admin exists.
 
 > Changing `ENCRYPTION_KEY` later makes every stored mailbox password
 > undecryptable and you will have to re-enter them. Keep a copy.

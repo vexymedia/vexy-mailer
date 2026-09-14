@@ -1,19 +1,31 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getConversation, listMessages, markConversationRead } from "@/lib/queries/inbox";
+import { requireUser } from "@/lib/auth";
 import { PageHeader, DateTime, StatusBadge } from "@/components/ui";
 import { ClassificationBadge } from "@/components/inbox-bits";
 import { ClassificationPicker, DeleteConversationButton, ReplyComposer } from "@/components/conversation-actions";
 
 export const dynamic = "force-dynamic";
 
+/**
+ * Jedno e-mailové vlákno.
+ *
+ * Caller sem chodí z Oslovení („Zobrazit celou konverzaci“) pro kontext
+ * před hovorem, takže vlákno číst musí. Odpovídat, měnit klasifikaci,
+ * mazat ani vidět, ze které schránky se odesílá, ale nepotřebuje - to je
+ * správa pošty a ta patří administrátorovi. Proto je pro něj stránka
+ * jen ke čtení; není to jiná stránka, jen míň věcí na ní.
+ */
 export default async function ConversationPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
+  const user = await requireUser();
+  const canManage = user.role === "admin";
   const conversation = await getConversation(id);
   if (!conversation) notFound();
 
   // Opening a conversation is what marks it read.
-  if (conversation.unread_count > 0) await markConversationRead(id);
+  if (canManage && conversation.unread_count > 0) await markConversationRead(id);
   const messages = await listMessages(id);
   // Odeslané vlákno a vlákno s odpovědí se chovají jinak vůči kadenci,
   // takže si nemůžou nést stejnou poznámku.
@@ -27,14 +39,18 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
           <>
             {conversation.contact_email}
             {conversation.company ? ` · ${conversation.company}` : ""}
-            {conversation.campaign_name ? ` · ${conversation.campaign_name}` : " · bez kampaně"}
-            {" · "}
-            <span className="text-zinc-500">odesláno z {conversation.mailbox_email}</span>
+            {canManage ? (
+              <>
+                {conversation.campaign_name ? ` · ${conversation.campaign_name}` : " · bez kampaně"}
+                {" · "}
+                <span className="text-zinc-500">odesláno z {conversation.mailbox_email}</span>
+              </>
+            ) : null}
           </>
         }
         actions={
           <>
-            <ClassificationBadge value={conversation.classification} />
+            {canManage ? <ClassificationBadge value={conversation.classification} /> : null}
             {conversation.contact_status ? <StatusBadge status={conversation.contact_status} /> : null}
             {/* Vazba na CRM jen tam, kde skutečně existuje. Dohadovat firmu
                 podle jména by dřív nebo později spojilo špatné dvě. */}
@@ -43,7 +59,9 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
                 Zobrazit firmu
               </Link>
             ) : null}
-            <Link href="/inbox/schranka" className="btn-secondary">Zpět do schránky</Link>
+            <Link href={canManage ? "/inbox/schranka" : "/osloveni"} className="btn-secondary">
+              {canManage ? "Zpět do schránky" : "Zpět do práce"}
+            </Link>
           </>
         }
       />
@@ -90,19 +108,23 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
             })
           )}
 
-          <ReplyComposer
-            conversationId={id}
-            fromEmail={conversation.mailbox_email}
-            toEmail={conversation.contact_email}
-            disabled={!conversation.mailbox_enabled}
-          />
+          {canManage ? (
+            <ReplyComposer
+              conversationId={id}
+              fromEmail={conversation.mailbox_email}
+              toEmail={conversation.contact_email}
+              disabled={!conversation.mailbox_enabled}
+            />
+          ) : null}
         </div>
 
         <aside className="space-y-4">
-          <div className="card p-4">
-            <h2 className="mb-3 text-sm font-semibold text-zinc-900">Stav</h2>
-            <ClassificationPicker conversationId={id} value={conversation.classification} />
-          </div>
+          {canManage ? (
+            <div className="card p-4">
+              <h2 className="mb-3 text-sm font-semibold text-zinc-900">Stav</h2>
+              <ClassificationPicker conversationId={id} value={conversation.classification} />
+            </div>
+          ) : null}
           <div className="card p-4 text-sm">
             <h2 className="mb-3 text-sm font-semibold text-zinc-900">Detaily</h2>
             <dl className="space-y-2 text-xs">
@@ -113,8 +135,10 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
               {conversation.website ? (
                 <div><dt className="text-zinc-500">Web</dt><dd className="text-zinc-900">{conversation.website}</dd></div>
               ) : null}
-              <div><dt className="text-zinc-500">Odesílací schránka</dt><dd className="text-zinc-900">{conversation.mailbox_email}</dd></div>
-              {conversation.campaign_name ? (
+              {canManage ? (
+                <div><dt className="text-zinc-500">Odesílací schránka</dt><dd className="text-zinc-900">{conversation.mailbox_email}</dd></div>
+              ) : null}
+              {canManage && conversation.campaign_name ? (
                 <div>
                   <dt className="text-zinc-500">Kampaň</dt>
                   <dd>
@@ -126,25 +150,27 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
               ) : null}
             </dl>
           </div>
-          {hasInbound ? (
+          {canManage && hasInbound ? (
             <p className="px-1 text-xs text-zinc-500">
               Tento prospekt odpověděl, takže automatické follow-upy se zastavily. Odpověď odsud ho
               do sekvence nevrátí.
             </p>
-          ) : (
+          ) : canManage ? (
             <p className="px-1 text-xs text-zinc-500">
               Zatím jsme jen psali — prospekt neodpověděl. Kampaňová sekvence běží dál; ruční
               odpověď odsud ji nezastaví.
             </p>
-          )}
+          ) : null}
 
-          <div className="card p-4">
-            <h2 className="mb-1 text-sm font-semibold text-zinc-900">Odebrat</h2>
-            <p className="mb-3 text-xs text-zinc-500">
-              Odstraní vlákno z doručené pošty. Historie odeslání a záznam kontaktu zůstávají.
-            </p>
-            <DeleteConversationButton conversationId={id} />
-          </div>
+          {canManage ? (
+            <div className="card p-4">
+              <h2 className="mb-1 text-sm font-semibold text-zinc-900">Odebrat</h2>
+              <p className="mb-3 text-xs text-zinc-500">
+                Odstraní vlákno z doručené pošty. Historie odeslání a záznam kontaktu zůstávají.
+              </p>
+              <DeleteConversationButton conversationId={id} />
+            </div>
+          ) : null}
         </aside>
       </div>
     </>
