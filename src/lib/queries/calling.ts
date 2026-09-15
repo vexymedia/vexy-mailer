@@ -125,6 +125,14 @@ export async function listCallQueue(
        -- takže platí napříč klienty.
        and not exists (select 1 from companies qco where qco.id = c.company_id
                         and qco.status = 'excluded')
+       -- Firma vyloučená pro KLIENTA téhle kampaně. Užší než status
+       -- 'excluded' výš: "Acme je už klientem ASN Plus" nesmí Acme
+       -- schovat vlastnímu outboundu VEXY.
+       and not exists (
+         select 1 from client_company_exclusions x
+          where x.company_id = c.company_id
+            and x.client_id = cp.client_id
+       )
        -- "Získaný klient" a "nemá zájem" jsou naopak výsledky konkrétního
        -- obchodu. Zavírají firmu jen v té kampani, kde padly - jinak by
        -- "nemá zájem" u ASN Plus utnulo tutéž firmu i ve vlastním outboundu
@@ -232,6 +240,13 @@ export async function claimNextCall(
           -- jen v rámci své kampaně.
           and not exists (select 1 from companies qco where qco.id = c.company_id
                            and qco.status = 'excluded')
+          -- A totéž pro klientské vyloučení - viz listCallQueue.
+          and not exists (
+            select 1 from client_company_exclusions x
+             where x.company_id = c.company_id
+               and x.client_id = (select client_id from campaigns
+                                   where id = inner_cc.campaign_id)
+          )
           and not exists (
             select 1 from campaign_contacts closed
               join contacts cc2 on cc2.id = closed.contact_id

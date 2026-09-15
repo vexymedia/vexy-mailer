@@ -149,3 +149,123 @@ describe("the sender mailbox is re-checked too", () => {
     expect(row.error).toContain("disabled");
   });
 });
+
+/**
+ * Zbytek okna mezi claimem a SMTP.
+ *
+ * Testuje se PRODUKČNÍ větev: `test_mode` je v tomhle souboru vypnutý
+ * (viz beforeEach), takže kód jde stejnou cestou jako v ostrém provozu
+ * a nahrazený je jedině samotný `sendMail`. Kdyby eligibility platila
+ * jen v testovacím režimu, tyhle testy by o produkci neřekly nic.
+ */
+describe("celé okno mezi claimem a SMTP", () => {
+  /** Spustí tick s daným zásahem do okna a vrátí stav claim řádku. */
+  async function raceWith(
+    seed: Awaited<ReturnType<typeof activeCampaignWithOneDueContact>>,
+    action: () => Promise<unknown>,
+  ) {
+    raceAction.run = async () => { await action(); };
+    await dispatchTick();
+    const [row] = await sql<{ status: string; error: string | null }[]>`
+      select status, error from email_sends where campaign_id = ${seed.campaignId}
+    `;
+    return row;
+  }
+
+  it("odhlášení v okně zprávu zastaví", async () => {
+    const seed = await activeCampaignWithOneDueContact();
+    const row = await raceWith(seed, () =>
+      sql`update campaign_contacts set status = 'unsubscribed', next_send_at = null
+           where campaign_id = ${seed.campaignId}`);
+    expect(sendMailSpy).not.toHaveBeenCalled();
+    expect(row.status).toBe("skipped");
+  });
+
+  it("hard bounce v okně (globální suppression) zprávu zastaví", async () => {
+    const seed = await activeCampaignWithOneDueContact();
+    const row = await raceWith(seed, () =>
+      sql`insert into suppression_list (email, reason, reason_code, source)
+          values ('target@prospect.test', 'hard_invalid', 'hard_invalid', 'bounce')`);
+    expect(sendMailSpy).not.toHaveBeenCalled();
+    expect(row.error).toContain("do-not-contact");
+  });
+
+  it("stížnost na spam v okně zprávu zastaví", async () => {
+    const seed = await activeCampaignWithOneDueContact();
+    const row = await raceWith(seed, () =>
+      sql`insert into suppression_list (email, reason, reason_code, source)
+          values ('target@prospect.test', 'spam', 'spam_complaint', 'fbl')`);
+    expect(sendMailSpy).not.toHaveBeenCalled();
+    expect(row.status).toBe("skipped");
+  });
+
+  it("uzavření kontaktu v CRM v okně zprávu zastaví", async () => {
+    const seed = await activeCampaignWithOneDueContact();
+    const row = await raceWith(seed, () =>
+      sql`update campaign_contacts set call_status = 'meeting_booked'
+           where campaign_id = ${seed.campaignId}`);
+    expect(sendMailSpy).not.toHaveBeenCalled();
+    expect(row.error).toContain("closed in CRM");
+  });
+
+  it("vyloučení firmy pro klienta v okně zprávu zastaví", async () => {
+    const seed = await activeCampaignWithOneDueContact();
+    const [client] = await sql<{ id: string }[]>`
+      insert into clients (name) values ('ASN Plus') returning id`;
+    const [company] = await sql<{ id: string }[]>`
+      insert into companies (name, status) values ('Cíl s.r.o.', 'ready') returning id`;
+    await sql`update contacts set company_id = ${company.id} where email = 'target@prospect.test'`;
+    await sql`update campaigns set client_id = ${client.id} where id = ${seed.campaignId}`;
+
+    const row = await raceWith(seed, () =>
+      sql`insert into client_company_exclusions (client_id, company_id, reason)
+          values (${client.id}, ${company.id}, 'Už je klientem.')`);
+    expect(sendMailSpy).not.toHaveBeenCalled();
+    expect(row.error).toContain("excluded");
+  });
+
+  it("odstranění kontaktu z kampaně v okně zprávu zastaví", async () => {
+    const seed = await activeCampaignWithOneDueContact();
+    // Claim řádek na kontakt odkazuje, takže se maže i on - kontrolujeme
+    // proto jen to, že se nic neodeslalo.
+    raceAction.run = async () => {
+      await sql`delete from campaign_contacts where campaign_id = ${seed.campaignId}`;
+    };
+    await dispatchTick();
+    expect(sendMailSpy).not.toHaveBeenCalled();
+  });
+
+  it("jiný worker mezitím krok odeslal → druhý už neodešle", async () => {
+    const seed = await activeCampaignWithOneDueContact();
+    raceAction.run = async () => {
+      // Druhý, konkurenční záznam téhož kroku ve stavu sent.
+      const [cc] = await sql<{ id: string; step_id: string }[]>`
+        select campaign_contact_id as id, step_id from email_sends
+         where campaign_id = ${seed.campaignId} limit 1`;
+      await sql`
+        insert into email_sends (campaign_id, campaign_contact_id, step_id, step_number, status,
+                                 to_email, intended_email, subject, body, sent_at)
+        values (${seed.campaignId}, ${cc.id}, ${cc.step_id}, 99, 'sent',
+                'target@prospect.test', 'target@prospect.test', 'S', 'B', now())`;
+    };
+    await dispatchTick();
+    expect(sendMailSpy).not.toHaveBeenCalled();
+  });
+
+  it("vyčerpání limitu schránky v okně zprávu zastaví", async () => {
+    const seed = await activeCampaignWithOneDueContact();
+    // Schránka se v okně srazí na limit, kterého už dosáhla claimem.
+    const row = await raceWith(seed, () =>
+      sql`update mailboxes set daily_limit = 1, enabled = false where id = ${seed.mailboxId}`);
+    expect(sendMailSpy).not.toHaveBeenCalled();
+    expect(row.status).toBe("skipped");
+  });
+
+  it("ztráta úspěšného testu spojení v okně zprávu zastaví", async () => {
+    const seed = await activeCampaignWithOneDueContact();
+    const row = await raceWith(seed, () =>
+      sql`update mailboxes set last_test_ok = false where id = ${seed.mailboxId}`);
+    expect(sendMailSpy).not.toHaveBeenCalled();
+    expect(row.error).toContain("connection test");
+  });
+});

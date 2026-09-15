@@ -150,17 +150,33 @@ export interface ClientExclusion {
   client_name: string;
   company_id: string;
   company_name: string;
+  ico: string | null;
   reason: string | null;
   created_at: Date;
+  /** Kdo vyloučení založil. Null u importu bez přihlášeného uživatele. */
+  created_by_name: string | null;
 }
 
-export async function listClientExclusions(): Promise<ClientExclusion[]> {
+export async function listClientExclusions(filters: {
+  clientId?: string | null;
+  search?: string | null;
+  companyId?: string | null;
+} = {}): Promise<ClientExclusion[]> {
+  const search = filters.search?.trim() ? `%${filters.search.trim().toLowerCase()}%` : null;
   return sql<ClientExclusion[]>`
     select x.id, x.client_id, cl.name as client_name,
-           x.company_id, co.name as company_name, x.reason, x.created_at
+           x.company_id, co.name as company_name, co.ico, x.reason, x.created_at,
+           u.name as created_by_name
       from client_company_exclusions x
       join clients cl on cl.id = x.client_id
       join companies co on co.id = x.company_id
+      left join users u on u.id = x.created_by
+     where (${filters.clientId ?? null}::uuid is null or x.client_id = ${filters.clientId ?? null}::uuid)
+       and (${filters.companyId ?? null}::uuid is null or x.company_id = ${filters.companyId ?? null}::uuid)
+       and (${search}::text is null
+            or lower(co.name) like ${search}
+            or coalesce(co.ico, '') like ${search}
+            or lower(cl.name) like ${search})
      order by cl.name, co.name
   `;
 }
@@ -176,20 +192,66 @@ export async function excludeCompanyForClient(input: {
   clientId: string;
   companyId: string;
   reason?: string | null;
+  createdBy?: string | null;
 }): Promise<void> {
-  await sql`
-    insert into client_company_exclusions (client_id, company_id, reason)
-    values (${input.clientId}, ${input.companyId}, ${input.reason ?? null})
-    on conflict (client_id, company_id) do update set reason = excluded.reason
-  `;
+  const paused = await sql.begin(async (tx) => {
+    await tx`
+      insert into client_company_exclusions (client_id, company_id, reason, created_by)
+      values (${input.clientId}, ${input.companyId}, ${input.reason ?? null},
+              ${input.createdBy ?? null})
+      on conflict (client_id, company_id) do update
+         set reason = excluded.reason,
+             created_by = coalesce(excluded.created_by, client_company_exclusions.created_by)
+    `;
+    /**
+     * Rozplánované kroky se ZAHODÍ, ne jen odfiltrují.
+     *
+     * Kdyby se jen filtrovaly, `next_send_at` by u nich dál ubíhalo do
+     * minulosti - a v den, kdy někdo vyloučení zruší, by naráz odletěla
+     * celá nahromaděná várka follow-upů. Vyloučení je rozhodnutí
+     * "přestaňte", ne pauza s dohnáním.
+     *
+     * Odeslaná historie ani stav kontaktu se nemění: kdo bude chtít
+     * sekvenci zpátky, naplánuje ji vědomě.
+     */
+    return tx<{ id: string }[]>`
+      update campaign_contacts cc
+         set next_send_at = null, updated_at = now()
+        from campaigns cp, contacts c
+       where cp.id = cc.campaign_id
+         and c.id = cc.contact_id
+         and cp.client_id = ${input.clientId}
+         and c.company_id = ${input.companyId}
+         and cc.next_send_at is not null
+      returning cc.id
+    `;
+  });
+
   await logActivity({
     action: "Firma vyloučena pro klienta",
-    detail: input.reason ?? "Bez uvedení důvodu.",
+    detail:
+      (input.reason ?? "Bez uvedení důvodu.") +
+      (paused.length > 0
+        ? ` Zrušeno ${paused.length} naplánovaných kroků — zrušení vyloučení je samo neobnoví.`
+        : ""),
   });
 }
 
+/**
+ * Zruší vyloučení. ZÁMĚRNĚ nic nerozjede: kroky zrušené při vyloučení
+ * zůstávají zrušené, takže se po zrušení nespustí zadržená vlna.
+ */
 export async function removeClientExclusion(id: string): Promise<void> {
-  await sql`delete from client_company_exclusions where id = ${id}`;
+  const [row] = await sql<{ client_id: string; company_id: string }[]>`
+    delete from client_company_exclusions where id = ${id}
+    returning client_id, company_id
+  `;
+  if (row) {
+    await logActivity({
+      action: "Klientské vyloučení zrušeno",
+      detail: "Firma je pro klienta znovu k oslovení. Sekvence se neobnovují automaticky.",
+    });
+  }
 }
 
 // ------------------------------------------------------------------ výpis
@@ -220,4 +282,141 @@ export async function listSuppression(filter?: "review" | "restorable" | "all"):
     label: SUPPRESSION_LABELS[row.reason_code] ?? row.reason_code,
     restorable: !NEVER_RESTORE.includes(row.reason_code),
   }));
+}
+
+// -------------------------------------------- import vylučovacího seznamu
+
+export type ExclusionMatchKind = "matched" | "ambiguous" | "not_found" | "already_excluded";
+
+export interface ExclusionMatch {
+  line: number;
+  ico: string | null;
+  name: string | null;
+  reason: string | null;
+  kind: ExclusionMatchKind;
+  /** Firma, na kterou se to napároval. Null u ambiguous a not_found. */
+  companyId: string | null;
+  companyName: string | null;
+  /** Kandidáti u nejednoznačné shody, ať je vidět, proč se nevybralo. */
+  candidates: { id: string; name: string }[];
+}
+
+/**
+ * Napáruje řádky vylučovacího seznamu na firmy. NIC NEMĚNÍ.
+ *
+ * Pořadí signálů:
+ *   1. IČO. Jednoznačné, a proto první.
+ *   2. Přesný název po normalizaci (malá písmena, bez právní formy
+ *      a interpunkce). Jen když vyjde PRÁVĚ JEDNA firma.
+ *
+ * Víc firem se stejným názvem = `ambiguous`. Automaticky se nevybírá:
+ * vyloučit špatnou firmu znamená tiše přijít o leady a nikdo si toho
+ * nevšimne.
+ */
+export async function matchExclusions(
+  clientId: string,
+  rows: import("../csv").ParsedExclusionRow[],
+): Promise<ExclusionMatch[]> {
+  const { normaliseIco } = await import("../csv");
+
+  const icos = rows.map((r) => normaliseIco(r.ico)).filter((v): v is string => v !== null);
+  const names = rows.map((r) => normaliseCompanyName(r.name)).filter((v): v is string => v !== null);
+
+  const byIco = new Map<string, { id: string; name: string }>();
+  if (icos.length > 0) {
+    for (const row of await sql<{ id: string; name: string; ico: string }[]>`
+      select id, name, ico from companies where ico = any(${icos})
+    `) {
+      byIco.set(row.ico, { id: row.id, name: row.name });
+    }
+  }
+
+  const byName = new Map<string, { id: string; name: string }[]>();
+  if (names.length > 0) {
+    for (const row of await sql<{ id: string; name: string; key: string }[]>`
+      select id, name, lower(btrim(regexp_replace(name,
+        '\\s*(s\\.r\\.o\\.|a\\.s\\.|spol\\. s r\\.o\\.|s r o|sro|as|z\\.s\\.|o\\.p\\.s\\.)\\s*$',
+        '', 'i'))) as key
+        from companies
+    `) {
+      const list = byName.get(row.key) ?? [];
+      list.push({ id: row.id, name: row.name });
+      byName.set(row.key, list);
+    }
+  }
+
+  const existing = new Set(
+    (await sql<{ company_id: string }[]>`
+      select company_id from client_company_exclusions where client_id = ${clientId}
+    `).map((r) => r.company_id),
+  );
+
+  return rows.map((row) => {
+    const base = { line: row.line, ico: row.ico, name: row.name, reason: row.reason };
+    const ico = normaliseIco(row.ico);
+    const hit = ico ? byIco.get(ico) : undefined;
+    if (hit) {
+      return {
+        ...base,
+        kind: existing.has(hit.id) ? ("already_excluded" as const) : ("matched" as const),
+        companyId: hit.id,
+        companyName: hit.name,
+        candidates: [],
+      };
+    }
+
+    const key = normaliseCompanyName(row.name);
+    const candidates = key ? (byName.get(key) ?? []) : [];
+    if (candidates.length === 1) {
+      const only = candidates[0];
+      return {
+        ...base,
+        kind: existing.has(only.id) ? ("already_excluded" as const) : ("matched" as const),
+        companyId: only.id,
+        companyName: only.name,
+        candidates: [],
+      };
+    }
+    if (candidates.length > 1) {
+      // Dvě firmy téhož jména. Vybrat jednu by byl tip, ne shoda.
+      return { ...base, kind: "ambiguous" as const, companyId: null, companyName: null, candidates };
+    }
+    return { ...base, kind: "not_found" as const, companyId: null, companyName: null, candidates: [] };
+  });
+}
+
+/** Název na porovnatelný tvar: bez právní formy, interpunkce a diakritiky velikosti. */
+function normaliseCompanyName(value: string | null): string | null {
+  if (!value) return null;
+  const cleaned = value
+    .toLowerCase()
+    .replace(/\s*(s\.r\.o\.|a\.s\.|spol\. s r\.o\.|s r o|sro|as|z\.s\.|o\.p\.s\.)\s*$/i, "")
+    .replace(/[.,;]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned || null;
+}
+
+/**
+ * Zapíše jen to, co se jednoznačně napárovalo. Opakovaný import téhož
+ * seznamu tedy nic nezdvojí - `already_excluded` se přeskočí.
+ */
+export async function applyExclusionImport(input: {
+  clientId: string;
+  matches: ExclusionMatch[];
+  defaultReason: string;
+  createdBy?: string | null;
+}): Promise<{ created: number; skipped: number }> {
+  let created = 0;
+  for (const match of input.matches) {
+    if (match.kind !== "matched" || !match.companyId) continue;
+    await excludeCompanyForClient({
+      clientId: input.clientId,
+      companyId: match.companyId,
+      reason: match.reason ?? input.defaultReason,
+      createdBy: input.createdBy ?? null,
+    });
+    created++;
+  }
+  return { created, skipped: input.matches.length - created };
 }

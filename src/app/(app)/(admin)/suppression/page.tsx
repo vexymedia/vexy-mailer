@@ -5,7 +5,14 @@ import {
   listSuppression,
   SAFE_TO_RESTORE,
 } from "@/lib/queries/suppression";
-import { restoreSuppressedAction, suppressEmailAction, unsuppressEmailAction } from "@/lib/actions";
+import { listClients } from "@/lib/queries/clients";
+import {
+  removeCompanyExclusionAction,
+  restoreSuppressedAction,
+  suppressEmailAction,
+  unsuppressEmailAction,
+} from "@/lib/actions";
+import { ExclusionImportForm } from "@/components/exclusion-import";
 import { PageHeader, Table, DateTime, EmptyState } from "@/components/ui";
 import { ActionForm, SubmitButton } from "@/components/action-form";
 import { NastaveniTabs } from "@/components/section-tabs";
@@ -40,7 +47,7 @@ type View = (typeof VIEWS)[number]["key"];
 export default async function SuppressionPage({
   searchParams,
 }: {
-  searchParams: Promise<{ view?: string }>;
+  searchParams: Promise<{ view?: string; client?: string; q?: string }>;
 }) {
   const params = await searchParams;
   const view = (VIEWS.find((v) => v.key === params.view)?.key ?? "kontakty") as View;
@@ -67,7 +74,7 @@ export default async function SuppressionPage({
       </div>
 
       {view === "kontakty" ? <ContactsView /> : null}
-      {view === "klienti" ? <ClientsView /> : null}
+      {view === "klienti" ? <ClientsView client={params.client} search={params.q} /> : null}
       {view === "kontrola" ? <ReviewView /> : null}
       {view === "audit" ? <AuditView /> : null}
     </>
@@ -140,40 +147,83 @@ async function ContactsView() {
   );
 }
 
-async function ClientsView() {
-  const rows = await listClientExclusions();
-  if (rows.length === 0) {
-    return (
-      <EmptyState
-        title="Žádná klientská vyloučení"
-        description="Firma vyloučená pro jednoho klienta zůstává k oslovení pro ostatní. Vyloučení se zakládá na detailu firmy."
-      />
-    );
-  }
+async function ClientsView({ client, search }: { client?: string; search?: string }) {
+  const [rows, clients] = await Promise.all([
+    listClientExclusions({ clientId: client || null, search: search || null }),
+    listClients(),
+  ]);
+
   return (
-    <Table
-      head={
-        <tr>
-          <th className="th">Firma</th>
-          <th className="th">Klient</th>
-          <th className="th">Důvod</th>
-          <th className="th">Přidáno</th>
-        </tr>
-      }
-    >
-      {rows.map((row) => (
-        <tr key={row.id}>
-          <td className="td">
-            <Link href={`/firmy/${row.company_id}`} className="font-medium text-zinc-900 hover:underline">
-              {row.company_name}
-            </Link>
-          </td>
-          <td className="td text-sm">{row.client_name}</td>
-          <td className="td text-sm text-zinc-600">{row.reason ?? "—"}</td>
-          <td className="td text-xs"><DateTime value={row.created_at} /></td>
-        </tr>
-      ))}
-    </Table>
+    <>
+      <div className="mb-5 flex flex-wrap items-end gap-3">
+        <form className="flex flex-wrap items-center gap-2">
+          <input type="hidden" name="view" value="klienti" />
+          <select name="client" defaultValue={client ?? ""} className="input w-auto py-1.5 text-sm">
+            <option value="">Všichni klienti</option>
+            {clients.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+          <input
+            name="q"
+            defaultValue={search ?? ""}
+            placeholder="Hledat firmu nebo IČO…"
+            className="input w-auto py-1.5 text-sm"
+          />
+          <button type="submit" className="btn-secondary">Filtrovat</button>
+        </form>
+      </div>
+
+      <div className="mb-6">
+        <ExclusionImportForm clients={clients.map((c) => ({ id: c.id, name: c.name }))} />
+      </div>
+
+      {rows.length === 0 ? (
+        <EmptyState
+          title={search || client ? "Nic neodpovídá filtru" : "Žádná klientská vyloučení"}
+          description="Firma vyloučená pro jednoho klienta zůstává k oslovení pro ostatní. Vyloučení se zakládá na detailu firmy nebo importem výše."
+        />
+      ) : (
+        <Table
+          head={
+            <tr>
+              <th className="th">Firma</th>
+              <th className="th">IČO</th>
+              <th className="th">Klient</th>
+              <th className="th">Důvod</th>
+              <th className="th">Přidáno</th>
+              <th className="th">Kdo</th>
+              <th className="th"></th>
+            </tr>
+          }
+        >
+          {rows.map((row) => (
+            <tr key={row.id}>
+              <td className="td">
+                <Link href={`/firmy/${row.company_id}`} className="font-medium text-zinc-900 hover:underline">
+                  {row.company_name}
+                </Link>
+              </td>
+              <td className="td text-xs tabular-nums text-zinc-600">{row.ico ?? "—"}</td>
+              <td className="td text-sm">{row.client_name}</td>
+              <td className="td text-sm text-zinc-600">{row.reason ?? "—"}</td>
+              <td className="td text-xs"><DateTime value={row.created_at} /></td>
+              <td className="td text-xs text-zinc-500">{row.created_by_name ?? "import"}</td>
+              <td className="td text-right">
+                <ActionForm action={removeCompanyExclusionAction} hideMessages>
+                  <input type="hidden" name="exclusion_id" value={row.id} />
+                  <input type="hidden" name="company_id" value={row.company_id} />
+                  <SubmitButton
+                    className="btn-secondary !px-2 !py-1 text-xs"
+                    confirm={`Zrušit vyloučení ${row.company_name} pro klienta ${row.client_name}? Sekvence se neobnoví automaticky.`}
+                  >
+                    Zrušit
+                  </SubmitButton>
+                </ActionForm>
+              </td>
+            </tr>
+          ))}
+        </Table>
+      )}
+    </>
   );
 }
 

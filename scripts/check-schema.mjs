@@ -49,6 +49,15 @@ export const REQUIRED = [
   { since: "0013", feature: "Oddělení klientů", table: "clients", columns: ["name", "active"] },
   { since: "0013", feature: "Oddělení klientů", table: "campaigns", columns: ["client_id"] },
   { since: "0013", feature: "Přidělení kampaní", table: "caller_campaigns", columns: ["caller_id", "campaign_id"] },
+  { since: "0014", feature: "Poměr nových a follow-upů", table: "campaigns", columns: ["new_ratio"] },
+  { since: "0014", feature: "Rozdělení odeslání do poolů", table: "email_sends", columns: ["pool"] },
+  { since: "0014", feature: "Nedoručení jako data", table: "email_sends", columns: ["bounce_type", "bounce_code", "bounce_detail", "bounced_at"] },
+  { since: "0014", feature: "Klasifikace příchozí pošty", table: "messages", columns: ["message_class"] },
+  { since: "0014", feature: "Důvod vyloučení", table: "suppression_list", columns: ["reason_code", "source"] },
+  { since: "0014", feature: "Klientská vyloučení firem", table: "client_company_exclusions", columns: ["client_id", "company_id", "reason"] },
+  { since: "0015", feature: "IČO firmy", table: "companies", columns: ["ico"] },
+  { since: "0015", feature: "Autor vyloučení", table: "client_company_exclusions", columns: ["created_by"] },
+  { since: "0015", feature: "Odpovědi ke kontrole", table: "replies", columns: ["needs_review"] },
 ];
 
 /**

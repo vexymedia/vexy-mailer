@@ -303,13 +303,15 @@ export interface CompanyContact {
 export interface CompanyDetail extends CompanyRow {
   note: string | null;
   created_at: Date;
+  /** IČO, když je vyplněné. Klíč pro klientské vylučovací seznamy. */
+  ico: string | null;
   /** Kvalifikační kritéria kampaní, ve kterých firma je. */
   qualification: string[];
 }
 
 export async function getCompany(id: string): Promise<CompanyDetail | null> {
   const [row] = await sql<CompanyDetail[]>`
-    select co.id, co.name, co.website, co.reason, co.priority, co.status,
+    select co.id, co.name, co.website, co.reason, co.priority, co.status, co.ico,
            co.owner_id, ow.name as owner_name, co.note, co.created_at,
            (select count(*)::int from contacts c where c.company_id = co.id) as contacts_count,
            mc.name as main_contact_name, mc.email as main_contact_email, mc.phone as main_contact_phone,
@@ -486,6 +488,8 @@ export async function getCompanyTimeline(companyId: string): Promise<TimelineEnt
 
 export interface CompanyPatch {
   reason?: string | null;
+  /** Normalizované IČO. Jednoznačný klíč pro klientské vylučovací seznamy. */
+  ico?: string | null;
   priority?: CompanyPriority;
   status?: CompanyStatus;
   ownerId?: string | null;
@@ -500,6 +504,7 @@ export async function updateCompany(id: string, patch: CompanyPatch): Promise<bo
   await sql`
     update companies
        set reason   = ${patch.reason === undefined ? sql`reason` : patch.reason},
+           ico      = ${patch.ico === undefined ? sql`ico` : patch.ico},
            priority = coalesce(${patch.priority ?? null}, priority),
            status   = coalesce(${patch.status ?? null}, status),
            owner_id = ${patch.ownerId === undefined ? sql`owner_id` : patch.ownerId},

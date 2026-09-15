@@ -22,6 +22,9 @@ import { ContactFormToggle } from "@/components/contact-form";
 import { ActivityTimeline } from "@/components/activity-timeline";
 import { requireUser } from "@/lib/auth";
 import { OutreachForm } from "@/components/outreach-form";
+import { CompanyExclusions } from "@/components/company-exclusions";
+import { listClientExclusions } from "@/lib/queries/suppression";
+import { listClients } from "@/lib/queries/clients";
 
 export const dynamic = "force-dynamic";
 
@@ -35,14 +38,17 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
   const company = await getCompany(id);
   if (!company) notFound();
 
-  const [user, contacts, timeline, team, nextStep, callRecords] = await Promise.all([
-    requireUser(),
-    listCompanyContacts(id),
-    getCompanyTimeline(id),
-    listCallers({ activeOnly: true }),
-    getCompanyNextStep(id),
-    listCallsForCompany(id, 20),
-  ]);
+  const [user, contacts, timeline, team, nextStep, callRecords, exclusions, clients] =
+    await Promise.all([
+      requireUser(),
+      listCompanyContacts(id),
+      getCompanyTimeline(id),
+      listCallers({ activeOnly: true }),
+      getCompanyNextStep(id),
+      listCallsForCompany(id, 20),
+      listClientExclusions({ companyId: id }),
+      listClients(),
+    ]);
   // Jestli jde volat z prohlížeče, ví server. Klient si to nevymýšlí.
   const browserCalling = isTwilioConfigured();
   const isAdmin = user.role === "admin";
@@ -334,17 +340,39 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
           </section>
         </div>
 
-        <aside>
-          <h2 className="section-title mb-3">Kontext firmy</h2>
-          <CompanyForm
-            companyId={company.id}
-            reason={company.reason ?? ""}
-            priority={company.priority}
-            status={company.status}
-            ownerId={company.owner_id ?? ""}
-            note={company.note ?? ""}
-            team={team.map((c) => ({ id: c.id, name: c.name }))}
-          />
+        <aside className="space-y-6">
+          <div>
+            <h2 className="section-title mb-3">Kontext firmy</h2>
+            <CompanyForm
+              companyId={company.id}
+              reason={company.reason ?? ""}
+              ico={company.ico ?? ""}
+              priority={company.priority}
+              status={company.status}
+              ownerId={company.owner_id ?? ""}
+              note={company.note ?? ""}
+              team={team.map((c) => ({ id: c.id, name: c.name }))}
+            />
+          </div>
+
+          {/* Vyloučení pro klienta: užší než globální stav firmy výš.
+              Patří sem, k firmě, ne do Nastavení - rozhoduje se o tom
+              nad konkrétní firmou. */}
+          {isAdmin ? (
+            <CompanyExclusions
+              companyId={company.id}
+              companyName={company.name}
+              clients={clients.map((c) => ({ id: c.id, name: c.name }))}
+              exclusions={exclusions.map((e) => ({
+                id: e.id,
+                client_id: e.client_id,
+                client_name: e.client_name,
+                reason: e.reason,
+                created_at: e.created_at,
+                created_by_name: e.created_by_name,
+              }))}
+            />
+          ) : null}
         </aside>
       </div>
     </>

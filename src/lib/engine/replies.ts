@@ -52,6 +52,34 @@ interface MatchTarget {
   contact_id: string;
   campaign_id: string;
   send_id: string | null;
+  /** E-mail prospekta, na kterého jsme psali. Kvůli kontrole odesílatele. */
+  contact_email: string;
+}
+
+/**
+ * Napsal tu odpověď opravdu ten, komu jsme psali?
+ *
+ * Spárování přes References je silný signál o VLÁKNU, ne o ČLOVĚKU:
+ * když prospekt náš e-mail přepošle kolegovi a odpoví kolega, nese jeho
+ * zpráva pořád naše Message-ID. Bez téhle kontroly by se prospekt označil
+ * za toho, kdo odpověděl, a jeho sekvence by se zastavila kvůli zprávě,
+ * kterou nenapsal.
+ *
+ * Shoda na doméně se bere jako tentýž člověk. Odpovědi z aliasu
+ * (`j.novak@` místo `jan.novak@`) jsou běžné a psát dál někomu, kdo nám
+ * právě odpověděl, je horší chyba než opačný omyl.
+ *
+ * Cizí doména = nevíme. Zpráva se uloží a označí ke kontrole, ale
+ * sekvenci nezastaví.
+ */
+function isSameCorrespondent(from: string | null, contactEmail: string): boolean {
+  if (!from) return false;
+  const sender = from.trim().toLowerCase();
+  const contact = contactEmail.trim().toLowerCase();
+  if (sender === contact) return true;
+  const senderDomain = sender.split("@")[1];
+  const contactDomain = contact.split("@")[1];
+  return Boolean(senderDomain && contactDomain && senderDomain === contactDomain);
 }
 
 /**
@@ -68,9 +96,11 @@ async function matchByThread(message: InboxMessage): Promise<MatchTarget | null>
   // Normalise: some clients strip the angle brackets, some keep them.
   const candidates = [...new Set(raw.flatMap((id) => [id, `<${id.replace(/^<|>$/g, "")}>`]))];
   const [row] = await sql<MatchTarget[]>`
-    select es.campaign_contact_id, es.campaign_id, es.id as send_id, cc.contact_id
+    select es.campaign_contact_id, es.campaign_id, es.id as send_id, cc.contact_id,
+           c.email as contact_email
       from email_sends es
       join campaign_contacts cc on cc.id = es.campaign_contact_id
+      join contacts c on c.id = cc.contact_id
      where es.message_id = any(${candidates})
      order by es.sent_at desc nulls last
      limit 1
@@ -90,7 +120,8 @@ async function matchByThread(message: InboxMessage): Promise<MatchTarget | null>
 async function matchBySender(message: InboxMessage, mailboxId: string): Promise<MatchTarget | null> {
   if (!message.from) return null;
   const [row] = await sql<MatchTarget[]>`
-    select cc.id as campaign_contact_id, cc.contact_id, cc.campaign_id, null::uuid as send_id
+    select cc.id as campaign_contact_id, cc.contact_id, cc.campaign_id, null::uuid as send_id,
+           c.email as contact_email
       from campaign_contacts cc
       join contacts c on c.id = cc.contact_id
      where c.email = ${message.from}
@@ -147,14 +178,20 @@ async function processMailbox(mailbox: Mailbox): Promise<ReplyPollSummary["mailb
         contentType: message.contentType,
       });
 
+      // Spárováno na vlákno, ale psal to někdo jiný? Viz isSameCorrespondent.
+      const fromStranger =
+        target !== null && !isSameCorrespondent(message.from, target.contact_email);
+
       // Record the reply first. The unique (mailbox_id, imap_message_id) index
       // makes re-processing the same physical message a no-op.
       const inserted = await sql<{ id: string }[]>`
         insert into replies (mailbox_id, contact_id, campaign_contact_id, matched_send_id,
-                             from_email, subject, imap_message_id, in_reply_to, imap_uid, received_at)
+                             from_email, subject, imap_message_id, in_reply_to, imap_uid,
+                             received_at, needs_review)
         values (${mailbox.id}, ${contactId}, ${target?.campaign_contact_id ?? null},
                 ${target?.send_id ?? null}, ${message.from ?? "unknown"}, ${message.subject},
-                ${message.messageId}, ${message.inReplyTo}, ${message.uid}, ${message.receivedAt})
+                ${message.messageId}, ${message.inReplyTo}, ${message.uid}, ${message.receivedAt},
+                ${fromStranger && verdict.class !== "bounce"})
         on conflict (mailbox_id, imap_message_id) do nothing
         returning id
       `;
@@ -203,6 +240,24 @@ async function processMailbox(mailbox: Mailbox): Promise<ReplyPollSummary["mailb
       }
 
       if (!target) continue; // a reply from someone who is not in a campaign
+
+      // Cizí odesílatel na našem vlákně. Zpráva už je uložená a označená
+      // ke kontrole; sekvence prospekta ale běží dál, protože prospekt
+      // sám nic nenapsal. Zastavit ji tady by znamenalo utnout člověka
+      // kvůli zprávě někoho jiného.
+      if (fromStranger) {
+        await logActivity({
+          level: "warn",
+          action: "Odpověď od jiné adresy",
+          detail:
+            `${message.from} odpověděl na vlákno s ${target.contact_email}. ` +
+            "Sekvence pokračuje — zprávu posuďte ručně.",
+          campaignId: target.campaign_id,
+          contactId: target.contact_id,
+          campaignContactId: target.campaign_contact_id,
+        });
+        continue;
+      }
 
       // --------------------------------------------------- mimo kancelář
       //
