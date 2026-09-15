@@ -25,6 +25,7 @@ export function NastaveniTabs({ active }: { active: string }) {
         { href: "/uzivatele", label: "Uživatelé" },
         { href: "/mailboxes", label: "Schránky" },
         { href: "/suppression", label: "Nekontaktovat" },
+        { href: "/stav", label: "Stav systému" },
       ]}
     />
   );

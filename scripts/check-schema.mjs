@@ -26,59 +26,13 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import { config as loadEnv } from "dotenv";
+import { MIGRATIONS, REQUIRED, findMissing } from "../src/lib/schema-contract.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 loadEnv({ path: join(root, ".env.local"), quiet: true });
 loadEnv({ path: join(root, ".env"), quiet: true });
 
-/**
- * Co aplikace potřebuje, po obrazovkách.
- *
- * Není to celé schéma - jsou to sloupce a tabulky přidané pozdějšími
- * migracemi, tedy přesně ty, které na starší databázi chybí. Seznam se
- * rozšiřuje, když nová migrace přidá něco, co stránka čte.
- */
-export const REQUIRED = [
-  { since: "0005", feature: "Firmy", table: "companies", columns: ["reason", "priority", "status", "owner_id"] },
-  { since: "0006", feature: "Výsledky hovorů", table: "contacts", columns: ["position"] },
-  { since: "0007", feature: "Volání z prohlížeče", table: "calls", columns: ["provider_call_sid", "answered_at", "call_activity_id"] },
-  { since: "0008", feature: "Rozlišení řečníků", table: "calls", columns: ["transcript_segments", "recording_channels"] },
-  { since: "0010", feature: "Hlavní kontakt", table: "contacts", columns: ["is_primary"] },
-  { since: "0011", feature: "Detail firmy — Loom a úvodní věta", table: "contacts", columns: ["loom_url", "loom_title", "loom_sent_at", "loom_note", "call_opener"] },
-  { since: "0012", feature: "Přihlašování", table: "users", columns: ["email", "password_hash", "role", "caller_id", "is_active"] },
-  { since: "0013", feature: "Oddělení klientů", table: "clients", columns: ["name", "active"] },
-  { since: "0013", feature: "Oddělení klientů", table: "campaigns", columns: ["client_id"] },
-  { since: "0013", feature: "Přidělení kampaní", table: "caller_campaigns", columns: ["caller_id", "campaign_id"] },
-  { since: "0014", feature: "Poměr nových a follow-upů", table: "campaigns", columns: ["new_ratio"] },
-  { since: "0014", feature: "Rozdělení odeslání do poolů", table: "email_sends", columns: ["pool"] },
-  { since: "0014", feature: "Nedoručení jako data", table: "email_sends", columns: ["bounce_type", "bounce_code", "bounce_detail", "bounced_at"] },
-  { since: "0014", feature: "Klasifikace příchozí pošty", table: "messages", columns: ["message_class"] },
-  { since: "0014", feature: "Důvod vyloučení", table: "suppression_list", columns: ["reason_code", "source"] },
-  { since: "0014", feature: "Klientská vyloučení firem", table: "client_company_exclusions", columns: ["client_id", "company_id", "reason"] },
-  { since: "0015", feature: "IČO firmy", table: "companies", columns: ["ico"] },
-  { since: "0015", feature: "Autor vyloučení", table: "client_company_exclusions", columns: ["created_by"] },
-  { since: "0015", feature: "Odpovědi ke kontrole", table: "replies", columns: ["needs_review"] },
-];
-
-/**
- * Co z požadovaného seznamu v databázi chybí.
- *
- * Čistá funkce nad tím, co databáze vrátila - aby šla otestovat bez
- * zásahu do schématu.
- */
-export function findMissing(present, required = REQUIRED) {
-  const missing = [];
-  for (const need of required) {
-    const columns = present.get(need.table);
-    if (!columns) {
-      missing.push({ ...need, missingTable: true, columns: need.columns });
-      continue;
-    }
-    const absent = need.columns.filter((column) => !columns.has(column));
-    if (absent.length > 0) missing.push({ ...need, missingTable: false, columns: absent });
-  }
-  return missing;
-}
+export { REQUIRED, findMissing };
 
 /** Spouští se jen jako skript, ne při importu z testu. */
 const isEntrypoint = process.argv[1] && process.argv[1].endsWith("check-schema.mjs");
@@ -114,9 +68,23 @@ try {
 
 try {
   // ---- 1. migrace ------------------------------------------------------
-  const files = readdirSync(join(root, "supabase", "migrations"))
+  // Soubory na disku musí odpovídat kontraktu. Kdyby někdo přidal migraci
+  // a zapomněl ji do seznamu, aplikace za běhu (kde složka není) by o ní
+  // nevěděla - takže je to chyba hned tady, ne až na produkci.
+  const onDisk = readdirSync(join(root, "supabase", "migrations"))
     .filter((f) => f.endsWith(".sql"))
     .sort();
+  const files = [...MIGRATIONS];
+  const drift = [
+    ...onDisk.filter((f) => !files.includes(f)).map((f) => `  + ${f} (na disku, ne v kontraktu)`),
+    ...files.filter((f) => !onDisk.includes(f)).map((f) => `  - ${f} (v kontraktu, ne na disku)`),
+  ];
+  if (drift.length > 0) {
+    problems += drift.length;
+    console.log("Seznam migrací v src/lib/schema-contract.mjs nesedí se soubory:");
+    for (const line of drift) console.log(line);
+    console.log("");
+  }
 
   const [table] = await sql`select to_regclass('public.schema_migrations') as name`;
   const applied = table?.name

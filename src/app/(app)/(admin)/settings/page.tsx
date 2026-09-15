@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { getSettings } from "@/lib/settings";
 import { PageHeader } from "@/components/ui";
 import { SettingsForm } from "@/components/settings-form";
@@ -47,6 +48,15 @@ export default async function SettingsPage() {
           <p className="mt-3 text-xs text-zinc-500">
             Na Vercelu to zařizuje <code className="font-mono">vercel.json</code> každou minutu.
             Alternativy najdete v <code className="font-mono">docs/DEPLOY.md</code>.
+          </p>
+          {/* Worker se zastaví sám, když je databáze pozadu. Odkaz sem patří,
+              protože právě tady se člověk ptá, proč se nic neposílá. */}
+          <p className="mt-1 text-xs text-zinc-500">
+            Jestli je databáze i konfigurace v pořádku, ukáže{" "}
+            <Link href="/stav" className="underline hover:text-zinc-700">
+              Stav systému
+            </Link>
+            . Dokud není, worker nic neodesílá ani nevytáčí.
           </p>
         </div>
       </div>

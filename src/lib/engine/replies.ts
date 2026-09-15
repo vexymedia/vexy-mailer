@@ -252,20 +252,19 @@ async function processMailbox(mailbox: Mailbox): Promise<ReplyPollSummary["mailb
       // Kroky se proto POZASTAVÍ a jejich termín se uschová. Rozhodne
       // člověk v Komunikaci → K vyřízení; do té doby se nic neodešle.
       if (fromStranger) {
-        await sql`
-          update campaign_contacts
-             set paused_next_send_at = coalesce(paused_next_send_at, next_send_at),
-                 next_send_at = null,
-                 updated_at = now()
-           where id = ${target.campaign_contact_id}
-             and status in ('scheduled', 'sent')
-        `;
+        // Sekvence běží DÁL. `needs_review` je příznak příchozí zprávy,
+        // ne pauza kampaně: kdyby uměl zastavit odesílání, stačilo by
+        // komukoli zvenčí napsat do vlákna a naše oslovení by stálo.
+        // Nejistý inbound nesmí mít vliv na outbound harmonogram.
+        //
+        // Cena je jasná a zvolená vědomě: než někdo zprávu posoudí,
+        // může odejít další naplánovaný krok. To je očekávané.
         await logActivity({
           level: "warn",
           action: "Odpověď od jiné adresy",
           detail:
             `${message.from} odpověděl na vlákno s ${target.contact_email}. ` +
-            "Další kroky jsou pozastavené, dokud zprávu někdo neposoudí.",
+            "Kontakt zůstává v sekvenci, zpráva čeká na posouzení v Komunikaci.",
           campaignId: target.campaign_id,
           contactId: target.contact_id,
           campaignContactId: target.campaign_contact_id,

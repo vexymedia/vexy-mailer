@@ -111,7 +111,7 @@ afterAll(async () => {
 // ================================================ přeposlání a cizí adresa
 
 describe("odpověď od někoho jiného", () => {
-  it("přeposlaná zpráva z CIZÍ domény sekvenci prospekta neutne, jen pozastaví", async () => {
+  it("přeposlaná zpráva z CIZÍ domény sekvenci prospekta ani neutne, ani nepozastaví", async () => {
     const seed = await seedSent();
     const [before] = await sql<{ next_send_at: Date }[]>`
       select next_send_at from campaign_contacts where campaign_id = ${seed.campaignId}`;
@@ -124,16 +124,13 @@ describe("odpověď od někoho jiného", () => {
     ];
     await poll();
 
-    // Prospekt neodpověděl, takže se jeho sekvence nesmí ukončit. Běžet
-    // dál ale taky nemůže: kdyby to byl on z jiné adresy, přišel by mu
-    // za tři dny další cold e-mail. Termín se proto uschová a čeká se,
-    // až zprávu někdo posoudí.
+    // Prospekt neodpověděl, takže se jeho sekvence nesmí ukončit. Zastavit
+    // ji taky ne: příznak "k posouzení" patří příchozí zprávě, ne kampani.
+    // Kdyby uměl zastavit odesílání, stačilo by komukoli zvenčí napsat do
+    // vlákna a naše oslovení by stálo.
     const contact = await contactStatus(seed.campaignId);
     expect(contact.status).not.toBe("replied");
-    expect(contact.next_send_at).toBeNull();
-    const [paused] = await sql<{ paused_next_send_at: Date | null }[]>`
-      select paused_next_send_at from campaign_contacts where campaign_id = ${seed.campaignId}`;
-    expect(paused.paused_next_send_at?.getTime()).toBe(before.next_send_at.getTime());
+    expect(contact.next_send_at?.getTime()).toBe(before.next_send_at.getTime());
   });
 
   it("ale zpráva se neztratí - je ke kontrole", async () => {

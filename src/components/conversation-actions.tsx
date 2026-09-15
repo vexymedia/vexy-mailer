@@ -8,6 +8,7 @@ import {
 } from "@/lib/actions";
 import { ActionForm, SubmitButton } from "./action-form";
 import { CLASSIFICATIONS, type Classification } from "@/lib/types";
+import { DateTime } from "./ui";
 
 /**
  * Reply composer. The sending mailbox is fixed to the one that opened the
@@ -143,18 +144,26 @@ export function DeleteConversationButton({ conversationId }: { conversationId: s
  * Dvě tlačítka a nic mezi tím. Třetí možnost („rozhodnu se potom")
  * existuje sama od sebe: stačí odejít.
  */
+/**
+ * Posouzení odpovědi od jiné adresy.
+ *
+ * Posouzení NIC nepozastavuje - sekvence běží celou dobu. Nejistá příchozí
+ * zpráva nesmí umět zastavit naše oslovení, jinak by stačilo komukoli
+ * zvenčí napsat do vlákna. Texty to musí říkat přesně tak, jak to je:
+ * dřív tu stálo, že kroky stojí, a to by uživatele mátlo.
+ */
 export function ReviewDecision({
   conversationId,
   replyId,
   fromEmail,
   contactEmail,
-  pausedUntil,
+  nextSendAt,
 }: {
   conversationId: string;
   replyId: string;
   fromEmail: string;
   contactEmail: string;
-  pausedUntil: Date | null;
+  nextSendAt: Date | null;
 }) {
   return (
     <ActionForm action={resolveReviewAction} className="card border-amber-300 bg-amber-50 p-4">
@@ -168,9 +177,12 @@ export function ReviewDecision({
         vlákna — může jít o tutéž osobu z jiné adresy, nebo o přeposlání někomu jinému.
       </p>
       <p className="mt-1 text-xs text-amber-800">
-        {pausedUntil
-          ? "Další kroky sekvence jsou zatím pozastavené."
-          : "Kontakt teď žádný naplánovaný krok nemá."}
+        Sekvence kontaktu běží dál.{" "}
+        {nextSendAt ? (
+          <>Další krok odejde <DateTime value={nextSendAt} />, pokud to teď neukončíte.</>
+        ) : (
+          "Další krok naplánovaný nemá."
+        )}
       </p>
 
       <div className="mt-3 flex flex-wrap gap-2">
@@ -188,12 +200,12 @@ export function ReviewDecision({
           className="btn-secondary !py-1.5 text-sm"
           pendingLabel="Ukládám…"
         >
-          Nesouvisí — pokračovat v sekvenci
+          Nesouvisí
         </SubmitButton>
       </div>
       <p className="mt-2 text-xs text-amber-800/80">
-        „Odpověděl nám prospekt“ sekvenci ukončí. „Nesouvisí“ ji vrátí na původní termín — nic
-        nahromaděného se neodešle naráz.
+        „Odpověděl nám prospekt“ kontakt označí za odpověděvšího a sekvenci ukončí. „Nesouvisí“ jen
+        zavře tohle posouzení — harmonogram zůstane, jaký je.
       </p>
     </ActionForm>
   );

@@ -16,6 +16,11 @@ const PUBLIC_PREFIXES = [
   "/api/calling/voice",
   "/api/calling/status",
   "/api/calling/recording",
+  // Health a readiness pro monitoring nasazení. Přihlášení tu nedává smysl:
+  // probe žádnou session nemá a kdyby ji chtěl, vrátilo by se přesměrování
+  // na /login s kódem 200 - tedy "zdravý" i v okamžiku, kdy je databáze
+  // pryč. Handler schválně nevrací nic citlivého, viz api/health/route.ts.
+  "/api/health",
   "/u/", // public one-click unsubscribe
   "/_next",
   // Next's generated metadata routes. Without these the icon request is

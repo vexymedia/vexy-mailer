@@ -14,7 +14,10 @@
     "db:check": "node scripts/check-schema.mjs",
     "user:create-admin": "node scripts/create-admin.mjs",
     "test:e2e": "node tests/e2e/run.mjs",
-    "check": "npm run typecheck && npm run lint && npm run build && npm test"
+    "check": "npm run typecheck && npm run lint && npm run build && npm test",
+    "release": "node scripts/release.mjs",
+    "release:check": "node scripts/release.mjs --check",
+    "vercel-build": "node scripts/release.mjs && next build"
   },
   "dependencies": {
     "@twilio/voice-sdk": "^2.18.5",

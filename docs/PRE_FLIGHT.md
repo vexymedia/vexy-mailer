@@ -21,7 +21,7 @@ Cold email is unusual in that mistakes are unrecoverable. You cannot unsend to
 - [ ] `ENCRYPTION_KEY` is backed up somewhere outside the deployment. Losing it
       means re-entering every mailbox password.
 - [ ] `APP_URL` is set to the production URL, not a preview one.
-- [ ] `APP_PASSWORD` is not something guessable. The app is on the public
+- [ ] Every admin account has a password that is not guessable. The app is on the public
       internet.
 
 ## 2. The worker

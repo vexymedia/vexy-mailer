@@ -21,7 +21,6 @@ them alone.
 | `DATABASE_URL` | The Supabase **transaction pooler** string, port 6543 |
 | `ENCRYPTION_KEY` | `openssl rand -base64 32` |
 | `SESSION_SECRET` | `openssl rand -hex 32` |
-| `APP_PASSWORD` | The password you will type to sign in |
 | `CRON_SECRET` | `openssl rand -hex 32` |
 | `APP_URL` | `https://your-app.vercel.app` |
 
@@ -37,19 +36,66 @@ Set `APP_URL` explicitly rather than relying on inference. A preview deployment
 would otherwise mint unsubscribe links pointing at itself, which stop working
 when that preview is torn down.
 
-### 3. Run the migration
+### 3. Set the build command
 
-From your machine, with production `DATABASE_URL` in the environment:
+**Project Settings → Build & Development Settings → Build Command**, override
+with:
 
-```bash
-DATABASE_URL="postgresql://…:6543/postgres" npm run db:migrate
+```
+npm run vercel-build
 ```
 
-Or paste `supabase/migrations/0001_init.sql` into the Supabase SQL Editor.
+That is `npm run release && next build`. Migrations become part of the
+deployment — a controlled release step, not something that fires on an HTTP
+request.
+
+What `release` does, and what it refuses to do:
+
+- applies pending migrations in order, **each one in a transaction together
+  with its `schema_migrations` row**, so a failure rolls back whole and never
+  leaves a half-applied schema recorded as done;
+- stops the build on the first failure — a broken migration means no deploy,
+  not a deploy against a schema the app does not understand;
+- **skips entirely on preview and development deployments**, which share
+  environment variables with production. Without that guard every pull request
+  would migrate your live database;
+- skips (without failing) when `DATABASE_URL` is absent, so a local
+  `npm run build` still works;
+- after migrating, verifies the columns the app actually reads are present —
+  a recorded migration is not proof it ran to the end.
+
+It never drops, resets or "repairs" anything. Only the migrations in the
+repository, only forwards.
+
+No manual step, and nothing to paste into the Supabase SQL Editor.
 
 ### 4. Deploy
 
 Push, or click **Deploy**. When it is live, open the URL and sign in.
+
+Then open **Nastavení → Stav systému**. It shows database, migrations, SMTP,
+IMAP, Twilio and the public URL, each judged on its own, and says what to do
+about anything missing. It distinguishes *configured* from *verified* — Twilio
+credentials existing is not the same as a call going through.
+
+For automated monitoring:
+
+- `GET /api/health` — is the process alive? Does not touch the database, so a
+  database outage will not make your host restart-loop the app.
+- `GET /api/health?ready=1` — is it fit to serve? `503` with the names of the
+  missing migrations when not.
+
+Neither returns a connection string, credentials or any secret value.
+
+### Deploying from somewhere other than Vercel
+
+One command, with the production `DATABASE_URL` in the environment:
+
+```bash
+npm run release
+```
+
+`npm run release:check` does the same checks but changes nothing.
 
 ### 5. Confirm the worker is running
 
@@ -158,7 +204,7 @@ which is usually the more useful of the two.
 (sends whose outcome is unknown); `IMAP error` entries in the activity log; a
 mailbox whose last inbox check is hours old.
 
-**Rotating `APP_PASSWORD`** invalidates nothing — sessions are signed with
+**Rotating a user's password** invalidates nothing — sessions are signed with
 `SESSION_SECRET`. Rotate that instead to sign everyone out, but note that it
 also invalidates every unsubscribe link already sitting in someone's inbox.
 

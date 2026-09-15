@@ -51,9 +51,9 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
   // Odeslané vlákno a vlákno s odpovědí se chovají jinak vůči kadenci,
   // takže si nemůžou nést stejnou poznámku.
   const hasInbound = messages.some((message) => message.direction === "inbound");
-  // Čeká tu odpověď od jiné adresy na posouzení? Dokud čeká, stojí
-  // sekvence kontaktu - takže to patří nad vlákno, ne do postranního
-  // panelu, kde by se to dalo přehlédnout.
+  // Čeká tu odpověď od jiné adresy na posouzení? Sekvence kvůli tomu
+  // nestojí - o to větší důvod to dát nad vlákno, ne do postranního
+  // panelu: dokud to nikdo neposoudí, odcházejí další kroky.
   const pendingReview = canManage ? await getPendingReview(id) : null;
 
   return (
@@ -98,7 +98,7 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
             replyId={pendingReview.reply_id}
             fromEmail={pendingReview.from_email}
             contactEmail={pendingReview.contact_email}
-            pausedUntil={pendingReview.paused_next_send_at}
+            nextSendAt={pendingReview.next_send_at}
           />
         </div>
       ) : null}
@@ -231,8 +231,8 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
             // Příchozí zpráva tu je, ale nepsal ji prospekt - tvrdit, že
             // odpověděl, by si odporovalo s výzvou nad vláknem.
             <p className="px-1 text-xs text-zinc-500">
-              Zpráva přišla z jiné adresy než prospektovy, takže sekvence zatím jen stojí. Co s ní
-              bude dál, rozhodne tlačítko nahoře.
+              Zpráva přišla z jiné adresy než prospektovy, takže se za jeho odpověď nepovažuje a
+              sekvence běží dál. Posoudit ji jde tlačítkem nahoře.
             </p>
           ) : canManage && hasInbound ? (
             <p className="px-1 text-xs text-zinc-500">

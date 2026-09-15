@@ -3,6 +3,7 @@ import { dispatchTick } from "@/lib/engine/dispatch";
 import { pollReplies } from "@/lib/engine/replies";
 import { processCallPipeline } from "@/lib/telephony/pipeline";
 import { safeEqual } from "@/lib/crypto";
+import { readSchemaState, schemaIsReady } from "@/lib/system-status";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -37,6 +38,32 @@ async function handle(request: NextRequest) {
   }
 
   const started = Date.now();
+
+  // Zastaralé schéma = žádné skutečné akce.
+  //
+  // Když na produkci chybí migrace, dispatcher by psal do tabulek, kterým
+  // nerozumí: v lepším případě spadne, v horším odešle e-mail a výsledek
+  // nemá kam zapsat. Odesílání a volání se proto vůbec nerozjede a tick
+  // vrátí, co přesně chybí. UI mezitím funguje dál, aby to administrátor
+  // měl kde přečíst.
+  //
+  // Je to kontrola, ne oprava: nic se tu samo nemigruje.
+  const schema = await readSchemaState();
+  if (!schemaIsReady(schema)) {
+    return NextResponse.json(
+      {
+        ok: false,
+        skipped: "schema_out_of_date",
+        error: schema.reachable
+          ? "Databáze není připravená pro tuhle verzi aplikace — worker nic neodeslal."
+          : "Databáze neodpovídá — worker nic neodeslal.",
+        missingMigrations: schema.missingMigrations,
+        schemaGaps: schema.gaps.map((gap) => `${gap.table}.${gap.columns.join(",")}`),
+      },
+      { status: 503 },
+    );
+  }
+
   try {
     // Dispatch first: sending is time-sensitive, reply polling is not.
     const dispatch = await dispatchTick();

@@ -10,13 +10,17 @@ import type { InboxMessage } from "@/lib/imap";
  * nese naše Message-ID dál, takže odpověď kolegy vypadá jako odpověď
  * prospekta.
  *
- * Dvě chyby, mezi kterými se to pohybuje:
- *   * označit prospekta za toho, kdo odpověděl → utneme ho kvůli cizí
- *     zprávě,
- *   * nechat sekvenci běžet dál → když to JE on z Gmailu, přijde mu
- *     další cold e-mail hodinu poté, co nám odpověděl.
+ * Označit prospekta za toho, kdo odpověděl, by ho utnulo kvůli cizí
+ * zprávě. Zpráva se proto uloží jako `needs_review` a rozhodne člověk.
  *
- * Řešení je pauza a rozhodnutí člověka. Tenhle soubor hlídá obojí.
+ * `needs_review` je ale POUZE příznak příchozí zprávy, NE pauza kampaně.
+ * Kdyby uměl zastavit odesílání, stačilo by komukoli zvenčí napsat do
+ * vlákna - přeposláním, automatickou odpovědí, spoofnutými hlavičkami -
+ * a naše oslovení by stálo. Nejistý inbound nesmí mít vliv na outbound
+ * harmonogram, a přesně to tenhle soubor hlídá.
+ *
+ * Cena je zvolená vědomě: než někdo zprávu posoudí, může odejít další
+ * naplánovaný krok.
  */
 
 const inbox = vi.hoisted(() => ({ messages: [] as InboxMessage[], uidNext: 1, uidValidity: 1 }));
@@ -72,7 +76,7 @@ async function seedSent(email = "ana@acme.test") {
            imap_password_enc = ${encryptSecret("x")}, imap_secure = true
      where id = ${seed.mailboxId}`;
 
-  const messageId = "<krok1@example.com>";
+  const messageId = `<krok1-${seed.campaignId}@example.com>`;
   const [send] = await sql<{ id: string; campaign_contact_id: string }[]>`
     update email_sends set status = 'sent', message_id = ${messageId}, sent_at = now()
      where campaign_id = ${seed.campaignId} returning id, campaign_contact_id`;
@@ -90,11 +94,25 @@ async function seedSent(email = "ana@acme.test") {
 }
 
 async function contactRow(campaignId: string) {
-  const [row] = await sql<
-    { status: string; next_send_at: Date | null; paused_next_send_at: Date | null }[]
-  >`select status, next_send_at, paused_next_send_at from campaign_contacts
-      where campaign_id = ${campaignId}`;
+  const [row] = await sql<{ status: string; next_send_at: Date | null }[]>`
+    select status, next_send_at from campaign_contacts where campaign_id = ${campaignId}`;
   return row;
+}
+
+/** Kolik kroků kampaň odeslala. Jediný spolehlivý důkaz, že sekvence běží. */
+async function sentCount(campaignId: string) {
+  const [row] = await sql<{ count: number }[]>`
+    select count(*)::int from email_sends where campaign_id = ${campaignId}`;
+  return row.count;
+}
+
+/** Popožene dispatcher, jako by uplynul čas. */
+async function drain(times = 5) {
+  const { dispatchTick } = await import("@/lib/engine/dispatch");
+  for (let i = 0; i < times; i++) {
+    await sql`update campaigns set next_slot_at = null`;
+    await dispatchTick();
+  }
 }
 
 async function reviewRow() {
@@ -129,7 +147,6 @@ describe("odesílatel versus kontakt", () => {
     const contact = await contactRow(seed.campaignId);
     expect(contact.status).toBe("replied");
     expect(contact.next_send_at).toBeNull();
-    expect(contact.paused_next_send_at).toBeNull();
     expect((await reviewRow()).needs_review).toBe(false);
   });
 
@@ -137,11 +154,13 @@ describe("odesílatel versus kontakt", () => {
     const seed = await seedSent("jan.novak@acme.test");
     inbox.messages = [message({ from: "j.novak@acme.test", references: seed.sentMessageId })];
     await poll();
-    expect((await contactRow(seed.campaignId)).status).toBe("replied");
+    const contact = await contactRow(seed.campaignId);
+    expect(contact.status).toBe("replied");
+    expect(contact.next_send_at).toBeNull();
     expect((await reviewRow()).needs_review).toBe(false);
   });
 
-  it("úplně jiná doména → posouzení, sekvence POZASTAVENA", async () => {
+  it("úplně jiná doména → posouzení, ale harmonogram BEZE ZMĚNY", async () => {
     const seed = await seedSent();
     inbox.messages = [
       message({ from: "kolega@jina-firma.test", references: seed.sentMessageId }),
@@ -150,23 +169,24 @@ describe("odesílatel versus kontakt", () => {
 
     const contact = await contactRow(seed.campaignId);
     expect(contact.status).not.toBe("replied");
-    // Pozastaveno: termín je uschovaný, ne ztracený.
-    expect(contact.next_send_at).toBeNull();
-    expect(contact.paused_next_send_at?.getTime()).toBe(seed.scheduled.getTime());
+    // Tohle je jádro věci: termín zůstal na milisekundu stejný.
+    expect(contact.next_send_at?.getTime()).toBe(seed.scheduled.getTime());
     expect((await reviewRow()).needs_review).toBe(true);
   });
 
-  it("Gmail nebo jiná osobní adresa → taky posouzení", async () => {
+  it("Gmail nebo jiná osobní adresa → taky posouzení, taky beze změny termínu", async () => {
     const seed = await seedSent();
     inbox.messages = [
       message({ from: "ana.novakova@gmail.com", references: seed.sentMessageId }),
     ];
     await poll();
-    expect((await contactRow(seed.campaignId)).status).not.toBe("replied");
+    const contact = await contactRow(seed.campaignId);
+    expect(contact.status).not.toBe("replied");
+    expect(contact.next_send_at?.getTime()).toBe(seed.scheduled.getTime());
     expect((await reviewRow()).needs_review).toBe(true);
   });
 
-  it("podvržené hlavičky cizí zprávy sekvenci neutnou, jen ji pozastaví", async () => {
+  it("podvržené hlavičky cizí zprávy sekvenci neutnou ani neposunou", async () => {
     const seed = await seedSent();
     inbox.messages = [
       message({
@@ -179,27 +199,50 @@ describe("odesílatel versus kontakt", () => {
     await poll();
     const contact = await contactRow(seed.campaignId);
     expect(contact.status).not.toBe("replied");
+    expect(contact.next_send_at?.getTime()).toBe(seed.scheduled.getTime());
     expect((await reviewRow()).needs_review).toBe(true);
   });
 });
 
-// ============================================ dokud se nerozhodne, stojí
+// ================================ nejistý inbound NESMÍ zastavit outbound
 
-describe("pozastavená sekvence", () => {
-  it("během posouzení neodejde žádný další krok", async () => {
+describe("sekvence běží dál", () => {
+  it("cizí zpráva nezabrání dispatcheru poslat další splatný krok", async () => {
     const seed = await seedSent();
     inbox.messages = [message({ from: "kolega@jina-firma.test", references: seed.sentMessageId })];
     await poll();
+    expect(await sentCount(seed.campaignId)).toBe(1);
 
-    const { dispatchTick } = await import("@/lib/engine/dispatch");
-    // I kdyby byl krok dávno splatný: bez rozhodnutí se nic neposílá.
-    for (let i = 0; i < 5; i++) {
-      await sql`update campaigns set next_slot_at = null`;
-      await dispatchTick();
-    }
-    const [{ count }] = await sql<{ count: number }[]>`
-      select count(*)::int from email_sends where campaign_id = ${seed.campaignId}`;
-    expect(count).toBe(1); // jen původní krok 1
+    // Termín dozrál. Posouzení pořád visí neuzavřené - a přesto se pošle.
+    await sql`update campaign_contacts set next_send_at = now() - interval '1 minute'
+               where campaign_id = ${seed.campaignId}`;
+    await drain(1);
+
+    expect(await sentCount(seed.campaignId)).toBe(2);
+    expect((await reviewRow()).needs_review).toBe(true); // review pořád čeká
+  });
+
+  it("dokud termín nedozrál, neposílá se nic navíc", async () => {
+    const seed = await seedSent();
+    inbox.messages = [message({ from: "kolega@jina-firma.test", references: seed.sentMessageId })];
+    await poll();
+    await drain(6);
+    // Termín je tři dny v budoucnu; cizí zpráva ho neposunula dopředu.
+    expect(await sentCount(seed.campaignId)).toBe(1);
+  });
+
+  it("druhá cizí zpráva harmonogram nezmění", async () => {
+    const seed = await seedSent();
+    inbox.messages = [message({ from: "kolega@jina-firma.test", references: seed.sentMessageId })];
+    await poll();
+    const first = await contactRow(seed.campaignId);
+
+    inbox.messages = [message({ from: "dalsi@uplne-jina.test", references: seed.sentMessageId })];
+    await poll();
+    const second = await contactRow(seed.campaignId);
+
+    expect(second.next_send_at?.getTime()).toBe(first.next_send_at?.getTime());
+    expect(second.next_send_at?.getTime()).toBe(seed.scheduled.getTime());
   });
 
   it("je vidět v Komunikaci → K vyřízení", async () => {
@@ -216,7 +259,8 @@ describe("pozastavená sekvence", () => {
     const pending = await queries.getPendingReview(todo[0].id);
     expect(pending?.from_email).toBe("kolega@jina-firma.test");
     expect(pending?.contact_email).toBe("ana@acme.test");
-    void seed;
+    // Obrazovka musí umět říct, kdy odejde další krok - protože odejde.
+    expect(pending?.next_send_at?.getTime()).toBe(seed.scheduled.getTime());
   });
 });
 
@@ -241,50 +285,43 @@ describe("rozhodnutí člověka", () => {
     const contact = await contactRow(seed.campaignId);
     expect(contact.status).toBe("replied");
     expect(contact.next_send_at).toBeNull();
-    expect(contact.paused_next_send_at).toBeNull();
     expect((await reviewRow()).needs_review).toBe(false);
   });
 
-  it("„nesouvisí“ vrátí PŮVODNÍ termín, ne „hned teď“", async () => {
+  it("po „relevantní“ už dispatcher nic nepošle", async () => {
     const { seed, review } = await pending();
+    await queries.resolveReview(review.reply_id, "relevant");
+    await drain(5);
+    expect(await sentCount(seed.campaignId)).toBe(1);
+  });
+
+  it("„nesouvisí“ harmonogram NEPŘEPÍŠE", async () => {
+    const { seed, review } = await pending();
+    const before = await contactRow(seed.campaignId);
     await queries.resolveReview(review.reply_id, "unrelated");
 
-    const contact = await contactRow(seed.campaignId);
-    expect(contact.status).not.toBe("replied");
-    expect(contact.next_send_at?.getTime()).toBe(seed.scheduled.getTime());
-    expect(contact.paused_next_send_at).toBeNull();
+    const after = await contactRow(seed.campaignId);
+    expect(after.status).toBe(before.status);
+    expect(after.next_send_at?.getTime()).toBe(before.next_send_at?.getTime());
+    expect(after.next_send_at?.getTime()).toBe(seed.scheduled.getTime());
     expect((await reviewRow()).needs_review).toBe(false);
   });
 
-  it("po „nesouvisí“ se neodešle nic nahromaděného naráz", async () => {
+  it("„nesouvisí“ po odeslaném follow-upu nic nevrací zpátky", async () => {
     const { seed, review } = await pending();
-    await queries.resolveReview(review.reply_id, "unrelated");
-
-    const { dispatchTick } = await import("@/lib/engine/dispatch");
-    for (let i = 0; i < 6; i++) {
-      await sql`update campaigns set next_slot_at = null`;
-      await dispatchTick();
-    }
-    // Termín je v budoucnu, takže pořád jen původní krok 1.
-    const [{ count }] = await sql<{ count: number }[]>`
-      select count(*)::int from email_sends where campaign_id = ${seed.campaignId}`;
-    expect(count).toBe(1);
-  });
-
-  it("po „nesouvisí“ sekvence v původním termínu normálně pokračuje", async () => {
-    const { seed, review } = await pending();
-    await queries.resolveReview(review.reply_id, "unrelated");
-
-    // Přeskočíme čas na původní termín.
+    // Krok odešel dřív, než to někdo stihl posoudit. To je očekávané.
     await sql`update campaign_contacts set next_send_at = now() - interval '1 minute'
                where campaign_id = ${seed.campaignId}`;
-    const { dispatchTick } = await import("@/lib/engine/dispatch");
-    await sql`update campaigns set next_slot_at = null`;
-    await dispatchTick();
+    await drain(1);
+    expect(await sentCount(seed.campaignId)).toBe(2);
+    const afterSend = await contactRow(seed.campaignId);
 
-    const [{ count }] = await sql<{ count: number }[]>`
-      select count(*)::int from email_sends where campaign_id = ${seed.campaignId}`;
-    expect(count).toBe(2);
+    await queries.resolveReview(review.reply_id, "unrelated");
+
+    const afterReview = await contactRow(seed.campaignId);
+    expect(afterReview.status).toBe(afterSend.status);
+    expect(afterReview.next_send_at?.getTime()).toBe(afterSend.next_send_at?.getTime());
+    expect(await sentCount(seed.campaignId)).toBe(2);
   });
 
   it("uzavřené posouzení už zmizí z K vyřízení i z odznaků", async () => {
@@ -311,7 +348,7 @@ describe("rozhodnutí člověka", () => {
 // ==================================================== idempotence
 
 describe("opakovaný příjem", () => {
-  it("stejná zpráva dvakrát nezaloží druhé posouzení ani nepřepíše termín", async () => {
+  it("stejná zpráva dvakrát nezaloží druhé posouzení ani nesáhne na termín", async () => {
     const seed = await seedSent();
     const msg = message({ from: "kolega@jina-firma.test", references: seed.sentMessageId });
     inbox.messages = [msg];
@@ -322,23 +359,73 @@ describe("opakovaný příjem", () => {
     await poll();
     const second = await contactRow(seed.campaignId);
 
-    expect(second.paused_next_send_at?.getTime()).toBe(first.paused_next_send_at?.getTime());
+    expect(second.next_send_at?.getTime()).toBe(first.next_send_at?.getTime());
     const [{ count }] = await sql<{ count: number }[]>`
       select count(*)::int from replies where needs_review`;
     expect(count).toBe(1);
   });
+});
 
-  it("druhá cizí zpráva nepřepíše uschovaný termín nulou", async () => {
+// ======================================= posouzení nepřetéká na ostatní
+
+describe("posouzení je vždycky jen o jednom kontaktu", () => {
+  /** Dvě firmy v jedné kampani; cizí zpráva dorazí jen na první z nich. */
+  async function twoContacts() {
     const seed = await seedSent();
+    const [second] = await sql<{ id: string }[]>`
+      insert into contacts (email, first_name, company)
+      values ('kolegyne@acme.test', 'Petra', 'Acme') returning id`;
+    const scheduled = new Date(Date.now() + 3 * 86_400_000);
+    await sql`
+      insert into campaign_contacts (campaign_id, contact_id, status, next_send_at, current_step)
+      values (${seed.campaignId}, ${second.id}, 'scheduled', ${scheduled}, 1)`;
+    return { seed, otherId: second.id, otherScheduled: scheduled };
+  }
+
+  it("cizí zpráva u jednoho kontaktu nesáhne na kolegu ve stejné kampani", async () => {
+    const { seed, otherId, otherScheduled } = await twoContacts();
     inbox.messages = [message({ from: "kolega@jina-firma.test", references: seed.sentMessageId })];
     await poll();
-    const after = await contactRow(seed.campaignId);
-    expect(after.paused_next_send_at?.getTime()).toBe(seed.scheduled.getTime());
 
-    inbox.messages = [message({ from: "dalsi@jina-firma.test", references: seed.sentMessageId })];
+    const [other] = await sql<{ status: string; next_send_at: Date | null }[]>`
+      select status, next_send_at from campaign_contacts where contact_id = ${otherId}`;
+    expect(other.status).toBe("scheduled");
+    expect(other.next_send_at?.getTime()).toBe(otherScheduled.getTime());
+  });
+
+  it("„relevantní“ u jednoho kontaktu neutne kolegu ve stejné firmě", async () => {
+    const { seed, otherId, otherScheduled } = await twoContacts();
+    inbox.messages = [message({ from: "ana@gmail.com", references: seed.sentMessageId })];
     await poll();
-    // next_send_at je teď null; coalesce nesmí uschovaný termín zahodit.
-    expect((await contactRow(seed.campaignId)).paused_next_send_at?.getTime())
-      .toBe(seed.scheduled.getTime());
+    const [conversation] = await queries.listConversations({ view: "todo" });
+    const review = await queries.getPendingReview(conversation.id);
+    await queries.resolveReview(review!.reply_id, "relevant");
+
+    const [other] = await sql<{ status: string; next_send_at: Date | null }[]>`
+      select status, next_send_at from campaign_contacts where contact_id = ${otherId}`;
+    expect(other.status).toBe("scheduled");
+    expect(other.next_send_at?.getTime()).toBe(otherScheduled.getTime());
+    void seed;
+  });
+
+  it("posouzení u jednoho klienta nesáhne na kampaň druhého klienta", async () => {
+    const first = await seedSent("ana@acme.test");
+    // Druhý klient oslovuje tutéž firmu vlastní kampaní.
+    const second = await seedSent("petr@acme.test");
+    const [vexy] = await sql<{ id: string }[]>`insert into clients (name) values ('VEXY') returning id`;
+    const [asn] = await sql<{ id: string }[]>`insert into clients (name) values ('ASN Plus') returning id`;
+    await sql`update campaigns set client_id = ${vexy.id} where id = ${first.campaignId}`;
+    await sql`update campaigns set client_id = ${asn.id} where id = ${second.campaignId}`;
+
+    inbox.messages = [message({ from: "kdosi@jina-firma.test", references: first.sentMessageId })];
+    await poll();
+    const [conversation] = await queries.listConversations({ view: "todo" });
+    const review = await queries.getPendingReview(conversation.id);
+    await queries.resolveReview(review!.reply_id, "relevant");
+
+    // Kampaň druhého klienta pokračuje beze změny.
+    const other = await contactRow(second.campaignId);
+    expect(other.status).not.toBe("replied");
+    expect(other.next_send_at?.getTime()).toBe(second.scheduled.getTime());
   });
 });

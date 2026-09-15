@@ -544,15 +544,15 @@ export interface PendingReview {
   received_at: Date;
   campaign_contact_id: string;
   contact_email: string;
-  /** Termín dalšího kroku, který čeká na rozhodnutí. Null = žádný nebyl. */
-  paused_next_send_at: Date | null;
+  /** Termín dalšího kroku. Sekvence běží dál, tohle je jen informace. */
+  next_send_at: Date | null;
 }
 
 export async function getPendingReview(conversationId: string): Promise<PendingReview | null> {
   const [row] = await sql<PendingReview[]>`
     select r.id as reply_id, r.from_email, r.subject, r.received_at,
            r.campaign_contact_id, c.email as contact_email,
-           cc.paused_next_send_at
+           cc.next_send_at
       from conversations cv
       join replies r on r.contact_id = cv.contact_id and r.mailbox_id = cv.mailbox_id
       join campaign_contacts cc on cc.id = r.campaign_contact_id
@@ -582,10 +582,11 @@ export type ReviewVerdict = "relevant" | "unrelated";
  * Uzavře posouzení odpovědi od jiné adresy.
  *
  *   relevant  → byl to prospekt z jiné adresy. Kontakt je "replied",
- *               sekvence končí, uschovaný termín se zahodí.
- *   unrelated → zpráva s prospektem nesouvisí. Sekvence se vrátí přesně
- *               na termín, který měla PŘED pozastavením - ne "hned teď",
- *               aby se po dlouhé pauze nevyrojilo všechno naráz.
+ *               sekvence končí.
+ *   unrelated → zpráva s prospektem nesouvisí. Zavře se jen příznak;
+ *               obchodní stav ani harmonogram se NEMĚNÍ, protože
+ *               sekvence po celou dobu normálně běžela. Když mezitím
+ *               odešel další naplánovaný krok, je to v pořádku.
  */
 export async function resolveReview(
   replyId: string,
@@ -601,10 +602,8 @@ export async function resolveReview(
   `;
   if (!reply || !reply.campaign_contact_id) return { ok: false };
 
-  const [contact] = await sql<
-    { email: string; campaign_id: string; paused_next_send_at: Date | null }[]
-  >`
-    select c.email, cc.campaign_id, cc.paused_next_send_at
+  const [contact] = await sql<{ email: string; campaign_id: string }[]>`
+    select c.email, cc.campaign_id
       from campaign_contacts cc
       join contacts c on c.id = cc.contact_id
      where cc.id = ${reply.campaign_contact_id}
@@ -614,26 +613,20 @@ export async function resolveReview(
     await tx`update replies set needs_review = false where id = ${replyId}`;
 
     if (verdict === "relevant") {
-      // Prospekt odpověděl, jen z jiné adresy. Stejný konec jako u běžné
-      // odpovědi: ven ze všech sekvencí, ne jen z téhle kampaně.
+      // Teprve TEĎHLE se sekvence zastavuje - ručním potvrzením člověka,
+      // ne příchodem nejisté zprávy. Stejný konec jako u běžné odpovědi:
+      // ven ze všech sekvencí, ne jen z téhle kampaně.
       await tx`
         update campaign_contacts
            set status = 'replied', replied_at = coalesce(replied_at, now()),
-               next_send_at = null, paused_next_send_at = null, updated_at = now()
+               next_send_at = null, updated_at = now()
          where contact_id = ${reply.contact_id}
            and status in ('pending', 'scheduled', 'sent', 'failed')
       `;
-    } else {
-      // Nesouvisí. Termín se vrátí takový, jaký byl - nic se nedohání.
-      await tx`
-        update campaign_contacts
-           set next_send_at = coalesce(paused_next_send_at, next_send_at),
-               paused_next_send_at = null,
-               updated_at = now()
-         where id = ${reply.campaign_contact_id}
-           and status in ('scheduled', 'sent')
-      `;
     }
+    // "unrelated" se schválně nedotkne campaign_contacts: sekvence nikdy
+    // nestála, takže není co obnovovat a přepočítávat by znamenalo měnit
+    // harmonogram kvůli cizí zprávě.
   });
 
   await logActivity({
@@ -642,7 +635,7 @@ export async function resolveReview(
     detail:
       verdict === "relevant"
         ? `${reply.from_email} je tentýž člověk jako ${contact?.email ?? "kontakt"} — sekvence ukončena.`
-        : `${reply.from_email} s ${contact?.email ?? "kontaktem"} nesouvisí — sekvence pokračuje podle původního harmonogramu.`,
+        : `${reply.from_email} s ${contact?.email ?? "kontaktem"} nesouvisí — posouzení uzavřeno, harmonogram beze změny.`,
     campaignId: contact?.campaign_id ?? null,
     contactId: reply.contact_id,
     campaignContactId: reply.campaign_contact_id,

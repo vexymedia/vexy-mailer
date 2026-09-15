@@ -19,20 +19,34 @@ export function configureTestEnv(): void {
   process.env.DATABASE_URL = TEST_DATABASE_URL;
   process.env.ENCRYPTION_KEY ??= randomBytes(32).toString("base64");
   process.env.SESSION_SECRET ??= "test-session-secret";
-  process.env.APP_PASSWORD ??= "test-password";
   process.env.CRON_SECRET ??= "test-cron-secret";
   process.env.APP_URL ??= "http://localhost:3000";
   configured = true;
 }
 
-/** Drops and recreates the public schema, then applies every migration. */
+/**
+ * Drops and recreates the public schema, then applies every migration.
+ *
+ * Zapisuje i do `schema_migrations`, přesně jako to dělá ostrý runner.
+ * Bez toho by testovací databáze vypadala jako čerstvě zmigrovaná, ale
+ * tvrdila by, že žádná migrace aplikovaná není - a kontrola schématu by
+ * se testovala proti stavu, který v provozu nikdy nenastane.
+ */
 export async function resetDatabase(): Promise<void> {
   configureTestEnv();
   const { sql } = await import("@/lib/db");
   await sql.unsafe("drop schema public cascade; create schema public;");
   const dir = join(process.cwd(), "supabase", "migrations");
-  for (const file of readdirSync(dir).filter((f) => f.endsWith(".sql")).sort()) {
+  const files = readdirSync(dir).filter((f) => f.endsWith(".sql")).sort();
+  for (const file of files) {
     await sql.unsafe(readFileSync(join(dir, file), "utf8"));
+  }
+  await sql`create table if not exists schema_migrations (
+    name text primary key,
+    applied_at timestamptz not null default now()
+  )`;
+  for (const file of files) {
+    await sql`insert into schema_migrations (name) values (${file}) on conflict do nothing`;
   }
 }
 

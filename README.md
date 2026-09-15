@@ -169,27 +169,74 @@ openssl rand -hex 32      # CRON_SECRET
 `DATABASE_URL` comes from Supabase — see
 [docs/SETUP_SUPABASE.md](docs/SETUP_SUPABASE.md).
 
-`APP_PASSWORD` is no longer used for anything: logging in goes against the
-`users` table. The variable can be deleted from the environment once the
-first admin exists.
-
 > Changing `ENCRYPTION_KEY` later makes every stored mailbox password
 > undecryptable and you will have to re-enter them. Keep a copy.
 
-### Deploy nespouští migrace
+## Production setup
 
-Vercel build migrace **nespouští**. Pořadí je vždy: nejdřív `npm run db:migrate`
-proti produkční databázi, teprve potom deploy.
+Čtyři odstavce, ne DevOps manuál. Cíl: po prvním nasazení nemuset lovit staré
+příkazy z chatu.
 
-Když se to obrátí, aplikace se tváří, že běží — rozbijí se jen stránky, které
-nové sloupce čtou. Po každém deployi (a při každé podezřelé chybě 500) proto:
+### 1. Co nastavíte jednou
 
-```bash
-DATABASE_URL="<produkční>" npm run db:check
+V **Vercel → Settings → Environment Variables** pro *Production*:
+`DATABASE_URL`, `ENCRYPTION_KEY`, `SESSION_SECRET`, `CRON_SECRET`, `APP_URL`.
+Co znamenají a jak je vygenerovat, je v [`.env.example`](.env.example).
+Volání přes Twilio a přepisy přes OpenAI jsou nepovinné — bez nich funguje
+zbytek aplikace dál.
+
+V **Vercel → Settings → Build & Development Settings** přepněte *Build Command*
+na:
+
+```
+npm run vercel-build
 ```
 
-Vypíše, které migrace a sloupce databázi chybí, nebo potvrdí, že odpovídá
-nasazené aplikaci.
+To je jediné nastavení navíc oproti výchozímu. Dělá `release` a pak `build`.
+
+### 2. Co se potom děje samo
+
+Každý produkční deploy nejdřív dorovná databázi a teprve pak sestaví aplikaci:
+
+- migrace se aplikují v pořadí, každá v transakci se svým zápisem do
+  `schema_migrations` — takže nikdy nevznikne napůl aplikované schéma,
+- při chybě se build zastaví a nasazení neproběhne,
+- **preview nasazení databázi nemigrují**, aby vám pull request nesáhl na
+  ostrá data,
+- po migraci se ještě ověří, že v databázi opravdu jsou sloupce, které
+  aplikace čte.
+
+Worker (`/api/cron/tick`) se spouští z `vercel.json` každou minutu. Když by
+databáze přesto byla pozadu, **worker nic neodešle a nevytočí** — vrátí 503
+s tím, co chybí. Obrazovky fungují dál, aby to bylo kde přečíst.
+
+### 3. Kde v UI ověříte stav
+
+**Nastavení → Stav systému.** Databáze, migrace, SMTP, IMAP, Twilio a veřejná
+adresa, každé zvlášť a s návodem, co doplnit. Rozlišuje *nakonfigurováno*
+(údaje existují) od *v pořádku* (opravdu se to povedlo ověřit) — že máte
+vyplněné Twilio ještě neznamená, že projde hovor.
+
+Pro monitoring je `GET /api/health` (žije proces) a `GET /api/health?ready=1`
+(je připravený obsloužit provoz; 503, když ne). Ani jedno nevrací nic tajného.
+
+### 4. Jak poznáte, že je hotovo
+
+Stav systému nahoře hlásí **Systém je připravený**, a `/api/health?ready=1`
+vrací 200. Odesílat se začne, jakmile je aspoň jedna schránka zapnutá a
+kampaň spuštěná.
+
+### Když se nasazuje odjinud než z Vercelu
+
+Jeden příkaz s produkční `DATABASE_URL` v prostředí:
+
+```bash
+npm run release
+```
+
+Aplikuje chybějící migrace a ověří schéma. `npm run release:check` udělá
+totéž, ale **nic nemění** — hodí se do CI nebo když chcete jen vědět, jak na
+tom produkce je.
 
 ## Setting it up
 
@@ -303,9 +350,16 @@ npm start           # run the production build
 npm run typecheck   # tsc --noEmit
 npm run lint        # eslint
 npm test            # vitest: unit + integration
-npm run check       # typecheck, lint, build and test in one go
-npm run db:migrate  # apply supabase/migrations
+npm run check         # typecheck, lint, build and test in one go
+
+npm run release       # migrace + ověření schématu (jeden krok nasazení)
+npm run release:check # totéž, ale nic nemění
+npm run db:migrate    # jen migrace
+npm run db:check      # jen kontrola schématu
 ```
+
+`release` je to, co se pouští při nasazení; `db:migrate` a `db:check` jsou
+jeho dvě půlky pro případ, že potřebujete jen jednu.
 
 ### Tests
 
