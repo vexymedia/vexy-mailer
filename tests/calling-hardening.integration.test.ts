@@ -430,7 +430,39 @@ describe("data integrity the application cannot break", () => {
 });
 
 describe("hardening leaves the e-mail engine alone", () => {
-  it("still sends the sequence to a prospect who is on the do-not-call list", async () => {
+  it("běžný výsledek hovoru se e-mailové sekvence nedotkne", async () => {
+    // Tohle je původní záměr a platí dál: telefonní půlka nesmí sama od
+    // sebe hýbat odesíláním. Výjimkou je jen „nevolat“ - viz níž.
+    const seed = await seedCalling({ contacts: 1 });
+    const { startCampaign } = await import("@/lib/queries/campaigns");
+    const { dispatchTick } = await import("@/lib/engine/dispatch");
+    const { clearPacing } = await import("./helpers/fixtures");
+
+    await startCampaign(seed.campaignId);
+    await calling.logCall({
+      campaignContactId: seed.campaignContactIds[0],
+      outcome: "no_answer",
+      callerId: seed.callerId,
+    });
+
+    await clearPacing(seed.campaignId);
+    await dispatchTick();
+
+    const [row] = await sql<{ status: string; next_send_at: Date | null }[]>`
+      select status, next_send_at from campaign_contacts
+       where id = ${seed.campaignContactIds[0]}`;
+    expect(row.status).not.toBe("unsubscribed");
+    const [{ count }] = await sql<{ count: number }[]>`
+      select count(*)::int from email_sends where campaign_contact_id = ${seed.campaignContactIds[0]}
+    `;
+    expect(count).toBe(1);
+  });
+
+  it("„nevolat“ naopak e-mailovou sekvenci ukončí", async () => {
+    // ZMĚNA CHOVÁNÍ. Dřív se rušilo jen volání s odůvodněním, že telefon
+    // a e-mail jsou oddělené souhlasy. V praxi ale „nevolat“ neznamená
+    // „pište mi dál“: prospektovi pak přišel další automatický cold
+    // e-mail přesně poté, co řekl, že nechce být kontaktován.
     const seed = await seedCalling({ contacts: 1 });
     const { startCampaign } = await import("@/lib/queries/campaigns");
     const { dispatchTick } = await import("@/lib/engine/dispatch");
@@ -443,13 +475,23 @@ describe("hardening leaves the e-mail engine alone", () => {
       callerId: seed.callerId,
     });
 
+    const [row] = await sql<{ status: string; next_send_at: Date | null }[]>`
+      select status, next_send_at from campaign_contacts
+       where id = ${seed.campaignContactIds[0]}`;
+    expect(row.status).toBe("unsubscribed");
+    expect(row.next_send_at).toBeNull();
+
+    // A nerozjede se to ani po dozrání času.
+    await sql`update campaign_contacts set next_send_at = now() - interval '1 minute'
+               where id = ${seed.campaignContactIds[0]}`;
     await clearPacing(seed.campaignId);
     await dispatchTick();
 
     const [{ count }] = await sql<{ count: number }[]>`
       select count(*)::int from email_sends where campaign_contact_id = ${seed.campaignContactIds[0]}
     `;
-    // Phone consent and e-mail consent are different things.
-    expect(count).toBe(1);
+    // Nic. Kampaň je spuštěná a termín splatný, a přesto se neodeslalo
+    // nic - protože kontakt je po „nevolat“ v terminálním stavu.
+    expect(count).toBe(0);
   });
 });

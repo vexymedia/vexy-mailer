@@ -614,14 +614,22 @@ export async function resolveReview(
 
     if (verdict === "relevant") {
       // Teprve TEĎHLE se sekvence zastavuje - ručním potvrzením člověka,
-      // ne příchodem nejisté zprávy. Stejný konec jako u běžné odpovědi:
-      // ven ze všech sekvencí, ne jen z téhle kampaně.
+      // ne příchodem nejisté zprávy. Dosah je stejný jako u automaticky
+      // rozpoznané odpovědi: všechny kampaně TOHOTO klienta, žádná cizí.
+      // Viz engine/replies.ts, kde je to vysvětlené celé.
       await tx`
-        update campaign_contacts
-           set status = 'replied', replied_at = coalesce(replied_at, now()),
+        update campaign_contacts cc
+           set status = 'replied', replied_at = coalesce(cc.replied_at, now()),
                next_send_at = null, updated_at = now()
-         where contact_id = ${reply.contact_id}
-           and status in ('pending', 'scheduled', 'sent', 'failed')
+          from campaigns cp
+         where cc.campaign_id = cp.id
+           and cc.contact_id = ${reply.contact_id}
+           and cc.status in ('pending', 'scheduled', 'sent', 'failed')
+           and cp.client_id is not distinct from (
+                 select owner.client_id
+                   from campaign_contacts matched
+                   join campaigns owner on owner.id = matched.campaign_id
+                  where matched.id = ${reply.campaign_contact_id})
       `;
     }
     // "unrelated" se schválně nedotkne campaign_contacts: sekvence nikdy

@@ -1,3 +1,4 @@
+import { requireUuid } from "@/lib/route-params";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getConversation, getPendingReview, listMessages, markConversationRead } from "@/lib/queries/inbox";
@@ -29,6 +30,8 @@ export const dynamic = "force-dynamic";
  */
 export default async function ConversationPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
+  // Nesmyslné id z adresy je 404, ne pád na chybě typu v Postgresu.
+  requireUuid(id);
   const user = await requireUser();
   const canManage = user.role === "admin";
   // Jestli jde volat z prohlížeče, ví server. Klient si to nevymýšlí.

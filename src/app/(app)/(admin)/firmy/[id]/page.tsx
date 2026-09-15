@@ -1,3 +1,4 @@
+import { requireUuid } from "@/lib/route-params";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getCompany, getCompanyTimeline, listCompanyContacts } from "@/lib/queries/companies";
@@ -35,6 +36,8 @@ export const dynamic = "force-dynamic";
  */
 export default async function CompanyDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
+  // Nesmyslné id z adresy je 404, ne pád na chybě typu v Postgresu.
+  requireUuid(id);
   const company = await getCompany(id);
   if (!company) notFound();
 

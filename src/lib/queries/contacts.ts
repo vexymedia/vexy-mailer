@@ -5,10 +5,24 @@ import { isValidEmail, normaliseEmail, type ParsedContactRow } from "../csv";
 import { schedulePendingContacts } from "./campaigns";
 
 export interface ImportResult {
+  /** Kontakt v databázi ještě nebyl. */
   created: number;
+  /** Kontakt už známe; doplnily se jen chybějící údaje. */
   existing: number;
+  /** Adresy na globálním seznamu „nekontaktovat". */
   suppressed: string[];
+  /** Firma je pro klienta téhle kampaně vyloučená. */
+  excluded: number;
+  /** Do kampaně už patřil. Opakovaný import tedy nic nepřidal. */
+  alreadyInCampaign: number;
+  /** Skutečně zapsaní do kampaně - tohle je to, co se počítá do kvóty. */
   addedToCampaign: number;
+  /**
+   * Součet všech důvodů, proč se řádek do kampaně nedostal.
+   *
+   * Drží se kvůli zpětné kompatibilitě volajících; podrobnosti jsou
+   * v polích výš, aby se nedalo splést „už tam byl" s „nesmí tam".
+   */
   skippedFromCampaign: number;
 }
 
@@ -27,6 +41,8 @@ export async function importContacts(
     created: 0,
     existing: 0,
     suppressed: [],
+    excluded: 0,
+    alreadyInCampaign: 0,
     addedToCampaign: 0,
     skippedFromCampaign: 0,
   };
@@ -37,6 +53,28 @@ export async function importContacts(
   `;
   const suppressed = new Set(suppressedRows.map((r) => r.email));
   result.suppressed = [...suppressed];
+
+  // Firmy, které si klient téhle kampaně vyloučil.
+  //
+  // Guard před odesláním i před voláním existuje, takže takovému člověku
+  // nic neodejde. Zapsat ho do kampaně by přesto škodilo: VEXY prodává
+  // „až 300 relevantních lidí" a klientovi by z kvóty ubyl někdo, koho
+  // stejně nikdy nedostane. Čísla v kampani by pak neodpovídala práci,
+  // která se opravdu udělá.
+  //
+  // Vyhodnocuje se podle klienta TÉTO kampaně; u jiného klienta může být
+  // táž firma normálně k oslovení.
+  const excludedCompanies = campaignId
+    ? new Set(
+        (
+          await sql<{ company_id: string }[]>`
+            select x.company_id
+              from client_company_exclusions x
+              join campaigns cp on cp.client_id = x.client_id
+             where cp.id = ${campaignId}`
+        ).map((r) => r.company_id),
+      )
+    : new Set<string>();
 
   for (const row of rows) {
     // `xmax = 0` distinguishes a fresh INSERT from an ON CONFLICT UPDATE.
@@ -64,14 +102,27 @@ export async function importContacts(
         result.skippedFromCampaign++;
         continue;
       }
+      // Firma kontaktu se čte z databáze, ne z importovaného řádku:
+      // párování na firmu proběhlo výš a CSV o něm nic neví.
+      const [linked] = await sql<{ company_id: string | null }[]>`
+        select company_id from contacts where id = ${contact.id}`;
+      if (linked?.company_id && excludedCompanies.has(linked.company_id)) {
+        result.excluded++;
+        result.skippedFromCampaign++;
+        continue;
+      }
       const added = await sql<{ id: string }[]>`
         insert into campaign_contacts (campaign_id, contact_id)
         values (${campaignId}, ${contact.id})
         on conflict (campaign_id, contact_id) do nothing
         returning id
       `;
-      if (added.length > 0) result.addedToCampaign++;
-      else result.skippedFromCampaign++;
+      if (added.length > 0) {
+        result.addedToCampaign++;
+      } else {
+        result.alreadyInCampaign++;
+        result.skippedFromCampaign++;
+      }
     }
   }
 
@@ -84,6 +135,8 @@ export async function importContacts(
     detail:
       `${result.created} new, ${result.existing} already known` +
       (campaignId ? `, ${result.addedToCampaign} added to the campaign` : "") +
+      (result.alreadyInCampaign ? `, ${result.alreadyInCampaign} already in it` : "") +
+      (result.excluded ? `, ${result.excluded} excluded for this client` : "") +
       (result.suppressed.length ? `, ${result.suppressed.length} on the suppression list` : ""),
     campaignId: campaignId ?? null,
   });

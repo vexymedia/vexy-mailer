@@ -715,14 +715,51 @@ export async function logCall(input: LogCallInput): Promise<LogCallResult> {
     }
 
     // "Nevolat" is a decision about the person, not about this campaign, so it
-    // goes on the global list the queue checks. Deliberately not the e-mail
-    // suppression list: phone and e-mail are separate consents.
+    // goes on the global list the queue checks.
     if (applied.status === "do_not_call") {
       await tx`
         insert into call_suppression (contact_id, reason)
         values (${row.contact_id}, 'do_not_call')
         on conflict (contact_id) do nothing
       `;
+
+      // A zastaví to i e-maily.
+      //
+      // Dřív tu stálo, že telefon a e-mail jsou oddělené souhlasy, a tak
+      // se rušilo jen volání. Jenže „nevolat" v praxi neznamená „pište mi
+      // dál" - znamená to, že s tímhle člověkem končíme. Bez tohohle mu
+      // za dva dny přišel další automatický cold e-mail, což je přesně to,
+      // co si nepřál, a ještě to vypadalo, že ho neposloucháme.
+      //
+      // Stav `unsubscribed` je terminální a dispatcher bere jen
+      // 'scheduled' a 'sent', takže se sekvence nerozjede ani kdyby
+      // někdo termín znovu naplánoval. Samotné vynulování next_send_at
+      // by na to nestačilo.
+      //
+      // Dosah je KLIENT, stejně jako u odpovědi: jiný klient oslovuje
+      // s jinou nabídkou a jeho kampaň není naše, abychom ji rušili.
+      // U ad-hoc hovoru bez kampaně klienta neznáme - tam se zastaví
+      // všechno, protože přeslechnout „nekontaktujte mě" je horší chyba
+      // než zastavit o kampaň víc.
+      if (row.campaign_id) {
+        await tx`
+          update campaign_contacts cc
+             set status = 'unsubscribed', next_send_at = null, updated_at = now()
+            from campaigns cp
+           where cc.campaign_id = cp.id
+             and cc.contact_id = ${row.contact_id}
+             and cc.status in ('pending', 'scheduled', 'sent', 'failed')
+             and cp.client_id is not distinct from (
+                   select client_id from campaigns where id = ${row.campaign_id})
+        `;
+      } else {
+        await tx`
+          update campaign_contacts
+             set status = 'unsubscribed', next_send_at = null, updated_at = now()
+           where contact_id = ${row.contact_id}
+             and status in ('pending', 'scheduled', 'sent', 'failed')
+        `;
+      }
     }
 
     // The call is over, so the prospect is no longer held for this caller.

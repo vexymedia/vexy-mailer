@@ -1,3 +1,4 @@
+import { requireUuid } from "@/lib/route-params";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { sql } from "@/lib/db";
@@ -54,6 +55,8 @@ export default async function CampaignDetailPage({
   searchParams: Promise<{ tab?: string; filter?: string }>;
 }) {
   const { id } = await params;
+  // Nesmyslné id z adresy je 404, ne pád na chybě typu v Postgresu.
+  requireUuid(id);
   const { tab: rawTab, filter: rawFilter } = await searchParams;
   const tab: Tab = TABS.some((t) => t.key === rawTab) ? (rawTab as Tab) : "prehled";
 

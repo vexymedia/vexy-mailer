@@ -1,3 +1,4 @@
+import { requireUuid } from "@/lib/route-params";
 import { notFound } from "next/navigation";
 import { getMailbox } from "@/lib/queries/mailboxes";
 import { PageHeader } from "@/components/ui";
@@ -7,6 +8,8 @@ export const dynamic = "force-dynamic";
 
 export default async function MailboxPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
+  // Nesmyslné id z adresy je 404, ne pád na chybě typu v Postgresu.
+  requireUuid(id);
   const mailbox = await getMailbox(id);
   if (!mailbox) notFound();
 
