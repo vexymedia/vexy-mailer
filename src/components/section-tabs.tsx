@@ -24,7 +24,8 @@ export function NastaveniTabs({ active }: { active: string }) {
         { href: "/klienti", label: "Klienti" },
         { href: "/uzivatele", label: "Uživatelé" },
         { href: "/mailboxes", label: "Schránky" },
-        { href: "/suppression", label: "Vyloučené firmy" },
+        { href: "/suppression", label: "Nekontaktovat" },
+        { href: "/stav", label: "Stav systému" },
       ]}
     />
   );

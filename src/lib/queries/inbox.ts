@@ -105,6 +105,8 @@ export interface InboundMessageInput {
   references?: string | null;
   replyId?: string | null;
   receivedAt: Date;
+  /** Druh zprávy podle `src/lib/inbound.ts`. Řídí, co se objeví v inboxu. */
+  messageClass?: import("../inbound").MessageClass;
 }
 
 /** Stores an incoming reply and marks the conversation unread. */
@@ -119,28 +121,55 @@ export async function recordInboundMessage(input: InboundMessageInput): Promise<
   const inserted = await sql<{ id: string }[]>`
     insert into messages (conversation_id, direction, kind, from_email, to_email, subject,
                           body_text, body_html, message_id, in_reply_to, message_references,
-                          reply_id, occurred_at, is_read)
+                          reply_id, occurred_at, is_read, message_class)
     values (${conversationId}, 'inbound', 'incoming', ${input.fromEmail}, ${input.toEmail},
             ${input.subject}, ${input.bodyText}, ${input.bodyHtml}, ${input.messageId},
             ${input.inReplyTo ?? null}, ${input.references ?? null}, ${input.replyId ?? null},
-            ${input.receivedAt}, false)
+            ${input.receivedAt}, false, ${input.messageClass ?? "human"})
     on conflict (conversation_id, message_id) where message_id is not null do nothing
     returning id
   `;
   if (inserted.length === 0) return; // already stored
 
+  // Nepřečtené se počítá jen u toho, co má člověk skutečně číst.
+  // Automatická odpověď nemá rozsvítit "1 nepřečtená" v sales inboxu.
+  const countsAsUnread = (input.messageClass ?? "human") === "human" ||
+    input.messageClass === "unsubscribe";
   await sql`
     update conversations
        set last_message_at = greatest(last_message_at, ${input.receivedAt}),
            last_inbound_at = greatest(coalesce(last_inbound_at, ${input.receivedAt}), ${input.receivedAt}),
-           unread_count = unread_count + 1,
+           unread_count = unread_count + ${countsAsUnread ? 1 : 0},
+           classification = case
+             when ${input.messageClass ?? "human"} = 'ooo' and classification = 'unclassified'
+               then 'ooo'
+             else classification
+           end,
            updated_at = now()
      where id = ${conversationId}
   `;
 }
 
+/**
+ * Pohledy na Komunikaci.
+ *
+ * Výchozí je "todo" - K vYŘÍZENÍ. Sto padesát vláken, kde jsme jen něco
+ * poslali a nikdo neodpověděl, není pracovní inbox; je to seznam, který
+ * nikdo neprojde. Co vyžaduje člověka, je úzká množina: skutečné lidské
+ * odpovědi, které ještě nikdo nezařadil.
+ */
+export type InboxView = "todo" | "positive" | "later" | "resolved" | "all" | "unread";
+
+export const INBOX_VIEWS: { key: InboxView; label: string }[] = [
+  { key: "todo", label: "K vyřízení" },
+  { key: "positive", label: "Pozitivní" },
+  { key: "later", label: "Později / mimo kancelář" },
+  { key: "resolved", label: "Vyřešené" },
+  { key: "all", label: "Vše" },
+];
+
 export interface InboxFilters {
-  filter?: "all" | "unread" | "positive" | "needs_action";
+  view?: InboxView;
   campaignId?: string | null;
   mailboxId?: string | null;
   search?: string | null;
@@ -157,11 +186,47 @@ export interface InboxFilters {
   contactId?: string | null;
 }
 
+/**
+ * Podmínka pohledu. Jeden fragment, který se používá i pro počty, aby se
+ * číslo na záložce nemohlo rozejít s tím, co je pod ní.
+ *
+ * "K vyřízení" stojí na DVOU věcech současně: přišla lidská zpráva
+ * (`message_class = 'human'`), a nikdo ji ještě nezařadil. Bounce, OOO
+ * ani automatické potvrzení tuhle podmínku nesplní, takže se do sales
+ * inboxu nedostanou vůbec - a odeslaná pošta bez odpovědi taky ne.
+ */
+function viewCondition(db: Db, view: InboxView) {
+  const humanInbound = db`exists (
+    select 1 from messages m
+     where m.conversation_id = cv.id
+       and m.direction = 'inbound'
+       and m.message_class in ('human', 'unsubscribe')
+  )`;
+  switch (view) {
+    case "todo":
+      return db`${humanInbound} and cv.classification = 'unclassified'`;
+    case "positive":
+      return db`cv.classification = 'positive'`;
+    case "later":
+      return db`cv.classification in ('later', 'ooo')`;
+    case "resolved":
+      return db`cv.classification in ('not_interested', 'wrong_person', 'unsubscribe', 'other')`;
+    case "unread":
+      return db`cv.unread_count > 0`;
+    case "all":
+    default:
+      return db`true`;
+  }
+}
+
 /** The inbox list. One row per conversation, newest activity first. */
 export async function listConversations(filters: InboxFilters = {}): Promise<ConversationRow[]> {
   const search = filters.search?.trim() ? `%${filters.search.trim().toLowerCase()}%` : null;
-  const filter = filters.filter ?? "all";
   const scope = filters.scope ?? "replies";
+  // Výchozí pohled závisí na rozsahu. Schránka (`scope: "all"`) ukazuje
+  // i vlákna, kde jsme jen odeslali - tam "K vyřízení" nedává smysl,
+  // protože ta podmínka vyžaduje lidskou zprávu.
+  const view = filters.view ?? (scope === "all" ? "all" : "todo");
   return sql<ConversationRow[]>`
     select cv.id, cv.unread_count, cv.classification, cv.last_message_at, cv.last_inbound_at,
            cv.subject,
@@ -193,10 +258,7 @@ export async function listConversations(filters: InboxFilters = {}): Promise<Con
            ))
        and (${filters.contactId ?? null}::uuid is null
             or cv.contact_id = ${filters.contactId ?? null}::uuid)
-       and (${filter} <> 'unread' or cv.unread_count > 0)
-       and (${filter} <> 'positive' or cv.classification = 'positive')
-       and (${filter} <> 'needs_action'
-            or cv.classification in ('unclassified', 'positive', 'later'))
+       and (${viewCondition(sql, view)})
        and (${filters.campaignId ?? null}::uuid is null or cv.campaign_id = ${filters.campaignId ?? null}::uuid)
        and (${filters.mailboxId ?? null}::uuid is null or cv.mailbox_id = ${filters.mailboxId ?? null}::uuid)
        and (${search}::text is null
@@ -215,14 +277,28 @@ export async function getConversation(id: string): Promise<ConversationDetail | 
            cv.campaign_contact_id, cv.contact_id, cv.mailbox_id,
            c.email as contact_email,
            trim(coalesce(c.first_name, '') || ' ' || coalesce(c.last_name, '')) as contact_name,
-           c.company, c.company_id, c.website,
+           c.company, c.company_id, c.website, c.phone,
+           cc.call_status,
+           cc.next_call_at,
            cp.name as campaign_name,
            mb.from_email as mailbox_email, mb.from_name as mailbox_from_name, mb.enabled as mailbox_enabled,
-           cc.status as contact_status
+           cc.status as contact_status,
+           -- Vyloučení je vlastnost dvojice klient+firma, takže ho určuje
+           -- kampaň tohoto vlákna, ne kontakt sám. Stejné pravidlo jako
+           -- na detailu firmy; server ho vyhodnocuje znovu při startCall.
+           (cl.id is not null and exists (
+              select 1 from client_company_exclusions x
+               where x.company_id = c.company_id and x.client_id = cl.id
+            )) as client_excluded,
+           case when cl.id is not null and exists (
+              select 1 from client_company_exclusions x
+               where x.company_id = c.company_id and x.client_id = cl.id
+            ) then cl.name end as excluded_for_client
       from conversations cv
       join contacts c on c.id = cv.contact_id
       join mailboxes mb on mb.id = cv.mailbox_id
       left join campaigns cp on cp.id = cv.campaign_id
+      left join clients cl on cl.id = cp.client_id
       left join campaign_contacts cc on cc.id = cv.campaign_contact_id
      where cv.id = ${id}
   `;
@@ -327,19 +403,20 @@ export async function buildReplyHeaders(conversationId: string): Promise<ThreadH
   };
 }
 
-export interface InboxCounts {
-  all: number;
-  unread: number;
-  positive: number;
-  needs_action: number;
-}
+export type InboxCounts = Record<InboxView, number>;
 
+/**
+ * Počty na záložkách. Počítají se stejnými podmínkami jako samotné
+ * výpisy - jinak by záložka slibovala tři položky a otevřela jednu.
+ */
 export async function getInboxCounts(): Promise<InboxCounts> {
   const [row] = await sql<InboxCounts[]>`
-    select count(*)::int as all,
-           count(*) filter (where unread_count > 0)::int as unread,
-           count(*) filter (where classification = 'positive')::int as positive,
-           count(*) filter (where classification in ('unclassified','positive','later'))::int as needs_action
+    select count(*) filter (where ${viewCondition(sql, "todo")})::int as todo,
+           count(*) filter (where ${viewCondition(sql, "positive")})::int as positive,
+           count(*) filter (where ${viewCondition(sql, "later")})::int as later,
+           count(*) filter (where ${viewCondition(sql, "resolved")})::int as resolved,
+           count(*) filter (where ${viewCondition(sql, "unread")})::int as unread,
+           count(*)::int as all
       from conversations cv
      where exists (
              select 1 from messages m
@@ -448,4 +525,121 @@ export async function sendManualReply(
   });
 
   return { ok: true };
+}
+
+// ------------------------------------------- odpověď od jiné adresy
+
+/**
+ * Nevyřízená odpověď, která do vlákna patří podle hlaviček, ale nepřišla
+ * od prospekta.
+ *
+ * Vzniká přeposláním nebo odpovědí z Gmailu či jiné firemní domény.
+ * Dokud ji někdo neposoudí, stojí sekvence kontaktu - proto to musí být
+ * v konverzaci vidět a proto k tomu patří rozhodnutí, ne jen štítek.
+ */
+export interface PendingReview {
+  reply_id: string;
+  from_email: string;
+  subject: string | null;
+  received_at: Date;
+  campaign_contact_id: string;
+  contact_email: string;
+  /** Termín dalšího kroku. Sekvence běží dál, tohle je jen informace. */
+  next_send_at: Date | null;
+}
+
+export async function getPendingReview(conversationId: string): Promise<PendingReview | null> {
+  const [row] = await sql<PendingReview[]>`
+    select r.id as reply_id, r.from_email, r.subject, r.received_at,
+           r.campaign_contact_id, c.email as contact_email,
+           cc.next_send_at
+      from conversations cv
+      join replies r on r.contact_id = cv.contact_id and r.mailbox_id = cv.mailbox_id
+      join campaign_contacts cc on cc.id = r.campaign_contact_id
+      join contacts c on c.id = cc.contact_id
+     where cv.id = ${conversationId}
+       and r.needs_review
+     order by r.received_at desc
+     limit 1
+  `;
+  return row ?? null;
+}
+
+/** Konverzace, které čekají na posouzení. Kvůli odznaku ve výpisu. */
+export async function listConversationsNeedingReview(): Promise<Set<string>> {
+  const rows = await sql<{ id: string }[]>`
+    select distinct cv.id
+      from conversations cv
+      join replies r on r.contact_id = cv.contact_id and r.mailbox_id = cv.mailbox_id
+     where r.needs_review
+  `;
+  return new Set(rows.map((r) => r.id));
+}
+
+export type ReviewVerdict = "relevant" | "unrelated";
+
+/**
+ * Uzavře posouzení odpovědi od jiné adresy.
+ *
+ *   relevant  → byl to prospekt z jiné adresy. Kontakt je "replied",
+ *               sekvence končí.
+ *   unrelated → zpráva s prospektem nesouvisí. Zavře se jen příznak;
+ *               obchodní stav ani harmonogram se NEMĚNÍ, protože
+ *               sekvence po celou dobu normálně běžela. Když mezitím
+ *               odešel další naplánovaný krok, je to v pořádku.
+ */
+export async function resolveReview(
+  replyId: string,
+  verdict: ReviewVerdict,
+): Promise<{ ok: boolean; contactEmail?: string }> {
+  const { logActivity } = await import("../activity");
+
+  const [reply] = await sql<
+    { campaign_contact_id: string | null; from_email: string; contact_id: string | null }[]
+  >`
+    select campaign_contact_id, from_email, contact_id from replies
+     where id = ${replyId} and needs_review
+  `;
+  if (!reply || !reply.campaign_contact_id) return { ok: false };
+
+  const [contact] = await sql<{ email: string; campaign_id: string }[]>`
+    select c.email, cc.campaign_id
+      from campaign_contacts cc
+      join contacts c on c.id = cc.contact_id
+     where cc.id = ${reply.campaign_contact_id}
+  `;
+
+  await sql.begin(async (tx) => {
+    await tx`update replies set needs_review = false where id = ${replyId}`;
+
+    if (verdict === "relevant") {
+      // Teprve TEĎHLE se sekvence zastavuje - ručním potvrzením člověka,
+      // ne příchodem nejisté zprávy. Stejný konec jako u běžné odpovědi:
+      // ven ze všech sekvencí, ne jen z téhle kampaně.
+      await tx`
+        update campaign_contacts
+           set status = 'replied', replied_at = coalesce(replied_at, now()),
+               next_send_at = null, updated_at = now()
+         where contact_id = ${reply.contact_id}
+           and status in ('pending', 'scheduled', 'sent', 'failed')
+      `;
+    }
+    // "unrelated" se schválně nedotkne campaign_contacts: sekvence nikdy
+    // nestála, takže není co obnovovat a přepočítávat by znamenalo měnit
+    // harmonogram kvůli cizí zprávě.
+  });
+
+  await logActivity({
+    level: "info",
+    action: verdict === "relevant" ? "Odpověď potvrzena jako relevantní" : "Zpráva vyhodnocena jako nesouvisející",
+    detail:
+      verdict === "relevant"
+        ? `${reply.from_email} je tentýž člověk jako ${contact?.email ?? "kontakt"} — sekvence ukončena.`
+        : `${reply.from_email} s ${contact?.email ?? "kontaktem"} nesouvisí — posouzení uzavřeno, harmonogram beze změny.`,
+    campaignId: contact?.campaign_id ?? null,
+    contactId: reply.contact_id,
+    campaignContactId: reply.campaign_contact_id,
+  });
+
+  return { ok: true, contactEmail: contact?.email };
 }

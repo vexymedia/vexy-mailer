@@ -396,7 +396,35 @@ describe("calling never moves an e-mail", () => {
     expect((await row(ids[0])).status).not.toBe("unsubscribed");
   });
 
-  it("still sends the e-mail sequence to a prospect who was called", async () => {
+  it("still sends the e-mail sequence to a prospect who was merely called", async () => {
+    const { campaignId, ids, callerId } = await seedCalling({ contacts: 1 });
+    const { startCampaign } = await import("@/lib/queries/campaigns");
+    const { dispatchTick } = await import("@/lib/engine/dispatch");
+    const { clearPacing } = await import("./helpers/fixtures");
+
+    await startCampaign(campaignId);
+    // Nezastižen je průběžný stav, ne výsledek nabídky. Sekvence běží dál.
+    await calling.logCall({ campaignContactId: ids[0], outcome: "no_answer", callerId });
+
+    await clearPacing(campaignId);
+    await dispatchTick();
+
+    const [{ count }] = await sql<{ count: number }[]>`
+      select count(*)::int from email_sends where campaign_contact_id = ${ids[0]}
+    `;
+    expect(count).toBe(1);
+  });
+
+  /**
+   * ZMĚNA OPROTI PŮVODNÍMU CHOVÁNÍ.
+   *
+   * Dřív běžela e-mailová sekvence dál i poté, co prospekt do telefonu
+   * řekl, že nemá zájem. Rozlišuje se teď kanál od nabídky: "nevolejte
+   * mi" je preference kanálu a e-maily nezastaví (viz test o do-not-call
+   * níž), ale "nemám zájem" a "domluvená schůzka" jsou výsledky NABÍDKY
+   * a další cold e-mail po nich nedává smysl.
+   */
+  it("outcome o nabídce zastaví i e-mailovou sekvenci", async () => {
     const { campaignId, ids, callerId } = await seedCalling({ contacts: 1 });
     const { startCampaign } = await import("@/lib/queries/campaigns");
     const { dispatchTick } = await import("@/lib/engine/dispatch");
@@ -411,6 +439,6 @@ describe("calling never moves an e-mail", () => {
     const [{ count }] = await sql<{ count: number }[]>`
       select count(*)::int from email_sends where campaign_contact_id = ${ids[0]}
     `;
-    expect(count).toBe(1);
+    expect(count).toBe(0);
   });
 });

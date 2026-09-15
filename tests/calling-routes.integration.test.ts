@@ -139,6 +139,41 @@ describe("token endpoint", () => {
     const body = (await response.json()) as { configured: boolean; missing: string[] };
     expect(body.configured).toBe(false);
     expect(body.missing).toContain("TWILIO_API_KEY_SECRET");
+    // Jméno proměnné ano, hodnota nikdy. Jinak by stačilo otevřít
+    // devtools, kliknout na Zavolat a přečíst si klíč k účtu.
+    expect(JSON.stringify(body)).not.toContain(TWILIO_ENV.TWILIO_AUTH_TOKEN);
+  });
+
+  it("do prohlížeče nepustí žádné tajemství, jen krátkodobý token", async () => {
+    const { GET } = await import("@/app/api/calling/token/route");
+    const response = await GET();
+    const raw = await response.text();
+
+    // Auth Token je heslo k celému účtu, tajemství API klíče podepisuje
+    // tokeny. Ani jedno nemá v odpovědi co dělat - token se podepisuje
+    // jimi, ale neobsahuje je.
+    for (const secret of [TWILIO_ENV.TWILIO_AUTH_TOKEN, TWILIO_ENV.TWILIO_API_KEY_SECRET]) {
+      expect(raw).not.toContain(secret);
+    }
+
+    const { token } = JSON.parse(raw) as { token: string };
+    const [, payload] = token.split(".");
+    const claims = JSON.parse(Buffer.from(payload, "base64url").toString()) as {
+      exp: number;
+      iat: number;
+      grants: { voice?: { incoming?: { allow?: boolean } } };
+    };
+    // Krátkodobý: nejvýš hodina, ne token na věčné časy.
+    expect(claims.exp - claims.iat).toBeLessThanOrEqual(3600);
+    // A jen na odchozí hovory.
+    expect(claims.grants.voice?.incoming?.allow ?? false).toBe(false);
+  });
+
+  it("žádné Twilio tajemství neuniklo do NEXT_PUBLIC_ proměnných", () => {
+    const leaked = Object.keys(process.env).filter(
+      (name) => name.startsWith("NEXT_PUBLIC_") && /TWILIO/i.test(name),
+    );
+    expect(leaked).toEqual([]);
   });
 });
 
@@ -211,6 +246,36 @@ describe("zahájení hovoru", () => {
 
     const [row] = await sql<{ count: number }[]>`select count(*)::int as count from calls`;
     expect(row.count).toBe(0);
+  });
+
+  it("hovor z detailu firmy se uloží ke správnému kontaktu a callerovi", async () => {
+    await seed();
+    const calling = await import("@/lib/queries/calling");
+    selectedCaller = await calling.createCaller({ name: "Jan", email: null, phone: null });
+
+    // Detail firmy volá na contactId - firma nemusí být v žádné kampani.
+    const [contact] = await sql<{ id: string; company_id: string }[]>`
+      select id, company_id from contacts where email = 'sef@acme.test'
+    `;
+
+    const { POST } = await import("@/app/api/calling/calls/route");
+    const response = await POST(
+      new NextRequest(`${BASE}/api/calling/calls`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ contactId: contact.id }),
+      }),
+    );
+    expect(response.status).toBe(200);
+
+    const rows = await sql<
+      { contact_id: string; company_id: string | null; caller_id: string | null; destination: string }[]
+    >`select contact_id, company_id, caller_id, destination from calls`;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].contact_id).toBe(contact.id);
+    expect(rows[0].company_id).toBe(contact.company_id);
+    expect(rows[0].caller_id).toBe(selectedCaller);
+    expect(rows[0].destination).toBe("+420777123456");
   });
 
   it("odmítne nesmyslné id", async () => {

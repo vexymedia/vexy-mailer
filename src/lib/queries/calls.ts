@@ -70,7 +70,7 @@ export type StartCallResult =
   | {
       ok: false;
       error: string;
-      code: "not_found" | "no_phone" | "suppressed" | "closed" | "already_calling";
+      code: "not_found" | "no_phone" | "suppressed" | "closed" | "client_excluded" | "already_calling";
     };
 
 /**
@@ -125,6 +125,7 @@ export async function startCall(input: {
       last_name: string | null;
       email: string;
       suppressed: boolean;
+      client_excluded: boolean;
     }[]
   >`
     select c.id as contact_id,
@@ -133,7 +134,17 @@ export async function startCall(input: {
            co.name as company_name,
            co.status as company_status,
            c.phone, c.first_name, c.last_name, c.email,
-           exists (select 1 from call_suppression cs where cs.contact_id = c.id) as suppressed
+           exists (select 1 from call_suppression cs where cs.contact_id = c.id) as suppressed,
+           -- Firma vyloučená pro klienta TÉHLE kampaně. Bez kampaně není
+           -- klient, a tedy ani co scopovat - ad-hoc hovor se neblokuje.
+           exists (
+             select 1
+               from campaign_contacts scope
+               join campaigns scp on scp.id = scope.campaign_id
+               join client_company_exclusions x
+                 on x.client_id = scp.client_id and x.company_id = c.company_id
+              where scope.id = coalesce(${input.campaignContactId ?? null}::uuid, cc.id)
+           ) as client_excluded
       from contacts c
       left join companies co on co.id = c.company_id
       -- Otevřený záznam v kampani má přednost; bez něj se vezme poslední.
@@ -175,6 +186,17 @@ export async function startCall(input: {
       ok: false,
       error: "Firma je uzavřená — pokud jí chcete volat, nejdřív ji znovu otevřete.",
       code: "closed",
+    };
+  }
+
+  // Vyloučení pro klienta téhle kampaně. Užší než stav firmy výš: pro
+  // jiného klienta je ta samá firma dál k oslovení, takže se to musí
+  // ptát na dvojici klient+firma, ne na firmu samotnou.
+  if (row.client_excluded) {
+    return {
+      ok: false,
+      error: `Firma ${row.company_name ?? ""} je pro klienta téhle kampaně vyloučená.`.trim(),
+      code: "client_excluded",
     };
   }
 

@@ -29,6 +29,7 @@ export function CompanyForm({
   companyId,
   reason,
   priority,
+  ico,
   status,
   ownerId,
   note,
@@ -37,6 +38,7 @@ export function CompanyForm({
   companyId: string;
   reason: string;
   priority: CompanyPriority;
+  ico: string;
   status: CompanyStatus;
   ownerId: string;
   note: string;
@@ -72,6 +74,22 @@ export function CompanyForm({
           placeholder="Např. výrobní firma 20-50 zaměstnanců, expanduje, nemá vlastní obchodní tým"
         />
         <p className="hint">Krátce a konkrétně. Tohle čte caller těsně před hovorem.</p>
+      </div>
+
+      <div className="mt-5">
+        <label className="label" htmlFor="ico">IČO</label>
+        <input
+          id="ico"
+          name="ico"
+          defaultValue={ico}
+          inputMode="numeric"
+          className="input tabular-nums"
+          placeholder="25596641"
+        />
+        <p className="hint">
+          Jednoznačný klíč pro klientské vylučovací seznamy. Bez něj se firma páruje jen podle
+          názvu, což u dvou stejně pojmenovaných firem nestačí.
+        </p>
       </div>
 
       {/* Dvě úzká pole vedle sebe, odpovědná osoba přes celou šířku: jména

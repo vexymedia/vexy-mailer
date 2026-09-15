@@ -4,9 +4,11 @@ VEXY umí vytočit prospekta přímo z prohlížeče: caller sedí u notebooku
 s headsetem, klikne na **Zavolat** a prospektovi zazvoní normální telefon.
 Z hovoru pak vznikne nahrávka, přepis, AI shrnutí a návrh dalšího kroku.
 
-Bez Twilio proměnných aplikace funguje dál — tlačítko **Zavolat** se chová
-jako dřív a otevře telefon v počítači (`tel:`). Nic se nerozbije, jen se
-nevolá přes prohlížeč.
+Tlačítko **Zavolat** je vždycky tlačítko, nikdy odkaz `tel:`. Bez Twilio
+proměnných se neschová ani nezmizí: po kliknutí otevře cockpit a vypíše,
+které proměnné na serveru chybí. Tichý přechod na systémový telefon tu byl
+dřív a byla to past — hovor se nikam nezapsal a nikdo se nedozvěděl, že
+telefonie není zapnutá.
 
 ---
 
@@ -112,7 +114,7 @@ npm run dev
 
 Bez Twilio proměnných uvidíte v *Nastavení → Volání* stav „není
 nastaveno“ a seznam chybějících proměnných. Tlačítko Zavolat zůstane
-funkční jako `tel:` odkaz.
+klikatelné a ten samý seznam ukáže i v cockpitu.
 
 ### Bez veřejné URL se odchozí hovor neuskuteční
 
@@ -229,6 +231,30 @@ Pokryté je mimo jiné: token dostane jen přihlášená relace, klientem
 podstrčené číslo se ignoruje, nepodepsaný webhook neprojde, hovor se
 nevrací v životním cyklu zpátky, selhání přepisu nesmaže nahrávku ani
 metadata a po konečném výsledku už kontakt nejde vytočit.
+
+### Že tlačítko Zavolat není odkaz `tel:`
+
+`tests/call-button.test.tsx` hlídá komponentu: tlačítko je `<button>`,
+kliknutí sáhne na `/api/calling/token` a `/api/calling/calls`, Twiliu se
+předá jen id hovoru, chyba se ukáže česky a zavěšení otevře zápis
+výsledku.
+
+`tests/e2e/zavolat.mjs` to samé ověří ve skutečném prohlížeči proti
+běžícímu serveru — včetně toho, že se otevře signalizační WebSocket
+k Twiliu a že v databázi vznikne hovor u správného kontaktu:
+
+```bash
+npm run build && npm start &          # server na scratch databázi
+DATABASE_URL=… BASE_URL=http://localhost:3000 \
+  ADMIN_EMAIL=… ADMIN_PASSWORD=… \
+  COMPANY_ID=… CONTACT_ID=… CALLER_ID=… \
+  node tests/e2e/zavolat.mjs
+```
+
+Server u toho může běžet s **neplatnými** Twilio údaji — hovor pak skončí
+chybou 31005 a nikam se nedovolá. O to jde: skript nesmí vytočit skutečný
+telefonát a nic nepředstírá. Kdyby se tlačítko vrátilo na `tel:`,
+neproběhl by ani jeden z kroků po kliknutí.
 
 ---
 

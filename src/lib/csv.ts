@@ -270,3 +270,111 @@ export function parseContactsCsv(input: string): CsvParseResult {
 
   return { rows, errors, ignoredColumns };
 }
+
+// ---------------------------------------------- klientský vylučovací seznam
+
+/**
+ * Seznam firem, které se pro jednoho klienta nemají oslovovat.
+ *
+ * Vlastní parser, ne rozšíření `parseContactsCsv`: jsou to jiná data
+ * (firmy, ne lidé), jiná povinná pole a jiný výsledek. Sdílí se jen
+ * `parseCsv` a `detectDelimiter`, tedy mechanika čtení souboru - do
+ * importu kontaktů se tím nesahá vůbec.
+ */
+export interface ParsedExclusionRow {
+  line: number;
+  /** Normalizované IČO, jen číslice. Null, když ve zdroji není. */
+  ico: string | null;
+  name: string | null;
+  reason: string | null;
+}
+
+export interface ExclusionCsvResult {
+  rows: ParsedExclusionRow[];
+  errors: string[];
+}
+
+const EXCLUSION_ALIASES: Record<string, keyof Omit<ParsedExclusionRow, "line">> = {
+  ico: "ico",
+  ic: "ico",
+  icono: "ico",
+  companyid: "ico",
+  regno: "ico",
+  registrationnumber: "ico",
+  identifikacnicislo: "ico",
+  name: "name",
+  company: "company" as never,
+  companyname: "name",
+  firma: "name",
+  nazev: "name",
+  nazevfirmy: "name",
+  obchodnijmeno: "name",
+  organization: "name",
+  reason: "reason",
+  duvod: "reason",
+  poznamka: "reason",
+  note: "reason",
+};
+
+/**
+ * IČO na porovnatelný tvar.
+ *
+ * České IČO je osmimístné a v seznamech se běžně vyskytuje bez vodicích
+ * nul ("25596641" vs "0025596641") a s mezerami. Bez normalizace by se
+ * tentýž subjekt v každém exportu tvářil jako jiná firma.
+ *
+ * Vrací null pro cokoli, co po očištění není 1-12 číslic - hádat se tu
+ * nebude.
+ */
+export function normaliseIco(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const digits = value.replace(/[\s .\-/]/g, "");
+  if (!/^\d{1,12}$/.test(digits)) return null;
+  // Vodicí nuly pryč, ale osmimístný tvar se doplní zpátky: české IČO
+  // se všude uvádí na osm míst.
+  const trimmed = digits.replace(/^0+/, "") || "0";
+  return trimmed.length <= 8 ? trimmed.padStart(8, "0") : trimmed;
+}
+
+export function parseExclusionsCsv(input: string): ExclusionCsvResult {
+  const rows: ParsedExclusionRow[] = [];
+  const errors: string[] = [];
+  const table = parseCsv(input, detectDelimiter(input));
+  if (table.length === 0) return { rows, errors: ["Soubor je prázdný."] };
+
+  const header = table[0].map((cell) => normaliseHeader(cell));
+  const index: Partial<Record<keyof Omit<ParsedExclusionRow, "line">, number>> = {};
+  header.forEach((cell, i) => {
+    // "company" je u firem název, ne firma kontaktu.
+    const key = cell === "company" ? "name" : EXCLUSION_ALIASES[cell];
+    if (key && index[key as keyof typeof index] === undefined) {
+      index[key as keyof typeof index] = i;
+    }
+  });
+
+  if (index.ico === undefined && index.name === undefined) {
+    return { rows, errors: ["Soubor musí mít sloupec IČO nebo název firmy."] };
+  }
+
+  for (let i = 1; i < table.length; i++) {
+    const cells = table[i];
+    if (cells.every((cell) => cell.trim() === "")) continue;
+    const pick = (key: keyof typeof index) => {
+      const at = index[key];
+      return at === undefined ? null : (cells[at]?.trim() || null);
+    };
+    const rawIco = pick("ico");
+    const ico = normaliseIco(rawIco);
+    const name = pick("name");
+    if (!ico && !name) {
+      errors.push(`Řádek ${i + 1}: chybí IČO i název, přeskočeno.`);
+      continue;
+    }
+    if (rawIco && !ico) {
+      errors.push(`Řádek ${i + 1}: „${rawIco}" není platné IČO, použije se název.`);
+    }
+    rows.push({ line: i + 1, ico, name, reason: pick("reason") });
+  }
+
+  return { rows, errors };
+}

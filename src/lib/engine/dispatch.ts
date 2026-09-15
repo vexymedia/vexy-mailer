@@ -9,6 +9,7 @@ import { followUpDueAt, isWithinWindow, nextSlotAfter, localDayStartUtc, type Se
 import { unsubscribeUrl } from "../unsubscribe";
 import { withLock } from "./locks";
 import { allocateSender, reserveMailboxSlot } from "./allocation";
+import { planPools, type Pool } from "./pools";
 import { recordOutboundMessage } from "../queries/inbox";
 import type { AppSettings, Campaign, Mailbox, SequenceStep } from "../types";
 
@@ -33,6 +34,25 @@ import type { AppSettings, Campaign, Mailbox, SequenceStep } from "../types";
  * A missed email is recoverable. A prospect receiving the same email twice is
  * not. Every ambiguous case therefore resolves towards not sending.
  */
+
+/**
+ * Stavy z telefonní části, po kterých je kontakt uzavřený i pro e-mail.
+ *
+ * Rozlišuje se KANÁL od NABÍDKY:
+ *
+ *   * `do_not_call` a `max_attempts` sem NEPATŘÍ. "Nevolejte mi" je
+ *     preference telefonního kanálu - má vlastní seznam `call_suppression`
+ *     - a "telefonem se nedovoláme" neříká o e-mailu vůbec nic. Zastavit
+ *     kvůli nim e-maily by bylo splynutí dvou různých souhlasů.
+ *   * `meeting_booked`, `won` a `lost` (tam spadá "Nemá zájem") sem
+ *     patří. To jsou výsledky NABÍDKY, ne kanálu. Komu caller domluvil
+ *     schůzku, tomu nesmí druhý den přijít další cold e-mail ze sekvence.
+ */
+const TERMINAL_CALL_STATUSES = [
+  "meeting_booked",
+  "won",
+  "lost",
+];
 
 const DISPATCH_LOCK_TTL_MS = 60_000;
 
@@ -112,6 +132,8 @@ export async function reapStuckSends(): Promise<number> {
 interface Candidate {
   campaign_contact_id: string;
   contact_id: string;
+  /** Nikdy jsme mu nic neposlali = nový kontakt. Jinak follow-up. */
+  is_new: boolean;
   email: string;
   first_name: string | null;
   last_name: string | null;
@@ -140,6 +162,7 @@ interface Recipient {
  */
 type ClaimResult =
   | { kind: "none" }
+  | { kind: "cap_reached"; sentToday: number }
   | { kind: "mailbox_exhausted"; reason: string }
   | { kind: "no_sender"; reason: string }
   | { kind: "finished"; candidate: Candidate }
@@ -155,6 +178,8 @@ type ClaimResult =
       text: string;
       /** The mailbox this specific send goes out from. */
       mailbox: Mailbox;
+      /** Ze kterého poolu se tenhle send bere. Zapisuje se do email_sends. */
+      pool: Pool;
     };
 
 /** Resolves the actual recipient, honouring test mode. */
@@ -185,21 +210,10 @@ async function processCampaign(campaign: Campaign, settings: AppSettings): Promi
     return { ...base, action: "paced" };
   }
 
-  // Daily limit is counted in the campaign's own timezone.
-  //   - `unknown` counts: the message may well have been delivered.
-  //   - `skipped` (test-mode simulate) counts too, so a dry run paces exactly
-  //     like the real thing. That fidelity is the entire point of test mode.
+  // Denní strop se NEkontroluje tady, ale uvnitř claim transakce pod
+  // zámkem řádku kampaně - viz tam. Kontrola před transakcí by dvěma
+  // souběžným workerům dovolila přečíst stejných 99/100 a oba pustit.
   const dayStart = localDayStartUtc(now, campaign.timezone);
-  const [{ count: sentToday }] = await sql<{ count: number }[]>`
-    select count(*)::int as count
-      from email_sends
-     where campaign_id = ${campaign.id}
-       and status in ('sent', 'unknown', 'skipped')
-       and coalesce(sent_at, claimed_at) >= ${dayStart}
-  `;
-  if (sentToday >= campaign.daily_limit) {
-    return { ...base, action: "daily_limit_reached", detail: `${sentToday}/${campaign.daily_limit}` };
-  }
 
   // The sender is now resolved per contact, not per campaign: a campaign has a
   // pool, and each contact is pinned to one member of it.
@@ -220,56 +234,127 @@ async function processCampaign(campaign: Campaign, settings: AppSettings): Promi
   // This commits BEFORE any SMTP work happens.
   // ---------------------------------------------------------------
   const claim: ClaimResult = (await sql.begin(async (tx): Promise<ClaimResult> => {
-    // Usage per mailbox, each in its own timezone, so a mailbox shared by
-    // campaigns in different zones still has exactly one "today".
-    const [candidate] = await tx<Candidate[]>`
-      with mailbox_usage as (
-        select m.id as mailbox_id, m.enabled, m.daily_limit, m.last_test_ok,
-               count(es.id)::int as used_today
-          from mailboxes m
-          left join email_sends es
-            on es.mailbox_id = m.id
-           and es.status in ('sent', 'unknown', 'skipped')
-           and coalesce(es.sent_at, es.claimed_at)
-               >= date_trunc('day', now() at time zone m.timezone) at time zone m.timezone
-         group by m.id
-      )
-      select cc.id   as campaign_contact_id,
-             cc.contact_id,
-             cc.current_step,
-             cc.thread_message_id,
-             cc.sender_mailbox_id,
-             c.email, c.first_name, c.last_name, c.company, c.website
-        from campaign_contacts cc
-        join contacts c on c.id = cc.contact_id
-        left join mailbox_usage sticky on sticky.mailbox_id = cc.sender_mailbox_id
-       where cc.campaign_id = ${campaign.id}
-         and cc.status in ('scheduled', 'sent')
-         and cc.next_send_at is not null
-         and cc.next_send_at <= now()
-         and not exists (select 1 from suppression_list s where s.email = c.email)
-         and (
-           case
-             -- Already pinned: that mailbox must be usable and have room.
-             -- It is never swapped for another - see the sticky-sender rule.
-             when cc.sender_mailbox_id is not null then
-               sticky.enabled and sticky.last_test_ok is true
-               and sticky.used_today < sticky.daily_limit
-             -- Not yet written to: any pool member with room will do.
-             else exists (
-               select 1 from campaign_mailboxes cm
-                 join mailbox_usage mu on mu.mailbox_id = cm.mailbox_id
-                where cm.campaign_id = cc.campaign_id
-                  and mu.enabled and mu.last_test_ok is true
-                  and mu.used_today < mu.daily_limit
-             )
-           end
-         )
-       order by cc.next_send_at asc
-       limit 1
-         for update of cc skip locked
+    // ---------------------------------------------------------------
+    // ATOMICKÝ DENNÍ STROP
+    //
+    // Zámek řádku kampaně. Od téhle chvíle až do commitu nemůže žádný
+    // jiný worker pro TUHLE kampaň spočítat dnešek ani založit send.
+    // Bez toho přečtou dva workeři shodně 99/100 a odejde 101 e-mailů -
+    // a globální zámek dispatcheru to nespraví, protože jeho lease může
+    // vypršet uprostřed dlouhého ticku.
+    //
+    // Pořadí zámků je v celém souboru stejné (kampaň → kontakt →
+    // schránka), takže nemůže vzniknout deadlock.
+    // ---------------------------------------------------------------
+    await tx`select id from campaigns where id = ${campaign.id} for update`;
+
+    const [today] = await tx<{ total: number; sent_new: number; sent_follow_up: number }[]>`
+      select count(*)::int as total,
+             count(*) filter (where pool is distinct from 'follow_up')::int as sent_new,
+             count(*) filter (where pool = 'follow_up')::int as sent_follow_up
+        from email_sends
+       where campaign_id = ${campaign.id}
+         and status in ('sending', 'sent', 'unknown', 'skipped')
+         and coalesce(sent_at, claimed_at) >= ${dayStart}
     `;
-    if (!candidate) return { kind: "none" };
+
+    const plan = planPools({
+      dailyLimit: campaign.daily_limit,
+      newRatio: campaign.new_ratio,
+      sentNew: today.sent_new,
+      sentFollowUp: today.sent_follow_up,
+    });
+    if (plan.capReached) {
+      return { kind: "cap_reached", sentToday: today.total };
+    }
+
+    // ---------------------------------------------------------------
+    // DVA POOLY, JEDEN SEND
+    //
+    // `plan.order` říká, koho zkusit první a koho jako náhradníka.
+    // Když první pool nemá kandidáta, sáhne se po druhém - tím vzniká
+    // přelití v obou směrech, aniž bychom museli dopředu vědět, kolik
+    // kandidátů vlastně existuje.
+    //
+    // Uvnitř poolu se řadí podle next_send_at vzestupně, takže nejstarší
+    // po termínu jde první. Follow-up, na který dnes nezbylo, si tedy
+    // ponechá svoje next_send_at v minulosti a zítra je v pořadí první.
+    // ---------------------------------------------------------------
+    let candidate: Candidate | undefined;
+    let pool: Pool | undefined;
+
+    for (const attempt of plan.order) {
+      const [row] = await tx<Candidate[]>`
+        with mailbox_usage as (
+          select m.id as mailbox_id, m.enabled, m.daily_limit, m.last_test_ok,
+                 count(es.id)::int as used_today
+            from mailboxes m
+            left join email_sends es
+              on es.mailbox_id = m.id
+             and es.status in ('sending', 'sent', 'unknown', 'skipped')
+             and coalesce(es.sent_at, es.claimed_at)
+                 >= date_trunc('day', now() at time zone m.timezone) at time zone m.timezone
+           group by m.id
+        )
+        select cc.id   as campaign_contact_id,
+               cc.contact_id,
+               cc.current_step,
+               cc.thread_message_id,
+               cc.sender_mailbox_id,
+               (cc.last_sent_at is null) as is_new,
+               c.email, c.first_name, c.last_name, c.company, c.website
+          from campaign_contacts cc
+          join contacts c on c.id = cc.contact_id
+          left join mailbox_usage sticky on sticky.mailbox_id = cc.sender_mailbox_id
+         where cc.campaign_id = ${campaign.id}
+           and cc.status in ('scheduled', 'sent')
+           and cc.next_send_at is not null
+           and cc.next_send_at <= now()
+           -- Pool: nový kontakt je ten, kterému jsme ještě nic neposlali.
+           and (${attempt} = 'new') = (cc.last_sent_at is null)
+           and not exists (select 1 from suppression_list s where s.email = c.email)
+           -- Uzavřeno v CRM. Telefon a e-mail sdílejí jeden kontakt: kdo
+           -- má domluvenou schůzku nebo řekl, že nemá zájem, nesmí dostat
+           -- další cold e-mail. Filtruje se TADY, aby takový kontakt vůbec
+           -- nesnědl slot z denního limitu; finalSendGuard je pak už jen
+           -- pojistka proti změně, která přijde po claimu.
+           and (cc.call_status is null or cc.call_status <> all(${TERMINAL_CALL_STATUSES}))
+           -- Firma vyloučená pro klienta TÉHLE kampaně. Pro jiného klienta
+           -- vyloučená není - proto se ptáme na dvojici, ne na firmu.
+           and not exists (
+             select 1 from client_company_exclusions x
+              where x.company_id = c.company_id
+                and x.client_id = ${campaign.client_id}
+           )
+           and (
+             case
+               -- Already pinned: that mailbox must be usable and have room.
+               -- It is never swapped for another - see the sticky-sender rule.
+               when cc.sender_mailbox_id is not null then
+                 sticky.enabled and sticky.last_test_ok is true
+                 and sticky.used_today < sticky.daily_limit
+               -- Not yet written to: any pool member with room will do.
+               else exists (
+                 select 1 from campaign_mailboxes cm
+                   join mailbox_usage mu on mu.mailbox_id = cm.mailbox_id
+                  where cm.campaign_id = cc.campaign_id
+                    and mu.enabled and mu.last_test_ok is true
+                    and mu.used_today < mu.daily_limit
+               )
+             end
+           )
+         order by cc.next_send_at asc
+         limit 1
+           for update of cc skip locked
+      `;
+      if (row) {
+        candidate = row;
+        pool = attempt;
+        break;
+      }
+    }
+
+    if (!candidate || !pool) return { kind: "none" };
 
     const step = steps.find((s) => s.step_number === candidate.current_step);
     if (!step) {
@@ -334,11 +419,11 @@ async function processCampaign(campaign: Campaign, settings: AppSettings): Promi
     const claimed = await tx<ClaimedSend[]>`
       insert into email_sends (
         campaign_id, campaign_contact_id, step_id, step_number,
-        status, to_email, intended_email, subject, body, claimed_at, mailbox_id
+        status, to_email, intended_email, subject, body, claimed_at, mailbox_id, pool
       ) values (
         ${campaign.id}, ${candidate.campaign_contact_id}, ${step.id}, ${step.step_number},
         'sending', ${recipient.to}, ${candidate.email},
-        ${recipient.subjectPrefix + subjectBody}, ${textBody}, now(), ${mailboxId}
+        ${recipient.subjectPrefix + subjectBody}, ${textBody}, now(), ${mailboxId}, ${pool}
       )
       on conflict (campaign_contact_id, step_id) do update
          set status        = 'sending',
@@ -348,7 +433,8 @@ async function processCampaign(campaign: Campaign, settings: AppSettings): Promi
              to_email      = excluded.to_email,
              subject       = excluded.subject,
              body          = excluded.body,
-             mailbox_id    = excluded.mailbox_id
+             mailbox_id    = excluded.mailbox_id,
+             pool          = excluded.pool
        where email_sends.status = 'failed'
          and email_sends.attempt_count < ${env.maxSendAttempts}
          and (email_sends.next_retry_at is null or email_sends.next_retry_at <= now())
@@ -378,6 +464,7 @@ async function processCampaign(campaign: Campaign, settings: AppSettings): Promi
     return {
       kind: "claimed",
       mailbox,
+      pool,
       send: claimed[0],
       step,
       candidate,
@@ -386,6 +473,14 @@ async function processCampaign(campaign: Campaign, settings: AppSettings): Promi
       text: textBody,
     };
   })) as unknown as ClaimResult;
+
+  if (claim.kind === "cap_reached") {
+    return {
+      ...base,
+      action: "daily_limit_reached",
+      detail: `${claim.sentToday}/${campaign.daily_limit}`,
+    };
+  }
 
   if (claim.kind === "none") {
     // Nothing due may mean nothing is left at all - for instance every contact
@@ -459,6 +554,51 @@ async function processCampaign(campaign: Campaign, settings: AppSettings): Promi
   // the reaper will convert to `unknown` - never a silent duplicate.
   // ---------------------------------------------------------------
   const { send, step, candidate, recipient, subject, text, mailbox } = claim;
+  void claim.pool; // zapsáno už v claimu; tady jen pro úplnost typu
+
+  /**
+   * Zahodí claim, který se nesmí odeslat.
+   *
+   * Řádek se retiruje jako `skipped` s důvodem, takže se nikdy
+   * nezopakuje, a kontakt se vyndá z fronty, aby na něm dispatcher
+   * netočil dokola.
+   */
+  const abort = async (reason: string): Promise<DispatchOutcome> => {
+    await sql`
+      update email_sends
+         set status = 'skipped', sent_at = now(), error = ${`Not sent: ${reason}`}
+       where id = ${send.id}
+    `;
+    await sql`
+      update campaign_contacts set next_send_at = null, updated_at = now()
+       where id = ${candidate.campaign_contact_id}
+    `;
+    await logActivity({
+      level: "warn",
+      action: `E-mail krok ${step.step_number} neodeslán`,
+      detail: `${candidate.email}: ${reason}`,
+      campaignId: campaign.id,
+      contactId: candidate.contact_id,
+      campaignContactId: candidate.campaign_contact_id,
+    });
+    return { ...base, action: "blocked", detail: reason };
+  };
+
+  const guardInput = {
+    campaignContactId: candidate.campaign_contact_id,
+    email: candidate.email,
+    mailboxId: mailbox.id,
+    stepId: step.id,
+    sendId: send.id,
+  };
+
+  if (recipient.mode === "simulate") {
+    // Poslední kontrola platí i v testovacím režimu. Zkouška na sucho,
+    // která by "odeslala" odhlášenému kontaktu nebo někomu s domluvenou
+    // schůzkou, by o ostrém provozu nevypovídala nic.
+    const simulateAbort = await finalSendGuard(guardInput);
+    if (simulateAbort) return abort(simulateAbort);
+  }
 
   if (recipient.mode === "simulate") {
     await sql`
@@ -480,31 +620,14 @@ async function processCampaign(campaign: Campaign, settings: AppSettings): Promi
 
   const messageId = generateMessageId(mailbox.from_email);
 
-  // Final gate. Anything that changed since the claim committed stops the send
-  // here, and the claim row is retired as `skipped` so it is never retried.
-  const abortReason = await finalSendGuard(
-    campaign.id,
-    candidate.campaign_contact_id,
-    candidate.email,
-    mailbox.id,
-  );
-  if (abortReason) {
-    await sql`
-      update email_sends
-         set status = 'skipped', sent_at = now(),
-             error = ${`Not sent: ${abortReason}`}
-       where id = ${send.id}
-    `;
-    await logActivity({
-      level: "warn",
-      action: `E-mail krok ${step.step_number} neodeslán`,
-      detail: `${candidate.email}: ${abortReason}`,
-      campaignId: campaign.id,
-      contactId: candidate.contact_id,
-      campaignContactId: candidate.campaign_contact_id,
-    });
-    return { ...base, action: "blocked", detail: abortReason };
-  }
+  // POSLEDNÍ VĚC PŘED SMTP, a musí jí zůstat. Claim se commituje dřív,
+  // než se sáhne na SMTP (jinak by nešel poznat zabitý worker), takže
+  // mezi commitem a odesláním existuje okno, ve kterém se svět může
+  // změnit - reply poller drží jiný zámek než dispatcher a stihne
+  // v něm označit kontakt za toho, kdo odpověděl. Cokoli mezi tuhle
+  // kontrolu a sendMail vloženého to okno zase otevře.
+  const abortReason = await finalSendGuard(guardInput);
+  if (abortReason) return abort(abortReason);
 
   const result = await sendMail(mailbox, {
     to: recipient.to,
@@ -607,6 +730,13 @@ async function processCampaign(campaign: Campaign, settings: AppSettings): Promi
 }
 
 /**
+ * Jedna kampaň, jeden send. Exportované jen kvůli testu souběhu: ten
+ * potřebuje pustit několik claimů najednou BEZ globálního zámku
+ * dispatcheru, aby se ověřila transakční rezervace samotná.
+ */
+export const processCampaignForTest = processCampaign;
+
+/**
  * Last-moment re-check of every condition that forbids delivery.
  *
  * The guards in the claim transaction are evaluated before that transaction
@@ -624,19 +754,46 @@ async function processCampaign(campaign: Campaign, settings: AppSettings): Promi
  *
  * Returns a reason to abort, or null when it is still safe to send.
  */
-async function finalSendGuard(
-  campaignId: string,
-  campaignContactId: string,
-  email: string,
-  mailboxId: string,
-): Promise<string | null> {
+async function finalSendGuard(input: {
+  campaignContactId: string;
+  email: string;
+  mailboxId: string;
+  stepId: string;
+  sendId: string;
+}): Promise<string | null> {
+  const { campaignContactId, email, mailboxId, stepId, sendId } = input;
   const [row] = await sql<
-    { suppressed: boolean; contact_status: string; campaign_status: string; mailbox_enabled: boolean | null }[]
+    {
+      suppressed: boolean;
+      contact_status: string;
+      campaign_status: string;
+      call_status: string | null;
+      already_sent: boolean;
+      client_excluded: boolean;
+      mailbox_enabled: boolean | null;
+      mailbox_tested: boolean | null;
+    }[]
   >`
     select exists (select 1 from suppression_list s where s.email = ${email}) as suppressed,
            cc.status as contact_status,
+           cc.call_status,
            cp.status as campaign_status,
-           (select m.enabled from mailboxes m where m.id = ${mailboxId}) as mailbox_enabled
+           exists (
+             select 1 from email_sends es
+              where es.campaign_contact_id = cc.id
+                and es.step_id = ${stepId}
+                and es.id <> ${sendId}
+                and es.status in ('sent', 'unknown')
+           ) as already_sent,
+           exists (
+             select 1
+               from client_company_exclusions x
+               join contacts ct on ct.id = cc.contact_id
+              where x.company_id = ct.company_id
+                and x.client_id = cp.client_id
+           ) as client_excluded,
+           (select m.enabled from mailboxes m where m.id = ${mailboxId}) as mailbox_enabled,
+           (select m.last_test_ok from mailboxes m where m.id = ${mailboxId}) as mailbox_tested
       from campaign_contacts cc
       join campaigns cp on cp.id = cc.campaign_id
      where cc.id = ${campaignContactId}
@@ -646,12 +803,26 @@ async function finalSendGuard(
   if (row.contact_status === "replied") return "The contact replied.";
   if (row.contact_status === "unsubscribed") return "The contact unsubscribed.";
   if (row.campaign_status !== "active") return `The campaign is ${row.campaign_status}.`;
+  // Terminální stav z CRM. Telefon a e-mail sdílejí jeden kontakt: když
+  // caller domluví schůzku nebo si prospekt řekne, že nemá zájem, nesmí
+  // mu druhý den přijít další cold e-mail ze sekvence.
+  if (row.call_status && TERMINAL_CALL_STATUSES.includes(row.call_status)) {
+    return `The contact is closed in CRM (${row.call_status}).`;
+  }
+  // Firma je vyloučená pro klienta téhle kampaně. Pro jiného klienta
+  // vyloučená není - proto se to ptá na dvojici, ne na firmu samotnou.
+  if (row.client_excluded) return "The company is excluded for this campaign's client.";
+  // Jiný worker mezitím tenhle krok odeslal. Unikátní index by druhý
+  // insert nepustil, ale sem se dá dojít přes retry větev on conflict.
+  if (row.already_sent) return "This sequence step has already been sent.";
   // The sender can be switched off between the claim and the send, same as
   // everything else above.
   if (row.mailbox_enabled === null) return "The sender mailbox no longer exists.";
   if (!row.mailbox_enabled) return "The sender mailbox was disabled.";
+  if (row.mailbox_tested !== true) return "The sender mailbox has no successful connection test.";
   return null;
 }
+
 
 /**
  * Moves a contact to the next step after a delivered (or simulated) send, and

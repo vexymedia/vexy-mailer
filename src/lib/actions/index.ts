@@ -186,6 +186,7 @@ const mailboxSchema = z.object({
   imap_password: z.string().nullable(),
   imap_secure: z.boolean(),
   daily_limit: z.coerce.number().int().min(1).max(2000),
+  new_ratio: z.coerce.number().int().min(0).max(100).default(70),
   timezone: z.string().min(1),
   enabled: z.boolean(),
 });
@@ -210,6 +211,7 @@ function mailboxFromForm(formData: FormData) {
     imap_password: text("imap_password"),
     imap_secure: formData.get("imap_secure") === "on",
     daily_limit: formData.get("daily_limit"),
+    new_ratio: formData.get("new_ratio") ?? 70,
     timezone: String(formData.get("mailbox_timezone") ?? "Europe/Prague"),
     enabled: formData.get("enabled") === "on",
   });
@@ -292,6 +294,7 @@ const campaignSchema = z.object({
   name: z.string().min(1, "Pojmenujte kampaň."),
   mailbox_ids: z.array(z.string().uuid()).min(1, "Vyberte alespoň jednu odesílací schránku."),
   daily_limit: z.coerce.number().int().min(1).max(2000),
+  new_ratio: z.coerce.number().int().min(0).max(100).default(70),
   timezone: z.string().min(1),
   send_days: z.array(z.number().int().min(1).max(7)).min(1, "Vyberte alespoň jeden den odesílání."),
   send_start_minute: z.number().int().min(0).max(1439),
@@ -323,6 +326,7 @@ export async function saveCampaignAction(_prev: ActionState, formData: FormData)
     name: String(formData.get("name") ?? "").trim(),
     mailbox_ids: formData.getAll("mailbox_ids").map(String).filter(Boolean),
     daily_limit: formData.get("daily_limit"),
+    new_ratio: formData.get("new_ratio") ?? 70,
     timezone,
     send_days: formData.getAll("send_days").map(Number),
     send_start_minute: startMinute,
@@ -341,6 +345,7 @@ export async function saveCampaignAction(_prev: ActionState, formData: FormData)
     // keep the campaign parked under settings that no longer apply.
     ({ cursorCleared } = await saveCampaignSchedule(id, {
       daily_limit: data.daily_limit,
+      new_ratio: data.new_ratio,
       send_days: data.send_days,
       send_start_minute: data.send_start_minute,
       send_end_minute: data.send_end_minute,
@@ -349,9 +354,9 @@ export async function saveCampaignAction(_prev: ActionState, formData: FormData)
   } else {
     // Always draft. A new campaign never starts on its own.
     const [row] = await sql<{ id: string }[]>`
-      insert into campaigns (name, daily_limit, send_days,
+      insert into campaigns (name, daily_limit, new_ratio, send_days,
                              send_start_minute, send_end_minute, timezone, status)
-      values (${data.name}, ${data.daily_limit}, ${data.send_days},
+      values (${data.name}, ${data.daily_limit}, ${data.new_ratio}, ${data.send_days},
               ${data.send_start_minute}, ${data.send_end_minute}, ${data.timezone}, 'draft')
       returning id
     `;
@@ -548,6 +553,152 @@ export async function unsuppressEmailAction(_prev: ActionState, formData: FormDa
   return { success: "Odebráno ze seznamu Nekontaktovat." };
 }
 
+/**
+ * Hromadné vrácení do oběhu.
+ *
+ * Odhlášení, stížnosti na spam a ruční bloky neprojdou - a není to
+ * kontrola v UI, kterou by šlo obejít jinou cestou: odmítá je sama
+ * `restoreSuppressed`.
+ */
+export async function restoreSuppressedAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  await requireAdmin();
+  const { restoreSuppressed, SUPPRESSION_LABELS } = await import("@/lib/queries/suppression");
+  const code = String(formData.get("reason_code") ?? "") as
+    import("@/lib/queries/suppression").SuppressionReasonCode;
+  if (!(code in SUPPRESSION_LABELS)) return fail("Neznámý důvod.");
+
+  const result = await restoreSuppressed(code);
+  revalidatePath("/suppression");
+  if (result.refused) {
+    return fail("Odhlášení, stížnosti na spam ani ruční bloky se hromadně nevracejí.");
+  }
+  return { success: `Vráceno do oběhu: ${result.restored}.` };
+}
+
+// ------------------------------------------- klientská vyloučení firem
+
+/**
+ * Vyloučí firmu pro JEDNOHO klienta.
+ *
+ * Oprávnění: administrátor. Caller firmu vyloučit nesmí - je to
+ * rozhodnutí o obchodním vztahu, ne výsledek hovoru. `requireAdmin()`
+ * je serverová kontrola, ne jen schování tlačítka.
+ */
+export async function excludeCompanyAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  const user = await requireAdmin();
+  const clientId = String(formData.get("client_id") ?? "");
+  const companyId = String(formData.get("company_id") ?? "");
+  const reason = String(formData.get("reason") ?? "").trim() || null;
+  if (!clientId || !companyId) return fail("Vyberte klienta.");
+
+  const { excludeCompanyForClient, listClientExclusions } = await import("@/lib/queries/suppression");
+  const already = await listClientExclusions({ clientId, companyId });
+  if (already.length > 0) {
+    return fail(`Firma je pro klienta ${already[0].client_name} už vyloučená.`);
+  }
+
+  await excludeCompanyForClient({ clientId, companyId, reason, createdBy: user.id });
+  revalidatePath(`/firmy/${companyId}`);
+  revalidatePath("/suppression");
+  return { success: "Firma je pro tohoto klienta vyloučená. Naplánované kroky byly zrušeny." };
+}
+
+export async function removeCompanyExclusionAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  await requireAdmin();
+  const id = String(formData.get("exclusion_id") ?? "");
+  const companyId = String(formData.get("company_id") ?? "");
+  if (!id) return fail("Chybí vyloučení.");
+
+  const { removeClientExclusion } = await import("@/lib/queries/suppression");
+  await removeClientExclusion(id);
+  if (companyId) revalidatePath(`/firmy/${companyId}`);
+  revalidatePath("/suppression");
+  return { success: "Vyloučení zrušeno. Sekvence se neobnovují automaticky." };
+}
+
+export interface ExclusionPreviewState {
+  error?: string;
+  clientId?: string;
+  clientName?: string;
+  matches?: import("@/lib/queries/suppression").ExclusionMatch[];
+  notes?: string[];
+}
+
+/**
+ * Náhled importu. ČTE A POČÍTÁ, nic nezapisuje.
+ *
+ * Vylučovací seznam umí tiše vyhodit stovky leadů, takže se člověk musí
+ * podívat na výsledek párování dřív, než se cokoli uloží.
+ */
+export async function previewExclusionImportAction(
+  _prev: ExclusionPreviewState,
+  formData: FormData,
+): Promise<ExclusionPreviewState> {
+  await requireAdmin();
+  const clientId = String(formData.get("client_id") ?? "");
+  const file = formData.get("file");
+  if (!clientId) return { error: "Vyberte klienta." };
+  if (!(file instanceof File) || file.size === 0) return { error: "Vyberte CSV soubor." };
+  if (file.size > 5 * 1024 * 1024) return { error: "Soubor je větší než 5 MB." };
+
+  const [{ name: clientName } = { name: "" }] = await sql<{ name: string }[]>`
+    select name from clients where id = ${clientId}
+  `;
+  if (!clientName) return { error: "Klient neexistuje." };
+
+  const { parseExclusionsCsv } = await import("@/lib/csv");
+  const parsed = parseExclusionsCsv(await file.text());
+  if (parsed.rows.length === 0) {
+    return { error: parsed.errors[0] ?? "V souboru nejsou žádné použitelné řádky." };
+  }
+
+  const { matchExclusions } = await import("@/lib/queries/suppression");
+  const matches = await matchExclusions(clientId, parsed.rows);
+  return { clientId, clientName, matches, notes: parsed.errors.slice(0, 20) };
+}
+
+/** Zapíše jen jednoznačné shody z potvrzeného náhledu. */
+export async function applyExclusionImportAction(
+  _prev: { error?: string; success?: string },
+  formData: FormData,
+): Promise<{ error?: string; success?: string }> {
+  const user = await requireAdmin();
+  const clientId = String(formData.get("client_id") ?? "");
+  if (!clientId) return { error: "Chybí klient." };
+
+  let matches: import("@/lib/queries/suppression").ExclusionMatch[];
+  try {
+    matches = JSON.parse(String(formData.get("payload") ?? "[]"));
+  } catch {
+    return { error: "Náhled se nepodařilo přečíst. Nahrajte soubor znovu." };
+  }
+  if (!Array.isArray(matches) || matches.length === 0) return { error: "Náhled je prázdný." };
+
+  // Náhled přišel z prohlížeče, takže se na něj nespoléháme: napáruje se
+  // znovu na serveru a zapíše se jen to, co i teď vyjde jednoznačně.
+  const { matchExclusions, applyExclusionImport } = await import("@/lib/queries/suppression");
+  const fresh = await matchExclusions(
+    clientId,
+    matches.map((m) => ({ line: m.line, ico: m.ico, name: m.name, reason: m.reason })),
+  );
+
+  const result = await applyExclusionImport({
+    clientId,
+    matches: fresh,
+    defaultReason: "Z importovaného vylučovacího seznamu.",
+    createdBy: user.id,
+  });
+  revalidatePath("/suppression");
+  return {
+    success:
+      `Vyloučeno ${result.created} firem.` +
+      (result.skipped > 0 ? ` ${result.skipped} řádků přeskočeno (nejednoznačné, nenalezené nebo už vyloučené).` : ""),
+  };
+}
+
 export async function removeFromCampaignAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
   await requireAdmin();
   const id = String(formData.get("campaign_contact_id") ?? "");
@@ -600,6 +751,22 @@ export async function sendReplyAction(_prev: ActionState, formData: FormData): P
   return { success: "Odpověď odeslána." };
 }
 
+/**
+ * Zařazení odpovědi - a všechno, co z něj plyne.
+ *
+ * Dřív to jen přepsalo štítek. Člověk pak musel zvlášť zastavit sekvenci
+ * a zvlášť odhlásit adresu, tedy otevřít další dvě obrazovky kvůli jedné
+ * odpovědi. Teď se to udělá zároveň, protože jinak to udělat nedává
+ * smysl:
+ *
+ *   Odhlásit    → globální suppression (a tím i konec všech sekvencí)
+ *   Nemá zájem  → konec sekvencí u tohohle kontaktu
+ *   Špatná osoba → konec sekvence JEN u tohohle kontaktu, ne u firmy
+ *
+ * Pozitivní a Později sekvenci nezastavují nad rámec toho, co už udělala
+ * samotná odpověď: kontakt je od ní `replied` a žádný další automat mu
+ * nic nepošle.
+ */
 export async function classifyConversationAction(
   _prev: ActionState,
   formData: FormData,
@@ -607,10 +774,61 @@ export async function classifyConversationAction(
   await requireAdmin();
   const conversationId = String(formData.get("conversation_id") ?? "");
   const classification = String(formData.get("classification") ?? "unclassified") as Classification;
+
+  const { getConversation } = await import("@/lib/queries/inbox");
+  const conversation = await getConversation(conversationId);
+  if (!conversation) return fail("Konverzace nebyla nalezena.");
+
   await setClassification(conversationId, classification);
+
+  if (classification === "unsubscribe") {
+    const { suppressEmail } = await import("@/lib/queries/contacts");
+    await suppressEmail(conversation.contact_email, "unsubscribe", "Zařazeno ručně v Komunikaci.", {
+      reasonCode: "unsubscribe",
+      source: "inbox",
+    });
+  } else if (classification === "not_interested" || classification === "wrong_person") {
+    // Konec automatiky na tomhle kontaktu. Firma se NEuzavírá: "špatná
+    // osoba" znamená špatnou osobu, ne špatnou firmu.
+    await sql`
+      update campaign_contacts
+         set next_send_at = null, updated_at = now()
+       where contact_id = ${conversation.contact_id}
+         and status in ('pending', 'scheduled', 'sent')
+    `;
+  }
+
   revalidatePath(`/inbox/${conversationId}`);
   revalidatePath("/inbox");
-  return { success: "Stav uložen." };
+  return { success: "Uloženo." };
+}
+
+/**
+ * Uzavře posouzení odpovědi, která přišla od jiné adresy.
+ *
+ * Dvě možnosti a nic mezi tím: buď to byl prospekt z jiné adresy (konec
+ * sekvence), nebo nesouvisející zpráva (sekvence pokračuje podle
+ * PŮVODNÍHO termínu, ne od teď).
+ */
+export async function resolveReviewAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  await requireAdmin();
+  const replyId = String(formData.get("reply_id") ?? "");
+  const verdict = String(formData.get("verdict") ?? "");
+  const conversationId = String(formData.get("conversation_id") ?? "");
+  if (verdict !== "relevant" && verdict !== "unrelated") return fail("Neplatné rozhodnutí.");
+
+  const { resolveReview } = await import("@/lib/queries/inbox");
+  const result = await resolveReview(replyId, verdict);
+  if (!result.ok) return fail("Tohle posouzení už někdo uzavřel.");
+
+  if (conversationId) revalidatePath(`/inbox/${conversationId}`);
+  revalidatePath("/inbox");
+  return {
+    success:
+      verdict === "relevant"
+        ? "Označeno jako odpověď prospekta. Další automatické kroky se neodešlou."
+        : "Uzavřeno jako nesouvisející. Sekvence pokračuje podle původního harmonogramu.",
+  };
 }
 
 export async function markReadAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
@@ -927,9 +1145,27 @@ export async function saveCompanyAction(_prev: ActionState, formData: FormData):
     return String(raw).trim() || null;
   };
 
+  // IČO se normalizuje (mezery, vodicí nuly) - jinak by se tentýž
+  // subjekt v každém exportu tvářil jako jiná firma a vylučovací
+  // seznam by ho nenašel.
+  const rawIco = formData.get("ico");
+  let ico: string | null | undefined;
+  if (rawIco !== null) {
+    const trimmed = String(rawIco).trim();
+    if (trimmed === "") {
+      ico = null;
+    } else {
+      const { normaliseIco } = await import("@/lib/csv");
+      const parsed = normaliseIco(trimmed);
+      if (!parsed) return fail("IČO musí být číslo (nejvýš 12 číslic).");
+      ico = parsed;
+    }
+  }
+
   const ok = await updateCompany(id, {
     reason: text("reason"),
     note: text("note"),
+    ico,
     priority: priority ? (priority as CompanyPriority) : undefined,
     status: status ? (status as CompanyStatus) : undefined,
     ownerId: formData.get("owner_id") === null ? undefined : String(formData.get("owner_id") ?? "") || null,

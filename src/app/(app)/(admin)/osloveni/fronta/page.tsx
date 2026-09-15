@@ -3,6 +3,8 @@ import { listCallQueue } from "@/lib/queries/calling";
 import { callOutcomeLabel, callStatusLabel } from "@/lib/calling";
 import { PageHeader, Table, EmptyState, DateTime } from "@/components/ui";
 import { OsloveniTabs } from "@/components/osloveni-tabs";
+import { CallButton } from "@/components/call/call-button";
+import { isTwilioConfigured } from "@/lib/telephony/twilio";
 
 export const dynamic = "force-dynamic";
 
@@ -12,6 +14,8 @@ export const dynamic = "force-dynamic";
  */
 export default async function FrontaPage() {
   const queue = await listCallQueue(null, { limit: 200 });
+  // Jestli jde volat z prohlížeče, ví server. Klient si to nevymýšlí.
+  const browserCalling = isTwilioConfigured();
 
   return (
     <>
@@ -62,9 +66,14 @@ export default async function FrontaPage() {
               </td>
               <td className="td text-xs">
                 {row.phone ? (
-                  <a href={`tel:${row.phone.replace(/\s+/g, "")}`} className="text-zinc-900 hover:underline">
+                  <CallButton
+                    phone={row.phone}
+                    campaignContactId={row.id}
+                    browserCalling={browserCalling}
+                    className="text-left text-zinc-900 underline-offset-2 hover:underline disabled:no-underline"
+                  >
                     {row.phone}
-                  </a>
+                  </CallButton>
                 ) : (
                   <span className="text-zinc-400">—</span>
                 )}

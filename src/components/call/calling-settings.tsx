@@ -133,7 +133,7 @@ export function CallingSettings({
           </ul>
           <p className="mt-2 text-xs">
             Postup je v <code className="font-mono">docs/calling.md</code>. Do té doby tlačítko
-            Zavolat otevře telefon v počítači, jako dosud.
+            Zavolat po kliknutí jen zopakuje tenhle seznam — volat nejde.
           </p>
         </div>
       ) : null}

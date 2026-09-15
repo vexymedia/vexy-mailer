@@ -35,7 +35,7 @@ export default async function MailboxPage({
   const [threads, mailboxes] = await Promise.all([
     listConversations({
       scope: "all",
-      filter: direction === "unread" ? "unread" : "all",
+      view: direction === "unread" ? "unread" : "all",
       mailboxId: params.mailbox || null,
       search: params.q || null,
     }),
@@ -67,7 +67,7 @@ export default async function MailboxPage({
     <>
       <PageHeader
         title="Schránka"
-        description="Celá e-mailová konverzace — odeslané i příchozí. Odpovídá se ze schránky, ze které se psalo."
+        description="Odeslané i příchozí, napříč schránkami."
         actions={
           <Link href="/mailboxes" className="btn-secondary">
             Spravovat schránky

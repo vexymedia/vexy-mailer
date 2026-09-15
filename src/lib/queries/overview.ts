@@ -101,7 +101,8 @@ export async function getWeekSummary(): Promise<WeekSummary> {
     getCallMetrics({ from }),
     sql<{ emails_sent: number }[]>`
       select (select count(*)::int from email_sends
-               where status = 'sent' and sent_at >= now() - interval '7 days') as emails_sent
+               where status in ('sent', 'unknown', 'skipped')
+                 and coalesce(sent_at, claimed_at) >= now() - interval '7 days') as emails_sent
     `,
   ]);
   return {

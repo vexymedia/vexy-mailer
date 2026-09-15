@@ -1,11 +1,20 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { getConversation, listMessages, markConversationRead } from "@/lib/queries/inbox";
+import { getConversation, getPendingReview, listMessages, markConversationRead } from "@/lib/queries/inbox";
 import { requireUser } from "@/lib/auth";
 import { callerMaySeeConversation } from "@/lib/queries/clients";
 import { PageHeader, DateTime, StatusBadge } from "@/components/ui";
 import { ClassificationBadge } from "@/components/inbox-bits";
-import { ClassificationPicker, DeleteConversationButton, ReplyComposer } from "@/components/conversation-actions";
+import {
+  ClassificationPicker,
+  DeleteConversationButton,
+  ReplyComposer,
+  ReviewDecision,
+} from "@/components/conversation-actions";
+import { CallButton } from "@/components/call/call-button";
+import { isTwilioConfigured } from "@/lib/telephony/twilio";
+import { callStatusLabel } from "@/lib/calling";
+import { formatWhen } from "@/lib/datetime";
 
 export const dynamic = "force-dynamic";
 
@@ -22,6 +31,8 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
   const { id } = await params;
   const user = await requireUser();
   const canManage = user.role === "admin";
+  // Jestli jde volat z prohlížeče, ví server. Klient si to nevymýšlí.
+  const browserCalling = isTwilioConfigured();
 
   // Caller vidí jen konverzace kontaktů ze svých kampaní. Odkaz na vlákno
   // dostane z pracovní karty, ale id se dá napsat i ručně - a cizí klient
@@ -40,6 +51,10 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
   // Odeslané vlákno a vlákno s odpovědí se chovají jinak vůči kadenci,
   // takže si nemůžou nést stejnou poznámku.
   const hasInbound = messages.some((message) => message.direction === "inbound");
+  // Čeká tu odpověď od jiné adresy na posouzení? Sekvence kvůli tomu
+  // nestojí - o to větší důvod to dát nad vlákno, ne do postranního
+  // panelu: dokud to nikdo neposoudí, odcházejí další kroky.
+  const pendingReview = canManage ? await getPendingReview(id) : null;
 
   return (
     <>
@@ -75,6 +90,18 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
           </>
         }
       />
+
+      {pendingReview ? (
+        <div className="mb-6">
+          <ReviewDecision
+            conversationId={id}
+            replyId={pendingReview.reply_id}
+            fromEmail={pendingReview.from_email}
+            contactEmail={pendingReview.contact_email}
+            nextSendAt={pendingReview.next_send_at}
+          />
+        </div>
+      ) : null}
 
       <div className="grid gap-6 lg:grid-cols-[1fr_260px]">
         <div className="space-y-4">
@@ -139,6 +166,46 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
             <h2 className="mb-3 text-sm font-semibold text-zinc-900">Detaily</h2>
             <dl className="space-y-2 text-xs">
               <div><dt className="text-zinc-500">Kontakt</dt><dd className="text-zinc-900">{conversation.contact_email}</dd></div>
+              {/* Telefon je tu schválně: na část odpovědí se líp reaguje
+                  hovorem než dalším e-mailem, a přepínat se kvůli tomu na
+                  jinou obrazovku je zbytečné. */}
+              {conversation.phone ? (
+                <div>
+                  <dt className="text-zinc-500">Telefon</dt>
+                  <dd className="flex flex-wrap items-center gap-2">
+                    <span className="tabular-nums text-zinc-900">{conversation.phone}</span>
+                    {/* Vyloučení pro klienta kampaně sem patří stejně jako na
+                        detail firmy: server takový hovor odmítne, takže ho
+                        tlačítko nesmí nabízet. Guard na serveru tím nemizí. */}
+                    <CallButton
+                      phone={conversation.phone}
+                      contactId={conversation.contact_id}
+                      campaignContactId={conversation.campaign_contact_id ?? undefined}
+                      browserCalling={browserCalling}
+                      disabled={conversation.client_excluded}
+                      disabledReason={
+                        conversation.excluded_for_client
+                          ? `Firma je vyloučená pro klienta ${conversation.excluded_for_client}.`
+                          : undefined
+                      }
+                      className="btn-go !px-2 !py-1 text-xs"
+                    >
+                      Zavolat
+                    </CallButton>
+                  </dd>
+                </div>
+              ) : null}
+              {conversation.call_status ? (
+                <div>
+                  <dt className="text-zinc-500">Stav volání</dt>
+                  <dd className="text-zinc-900">
+                    {callStatusLabel(conversation.call_status)}
+                    {conversation.next_call_at ? (
+                      <span className="text-zinc-500"> · {formatWhen(conversation.next_call_at)}</span>
+                    ) : null}
+                  </dd>
+                </div>
+              ) : null}
               {conversation.company ? (
                 <div><dt className="text-zinc-500">Firma</dt><dd className="text-zinc-900">{conversation.company}</dd></div>
               ) : null}
@@ -160,7 +227,14 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
               ) : null}
             </dl>
           </div>
-          {canManage && hasInbound ? (
+          {canManage && pendingReview ? (
+            // Příchozí zpráva tu je, ale nepsal ji prospekt - tvrdit, že
+            // odpověděl, by si odporovalo s výzvou nad vláknem.
+            <p className="px-1 text-xs text-zinc-500">
+              Zpráva přišla z jiné adresy než prospektovy, takže se za jeho odpověď nepovažuje a
+              sekvence běží dál. Posoudit ji jde tlačítkem nahoře.
+            </p>
+          ) : canManage && hasInbound ? (
             <p className="px-1 text-xs text-zinc-500">
               Tento prospekt odpověděl, takže automatické follow-upy se zastavily. Odpověď odsud ho
               do sekvence nevrátí.

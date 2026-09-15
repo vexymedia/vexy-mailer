@@ -180,12 +180,28 @@ export async function listContactOverview(options: {
  * Adds an address to the global do-not-contact list and pulls it out of every
  * campaign it is currently in. The database trigger keeps it out of future ones.
  */
-export async function suppressEmail(email: string, reason: string, note?: string): Promise<void> {
+export type SuppressionReasonCode =
+  | "unsubscribe"
+  | "spam_complaint"
+  | "manual_dnc"
+  | "hard_invalid"
+  | "not_interested"
+  | "bounce_technical"
+  | "import"
+  | "legacy";
+
+export async function suppressEmail(
+  email: string,
+  reason: string,
+  note?: string,
+  scope?: { reasonCode: SuppressionReasonCode; source: string },
+): Promise<void> {
   const normalised = email.trim().toLowerCase();
+  const reasonCode = scope?.reasonCode ?? "manual_dnc";
   await sql.begin(async (tx) => {
     await tx`
-      insert into suppression_list (email, reason, note)
-      values (${normalised}, ${reason}, ${note ?? null})
+      insert into suppression_list (email, reason, note, reason_code, source)
+      values (${normalised}, ${reason}, ${note ?? null}, ${reasonCode}, ${scope?.source ?? "manual"})
       on conflict (email) do nothing
     `;
     await tx`

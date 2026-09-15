@@ -57,10 +57,13 @@ export async function listCampaignStats(): Promise<CampaignStats[]> {
           from campaign_contacts where campaign_id = cp.id
       ) cc on true
       left join lateral (
-        select count(*) filter (where status = 'sent')::int as sent,
+        -- Stejná definice jako v odesílači a v denním panelu. Dřív se
+        -- "odesláno celkem" počítalo jen ze stavu sent, takže v testovacím
+        -- režimu ukazovala jedna karta 100/100 a druhá vedle ní 45.
+        select count(*) filter (where status in ('sent','unknown','skipped'))::int as sent,
                count(*) filter (where status = 'unknown')::int as needs_review,
                count(*) filter (
-                 where status in ('sent','unknown','skipped')
+                 where status in ('sending','sent','unknown','skipped')
                    and coalesce(sent_at, claimed_at) >= date_trunc('day', now() at time zone cp.timezone) at time zone cp.timezone
                )::int as sent_today
           from email_sends where campaign_id = cp.id

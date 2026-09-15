@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { getOverviewStats, getTodayWork, getWeekSummary } from "@/lib/queries/overview";
+import { getTodaySending } from "@/lib/queries/sending-status";
 import { listActivity } from "@/lib/queries/dashboard";
 import { plural } from "@/lib/plan";
 import { PageHeader, StatCard, EmptyState, DateTime } from "@/components/ui";
@@ -14,11 +15,12 @@ export const dynamic = "force-dynamic";
  * Technické statistiky odesílání sem nepatří - jsou v Komunikaci.
  */
 export default async function OverviewPage() {
-  const [stats, week, todo, activity] = await Promise.all([
+  const [stats, week, todo, activity, sending] = await Promise.all([
     getOverviewStats(),
     getWeekSummary(),
     getTodayWork(),
     listActivity({ limit: 8 }),
+    getTodaySending(),
   ]);
 
   // Dovolatelnost a meeting rate počítá reporting service, ne tahle
@@ -44,7 +46,6 @@ export default async function OverviewPage() {
     <>
       <PageHeader
         title="Přehled"
-        description="Co se děje a co dnes potřebuje pozornost."
         actions={
           <Link href="/osloveni" className="btn-go">
             Začít oslovovat
@@ -52,11 +53,41 @@ export default async function OverviewPage() {
         }
       />
 
+      {/* Provozní řádek: co dnes běží a co je rozbité. Historie je níž -
+          denní práci nemá přebíjet. */}
+      <dl className="mb-8 grid grid-cols-2 gap-4 lg:grid-cols-5">
+        <StatCard
+          label="E-mail dnes"
+          value={`${sending.sentToday} / ${sending.dailyLimit}`}
+          hint="napříč aktivními kampaněmi"
+          href="/campaigns"
+        />
+        <StatCard
+          label="Odpovědi k vyřízení"
+          value={stats.new_replies}
+          tone={stats.new_replies > 0 ? "good" : undefined}
+          href="/inbox"
+        />
+        <StatCard
+          label="Follow-up po termínu"
+          value={sending.overdueFollowUps}
+          tone={sending.overdueFollowUps > 0 ? "warn" : undefined}
+          href="/campaigns"
+        />
+        <StatCard label="Čeká na volání" value={stats.waiting} href="/osloveni/fronta" />
+        <StatCard
+          label="Problémy"
+          value={sending.mailboxProblems}
+          hint={sending.mailboxProblems > 0 ? "schránky" : "žádné"}
+          tone={sending.mailboxProblems > 0 ? "danger" : undefined}
+          href="/mailboxes"
+        />
+      </dl>
+
       <dl className="mb-8 grid grid-cols-2 gap-4 lg:grid-cols-5">
         <StatCard label="Připravené firmy" value={stats.companies_ready} hint="mají telefon a nejsou uzavřené" href="/firmy" />
-        <StatCard label="Čeká na oslovení" value={stats.waiting} href="/osloveni/fronta" />
         <StatCard
-          label="Follow-upy dnes"
+          label="Volání dnes"
           value={stats.followups_today}
           tone={stats.followups_today > 0 ? "warn" : undefined}
           href="/osloveni"
@@ -67,12 +98,7 @@ export default async function OverviewPage() {
           tone={stats.meetings > 0 ? "good" : undefined}
           href="/firmy?status=meeting"
         />
-        <StatCard
-          label="Nové odpovědi"
-          value={stats.new_replies}
-          tone={stats.new_replies > 0 ? "good" : undefined}
-          href="/inbox"
-        />
+        <StatCard label="Follow-up splatné" value={sending.dueFollowUps} href="/campaigns" />
       </dl>
 
       {stats.without_next_step > 0 ? (

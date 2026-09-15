@@ -81,7 +81,9 @@ describe("reply detection", () => {
 
     // Simulate mode records no message_id, so set one as a real send would.
     await sql`update email_sends set message_id = '<step1@example.com>' where campaign_id = ${seed.campaignId}`;
-    inbox.messages = [message({ inReplyTo: "<step1@example.com>", from: "someone-else@elsewhere.com" })];
+    // The seeded contact is a@example.com; the reply comes from an alias on
+    // the same domain, which is the same correspondent.
+    inbox.messages = [message({ inReplyTo: "<step1@example.com>", from: "a.alias@example.com" })];
 
     const { pollReplies } = await import("@/lib/engine/replies");
     const summary = await pollReplies(true);
@@ -91,6 +93,46 @@ describe("reply detection", () => {
     expect(cc.status).toBe("replied");
     expect(cc.next_send_at).toBeNull();
     expect(cc.replied_at).not.toBeNull();
+  });
+
+  /**
+   * ZMĚNA CHOVÁNÍ (0015).
+   *
+   * Threading headers identifikují VLÁKNO, ne ČLOVĚKA. Přeposlaný e-mail
+   * nese naše Message-ID dál, takže odpověď kolegy z jiné firmy se na
+   * vlákno spáruje - ale prospekt sám nic nenapsal a jeho sekvence se
+   * kvůli cizí zprávě ukončit nesmí.
+   *
+   * Zastavit ji taky ne. `needs_review` je příznak příchozí zprávy, ne
+   * pauza kampaně: kdyby uměl zastavit odesílání, stačilo by komukoli
+   * zvenčí napsat do vlákna a naše oslovení by stálo.
+   */
+  it("thread-matches a reply from a stranger without touching the prospect's schedule", async () => {
+    const seed = await seedCampaign();
+    await enableImap(seed.mailboxId);
+    const { startCampaign } = await import("@/lib/queries/campaigns");
+    await startCampaign(seed.campaignId);
+    await sendStepOne(seed.campaignId);
+    await sql`update email_sends set message_id = '<step1@example.com>' where campaign_id = ${seed.campaignId}`;
+
+    const [before] = await sql<{ next_send_at: Date | null }[]>`
+      select next_send_at from campaign_contacts where campaign_id = ${seed.campaignId}`;
+
+    inbox.messages = [message({ inReplyTo: "<step1@example.com>", from: "someone-else@elsewhere.com" })];
+    const { pollReplies } = await import("@/lib/engine/replies");
+    await pollReplies(true);
+
+    const [cc] = await sql<{ status: string; next_send_at: Date | null }[]>`
+      select status, next_send_at from campaign_contacts where campaign_id = ${seed.campaignId}`;
+    expect(cc.status).not.toBe("replied");
+    expect(cc.next_send_at?.getTime()).toBe(before.next_send_at?.getTime());
+
+    // Neztratila se: je k ruční kontrole.
+    const [reply] = await sql<{ needs_review: boolean; campaign_contact_id: string | null }[]>`
+      select needs_review, campaign_contact_id from replies
+    `;
+    expect(reply.needs_review).toBe(true);
+    expect(reply.campaign_contact_id).not.toBeNull();
   });
 
   it("matches by sender address when threading headers are missing", async () => {

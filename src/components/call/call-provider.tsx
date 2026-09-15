@@ -188,7 +188,14 @@ export function CallProvider({ children }: { children: ReactNode }) {
     if (!data.configured) {
       setConfigured(false);
       setMissingEnv(data.missing);
-      setError("Volání z prohlížeče není nastavené.");
+      // Vyjmenovat chybějící proměnné JMÉNEM je jediné, co z toho jde
+      // ukázat - hodnoty server nikdy neposílá a nikdy posílat nebude.
+      // Bez jmen by admin viděl jen "nefunguje to" a neměl co opravit.
+      setError(
+        data.missing.length > 0
+          ? `Volání z prohlížeče není na serveru nastavené: chybí ${data.missing.join(", ")}.`
+          : "Volání z prohlížeče není na serveru nastavené.",
+      );
       return null;
     }
     setConfigured(true);
@@ -233,7 +240,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
       setErrorCode(null);
       setMuted(false);
       setReconnecting(false);
-      setState("permission");
+      setState("connecting");
 
       const fail = (message?: string) => {
         if (message) setError(message);
@@ -242,12 +249,19 @@ export function CallProvider({ children }: { children: ReactNode }) {
         starting.current = false;
       };
 
+      // Telefonie se ověřuje DŘÍV než mikrofon. Kdyby to bylo naopak,
+      // zeptal by se prohlížeč na mikrofon i na nasazení, kde Twilio vůbec
+      // není nastavené - člověk by povolil mikrofon a teprve pak se
+      // dozvěděl, že volat stejně nejde.
+      setState("connecting");
+      const device = await ensureDevice();
+      if (!device) return fail();
+
+      setState("permission");
       const microphone = await requestMicrophone();
       if (!microphone.ok) return fail(microphone.error);
 
       setState("connecting");
-      const device = await ensureDevice();
-      if (!device) return fail();
 
       // Server si číslo dohledá sám; klient posílá jen identifikátor.
       const created = await fetch("/api/calling/calls", {

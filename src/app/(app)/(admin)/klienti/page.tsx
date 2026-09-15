@@ -30,7 +30,7 @@ export default async function ClientsPage() {
     <>
       <PageHeader
         title="Klienti"
-        description="Čí práce je která kampaň. Podle toho se callerům přiděluje fronta a dělí reporting."
+        description="Čí práce je která kampaň."
       />
       <NastaveniTabs active="/klienti" />
 

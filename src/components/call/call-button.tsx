@@ -5,10 +5,15 @@ import { useCalling } from "./call-provider";
 /**
  * Tlačítko Zavolat.
  *
- * Když je nastavené volání z prohlížeče, zvedne hovor přes Twilio. Když
- * není, zůstane z něj poctivý odkaz tel: - stejné chování, jaké aplikace
- * měla předtím. Rozhodně z něj nedělá mrtvé tlačítko: člověk potřebuje
- * zavolat i ve chvíli, kdy telefonie ještě není zapnutá.
+ * Vždycky je to tlačítko, nikdy odkaz `tel:`. Kliknutí zvedne hovor přes
+ * Twilio a otevře cockpit - i když telefonie zrovna není nastavená. V tom
+ * případě cockpit rovnou ukáže, co na serveru chybí.
+ *
+ * Odkaz `tel:` tu dřív byl jako "poctivá náhrada", ale ve skutečnosti to
+ * byla tichá díra: hovor se předal systémovému telefonu, aplikace o něm
+ * nevěděla, nevznikl pokus, nešel zapsat výsledek a nikdo se nedozvěděl,
+ * že telefonie není zapnutá. Lepší je jedna cesta, která umí i selhat
+ * nahlas.
  */
 export function CallButton({
   phone,
@@ -46,24 +51,27 @@ export function CallButton({
     );
   }
 
-  if (!browserCalling) {
-    return (
-      <a href={`tel:${phone.replace(/\s+/g, "")}`} className={className}>
-        {label}
-      </a>
-    );
-  }
-
-  const busy = state === "permission" || state === "connecting" || state === "ringing" || state === "active";
+  const busy =
+    state === "permission" || state === "connecting" || state === "ringing" || state === "active";
 
   return (
     <button
       type="button"
       disabled={busy}
+      aria-busy={busy}
+      data-call-button="twilio"
+      title={
+        browserCalling
+          ? undefined
+          : "Volání přes Twilio zatím není na serveru nastavené. Po kliknutí se dozvíte, co chybí."
+      }
       onClick={() => start(campaignContactId ? { campaignContactId } : { contactId })}
       className={`${className} ${busy ? "cursor-not-allowed opacity-60" : ""}`}
     >
-      {busy ? "Probíhá hovor…" : label}
+      {/* Vlastní popisek (telefonní číslo v tabulce) zůstává i během hovoru -
+          jinak by se řádek přejmenoval na "Probíhá hovor…" a nešlo by
+          poznat, komu patří. Stav hovoru je vidět v liště dole. */}
+      {busy && children === undefined ? "Probíhá hovor…" : label}
     </button>
   );
 }

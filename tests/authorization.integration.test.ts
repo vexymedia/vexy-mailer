@@ -362,3 +362,121 @@ describe("reporting po zavedení účtů", () => {
     expect(byCaller.get(petr.callerId)).toMatchObject({ attempts: 1, connected: 1 });
   });
 });
+
+/**
+ * Klientská vyloučení firem.
+ *
+ * Vyloučit firmu je rozhodnutí o obchodním vztahu, ne výsledek hovoru.
+ * Caller na to nemá, a nejde jen o schované tlačítko: testuje se přímo
+ * server action, tedy stejná cesta, po které by šel ruční POST mimo UI.
+ */
+describe("klientská vyloučení a oprávnění", () => {
+  async function company() {
+    const [row] = await sql<{ id: string }[]>`
+      insert into companies (name, status, ico) values ('Acme s.r.o.', 'ready', '25596641')
+      returning id`;
+    const [client] = await sql<{ id: string }[]>`
+      insert into clients (name) values ('ASN Plus') returning id`;
+    return { companyId: row.id, clientId: client.id };
+  }
+
+  function form(fields: Record<string, string>) {
+    const data = new FormData();
+    for (const [key, value] of Object.entries(fields)) data.set(key, value);
+    return data;
+  }
+
+  it("caller firmu vyloučit nemůže - ani přímým voláním akce", async () => {
+    const people = await seedPeople();
+    const { companyId, clientId } = await company();
+    signIn(people.jan.userId);
+
+    expect(
+      await redirectTarget(() =>
+        actions.excludeCompanyAction({}, form({ company_id: companyId, client_id: clientId })),
+      ),
+    ).toBe("/nemate-pristup");
+
+    const [row] = await sql<{ count: number }[]>`
+      select count(*)::int as count from client_company_exclusions`;
+    expect(row.count).toBe(0);
+  });
+
+  it("nepřihlášený nedostane ani chybovou hlášku, jen login", async () => {
+    const { companyId, clientId } = await company();
+    sessionToken = null;
+    expect(
+      await redirectTarget(() =>
+        actions.excludeCompanyAction({}, form({ company_id: companyId, client_id: clientId })),
+      ),
+    ).toBe("/login");
+  });
+
+  it("caller nemůže vyloučení ani zrušit", async () => {
+    const people = await seedPeople();
+    const { companyId, clientId } = await company();
+    const suppression = await import("@/lib/queries/suppression");
+    await suppression.excludeCompanyForClient({ clientId, companyId });
+    const [exclusion] = await suppression.listClientExclusions({ clientId });
+
+    signIn(people.jan.userId);
+    expect(
+      await redirectTarget(() =>
+        actions.removeCompanyExclusionAction({}, form({ exclusion_id: exclusion.id })),
+      ),
+    ).toBe("/nemate-pristup");
+    expect(await suppression.listClientExclusions({ clientId })).toHaveLength(1);
+  });
+
+  it("caller nemůže importovat vylučovací seznam", async () => {
+    const people = await seedPeople();
+    await company();
+    signIn(people.jan.userId);
+    const data = new FormData();
+    data.set("client_id", "x");
+    expect(
+      await redirectTarget(() => actions.previewExclusionImportAction({}, data)),
+    ).toBe("/nemate-pristup");
+  });
+
+  it("administrátor firmu vyloučí a podepíše se pod to", async () => {
+    const people = await seedPeople();
+    const { companyId, clientId } = await company();
+    signIn(people.adminId);
+
+    const result = await actions.excludeCompanyAction(
+      {}, form({ company_id: companyId, client_id: clientId, reason: "Už je klientem." }),
+    );
+    expect(result.success).toBeTruthy();
+
+    const suppression = await import("@/lib/queries/suppression");
+    const [row] = await suppression.listClientExclusions({ clientId });
+    expect(row.company_name).toBe("Acme s.r.o.");
+    expect(row.ico).toBe("25596641");
+    expect(row.created_by_name).toBe("Vojta");
+  });
+
+  it("dvakrát totéž vyloučení se neuloží dvakrát a řekne se proč", async () => {
+    const people = await seedPeople();
+    const { companyId, clientId } = await company();
+    signIn(people.adminId);
+
+    await actions.excludeCompanyAction({}, form({ company_id: companyId, client_id: clientId }));
+    const second = await actions.excludeCompanyAction(
+      {}, form({ company_id: companyId, client_id: clientId }),
+    );
+    expect(second.error).toContain("už vyloučená");
+
+    const [row] = await sql<{ count: number }[]>`
+      select count(*)::int as count from client_company_exclusions`;
+    expect(row.count).toBe(1);
+  });
+
+  it("vyloučení bez vybraného klienta neprojde", async () => {
+    const people = await seedPeople();
+    const { companyId } = await company();
+    signIn(people.adminId);
+    const result = await actions.excludeCompanyAction({}, form({ company_id: companyId }));
+    expect(result.error).toBeTruthy();
+  });
+});

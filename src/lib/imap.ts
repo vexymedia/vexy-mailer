@@ -18,7 +18,30 @@ export interface InboxMessage {
   bodyText: string | null;
   /** Kept for completeness; deliberately never rendered without sanitisation. */
   bodyHtml: string | null;
+  /**
+   * Vybrané hlavičky, malými písmeny v klíči. Klasifikace příchozí pošty
+   * na nich stojí: Auto-Submitted a Precedence řeknou o automatické
+   * odpovědi spolehlivěji než jakýkoli odhad z textu.
+   */
+  headers?: Record<string, string>;
+  /** Content-Type. DSN chodí jako multipart/report. */
+  contentType?: string | null;
 }
+
+/**
+ * Hlavičky, které si bereme. Schválně výčet, ne všechno: uložit celou
+ * hlavičkovou sadu každé zprávy je jen data navíc, která nikdo nečte.
+ */
+const KEPT_HEADERS = [
+  "auto-submitted",
+  "precedence",
+  "x-autoreply",
+  "x-autorespond",
+  "x-auto-response-suppress",
+  "x-failed-recipients",
+  "return-path",
+  "content-type",
+];
 
 /** Bodies are capped so one enormous message cannot blow up a worker tick. */
 const MAX_BODY_BYTES = 256 * 1024;
@@ -239,6 +262,8 @@ export async function fetchNewMessages(
         let bodyText: string | null = null;
         let bodyHtml: string | null = null;
         let references: string | null = null;
+        const headers: Record<string, string> = {};
+        let contentType: string | null = null;
         if (message.source) {
           try {
             const parsed = await simpleParser(message.source);
@@ -247,6 +272,14 @@ export async function fetchNewMessages(
             references = Array.isArray(parsed.references)
               ? parsed.references.join(" ")
               : (parsed.references ?? null);
+            for (const name of KEPT_HEADERS) {
+              const value = parsed.headers.get(name);
+              if (typeof value === "string") headers[name] = value;
+              else if (value && typeof value === "object" && "value" in value) {
+                headers[name] = String((value as { value: unknown }).value);
+              }
+            }
+            contentType = headers["content-type"] ?? null;
           } catch (error) {
             bodyText = null;
             console.error("[imap] could not parse message body", message.uid, error);
@@ -264,6 +297,8 @@ export async function fetchNewMessages(
           receivedAt: toDate(message.internalDate) ?? toDate(envelope?.date) ?? new Date(),
           bodyText,
           bodyHtml,
+          headers,
+          contentType,
         });
       }
     }

@@ -1,19 +1,85 @@
 "use client";
 
 import Link from "next/link";
+import { useState } from "react";
 import { saveCampaignAction } from "@/lib/actions";
 import { ActionForm, SubmitButton } from "./action-form";
 import { WEEKDAY_LABELS } from "@/lib/schedule";
+import { poolTargets } from "@/lib/engine/pools";
 
 export interface CampaignFormValues {
   id?: string;
   name: string;
   mailbox_ids: string[];
   daily_limit: number;
+  /** Procento denního limitu pro nové kontakty. Follow-upy dostanou zbytek. */
+  new_ratio: number;
   send_days: number[];
   send_start: string;
   send_end: string;
   timezone: string;
+}
+
+/**
+ * Denní strop a poměr nových ku follow-upům, v jedné komponentě.
+ *
+ * Patří k sobě, protože se procento samo o sobě nedá přečíst: "70 %"
+ * nikdo v hlavě nepřepočítá na e-maily. Poměr je JEDNO číslo a druhá
+ * hodnota se dopočítává - dvě nezávislá procenta by pustila 70 + 40 a
+ * tvrdý strop by pak platil jen náhodou.
+ */
+function SendingLimits({ dailyLimit, newRatio }: { dailyLimit: number; newRatio: number }) {
+  const [limit, setLimit] = useState(dailyLimit);
+  const [ratio, setRatio] = useState(newRatio);
+  const targets = poolTargets(limit, ratio);
+
+  return (
+    <>
+      <div>
+        <label className="label" htmlFor="daily_limit">Denní limit odeslání</label>
+        <input
+          id="daily_limit"
+          name="daily_limit"
+          type="number"
+          min={1}
+          max={2000}
+          value={limit}
+          onChange={(event) => setLimit(Number(event.target.value))}
+          required
+          className="input"
+        />
+        <p className="hint">
+          Tvrdý strop pro celou kampaň — nové oslovení i follow-upy dohromady. Počet schránek
+          ho nenásobí; každá schránka má navíc vlastní globální limit a platí nižší z obou.
+        </p>
+      </div>
+
+      <div>
+        <label className="label" htmlFor="new_ratio">Podíl nových kontaktů</label>
+        <div className="flex items-center gap-4">
+          <input
+            id="new_ratio"
+            name="new_ratio"
+            type="range"
+            min={0}
+            max={100}
+            step={5}
+            value={ratio}
+            onChange={(event) => setRatio(Number(event.target.value))}
+            className="h-2 max-w-xs flex-1 cursor-pointer accent-zinc-900"
+          />
+          <span className="w-28 shrink-0 text-sm tabular-nums text-zinc-900">
+            {ratio} % / {100 - ratio} %
+          </span>
+        </div>
+        <p className="hint">
+          Cílové rozdělení: <strong>~{targets.new} nových</strong> a{" "}
+          <strong>~{targets.follow_up} follow-upů</strong> denně. Není to pevná přepážka — když
+          jedna fronta kapacitu nevyužije, zbytek dostane druhá.
+        </p>
+      </div>
+    </>
+  );
 }
 
 const COMMON_TIMEZONES = [
@@ -99,23 +165,7 @@ export function CampaignForm({
           ) : null}
         </fieldset>
 
-        <div>
-          <label className="label" htmlFor="daily_limit">Denní limit odeslání</label>
-          <input
-            id="daily_limit"
-            name="daily_limit"
-            type="number"
-            min={1}
-            max={2000}
-            defaultValue={values.daily_limit}
-            required
-            className="input"
-          />
-          <p className="hint">
-            Horní hranice jen pro tuto kampaň. Každá schránka má navíc vlastní globální limit
-            napříč kampaněmi a vždy platí ten nižší z obou.
-          </p>
-        </div>
+        <SendingLimits dailyLimit={values.daily_limit} newRatio={values.new_ratio} />
 
         <fieldset>
           <legend className="label">Dny odesílání</legend>

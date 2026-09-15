@@ -344,12 +344,12 @@ describe("classification", () => {
     const [cv] = await sql<{ id: string }[]>`select id from conversations`;
     await setClassification(cv.id, "positive");
 
-    expect((await listConversations({ filter: "positive" }))).toHaveLength(1);
-    expect((await listConversations({ filter: "unread" }))).toHaveLength(1);
+    expect((await listConversations({ view: "positive" }))).toHaveLength(1);
+    expect((await listConversations({ view: "unread" }))).toHaveLength(1);
     expect((await getInboxCounts()).positive).toBe(1);
 
     const { markConversationRead } = await import("@/lib/queries/inbox");
     await markConversationRead(cv.id);
-    expect((await listConversations({ filter: "unread" }))).toHaveLength(0);
+    expect((await listConversations({ view: "unread" }))).toHaveLength(0);
   });
 });
