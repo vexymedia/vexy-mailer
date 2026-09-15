@@ -96,14 +96,19 @@ describe("reply detection", () => {
   });
 
   /**
-   * ZMĚNA CHOVÁNÍ (0015).
+   * ZMĚNA CHOVÁNÍ (0015, doplněno 0016).
    *
    * Threading headers identifikují VLÁKNO, ne ČLOVĚKA. Přeposlaný e-mail
    * nese naše Message-ID dál, takže odpověď kolegy z jiné firmy se na
    * vlákno spáruje - ale prospekt sám nic nenapsal a jeho sekvence se
-   * kvůli cizí zprávě zastavit nesmí.
+   * kvůli cizí zprávě ukončit nesmí.
+   *
+   * Běžet dál ale taky nesmí: dokud se neví, jestli za cizí adresou
+   * nestojí tentýž člověk, byl by další krok cold e-mail někomu, kdo
+   * nám právě odpověděl. Termín se proto uschová a sekvence čeká na
+   * rozhodnutí člověka.
    */
-  it("thread-matches a reply from a stranger without stopping the prospect's sequence", async () => {
+  it("thread-matches a reply from a stranger and pauses the prospect's sequence", async () => {
     const seed = await seedCampaign();
     await enableImap(seed.mailboxId);
     const { startCampaign } = await import("@/lib/queries/campaigns");
@@ -115,9 +120,12 @@ describe("reply detection", () => {
     const { pollReplies } = await import("@/lib/engine/replies");
     await pollReplies(true);
 
-    const [cc] = await sql`select status, next_send_at from campaign_contacts where campaign_id = ${seed.campaignId}`;
+    const [cc] = await sql<{ status: string; next_send_at: Date | null; paused_next_send_at: Date | null }[]>`
+      select status, next_send_at, paused_next_send_at from campaign_contacts
+       where campaign_id = ${seed.campaignId}`;
     expect(cc.status).not.toBe("replied");
-    expect(cc.next_send_at).not.toBeNull();
+    expect(cc.next_send_at).toBeNull();
+    expect(cc.paused_next_send_at).not.toBeNull();
 
     // Neztratila se: je k ruční kontrole.
     const [reply] = await sql<{ needs_review: boolean; campaign_contact_id: string | null }[]>`

@@ -1115,10 +1115,23 @@ export async function getContactTimeline(campaignContactId: string): Promise<Tim
 
     union all
 
+    -- Stav se ukazuje česky, ne syrovým enumem. Nejde o kosmetiku:
+    -- "unknown" znamená, že SMTP zprávu možná přijalo a my to nevíme -
+    -- a právě tenhle případ musí administrátor v historii kontaktu
+    -- poznat, protože se nikdy neopakuje a čeká na ruční rozhodnutí.
     select es.id::text, 'email', coalesce(es.sent_at, es.claimed_at),
            es.subject,
-           concat_ws(' · ', 'krok ' || es.step_number, es.status, es.intended_email),
-           null
+           concat_ws(' · ', 'krok ' || es.step_number,
+                     case es.status
+                       when 'sent' then 'odesláno'
+                       when 'sending' then 'odesílá se'
+                       when 'failed' then 'chyba'
+                       when 'skipped' then 'neodesláno'
+                       when 'unknown' then 'neznámý výsledek — k ruční kontrole'
+                       else es.status
+                     end,
+                     es.intended_email),
+           nullif(btrim(coalesce(es.error, '')), '')
       from email_sends es
      where es.campaign_contact_id = ${campaignContactId}
 

@@ -1,11 +1,16 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { getConversation, listMessages, markConversationRead } from "@/lib/queries/inbox";
+import { getConversation, getPendingReview, listMessages, markConversationRead } from "@/lib/queries/inbox";
 import { requireUser } from "@/lib/auth";
 import { callerMaySeeConversation } from "@/lib/queries/clients";
 import { PageHeader, DateTime, StatusBadge } from "@/components/ui";
 import { ClassificationBadge } from "@/components/inbox-bits";
-import { ClassificationPicker, DeleteConversationButton, ReplyComposer } from "@/components/conversation-actions";
+import {
+  ClassificationPicker,
+  DeleteConversationButton,
+  ReplyComposer,
+  ReviewDecision,
+} from "@/components/conversation-actions";
 import { CallButton } from "@/components/call/call-button";
 import { isTwilioConfigured } from "@/lib/telephony/twilio";
 import { callStatusLabel } from "@/lib/calling";
@@ -46,6 +51,10 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
   // Odeslané vlákno a vlákno s odpovědí se chovají jinak vůči kadenci,
   // takže si nemůžou nést stejnou poznámku.
   const hasInbound = messages.some((message) => message.direction === "inbound");
+  // Čeká tu odpověď od jiné adresy na posouzení? Dokud čeká, stojí
+  // sekvence kontaktu - takže to patří nad vlákno, ne do postranního
+  // panelu, kde by se to dalo přehlédnout.
+  const pendingReview = canManage ? await getPendingReview(id) : null;
 
   return (
     <>
@@ -81,6 +90,18 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
           </>
         }
       />
+
+      {pendingReview ? (
+        <div className="mb-6">
+          <ReviewDecision
+            conversationId={id}
+            replyId={pendingReview.reply_id}
+            fromEmail={pendingReview.from_email}
+            contactEmail={pendingReview.contact_email}
+            pausedUntil={pendingReview.paused_next_send_at}
+          />
+        </div>
+      ) : null}
 
       <div className="grid gap-6 lg:grid-cols-[1fr_260px]">
         <div className="space-y-4">
@@ -153,11 +174,20 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
                   <dt className="text-zinc-500">Telefon</dt>
                   <dd className="flex flex-wrap items-center gap-2">
                     <span className="tabular-nums text-zinc-900">{conversation.phone}</span>
+                    {/* Vyloučení pro klienta kampaně sem patří stejně jako na
+                        detail firmy: server takový hovor odmítne, takže ho
+                        tlačítko nesmí nabízet. Guard na serveru tím nemizí. */}
                     <CallButton
                       phone={conversation.phone}
                       contactId={conversation.contact_id}
                       campaignContactId={conversation.campaign_contact_id ?? undefined}
                       browserCalling={browserCalling}
+                      disabled={conversation.client_excluded}
+                      disabledReason={
+                        conversation.excluded_for_client
+                          ? `Firma je vyloučená pro klienta ${conversation.excluded_for_client}.`
+                          : undefined
+                      }
                       className="btn-go !px-2 !py-1 text-xs"
                     >
                       Zavolat
@@ -197,7 +227,14 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
               ) : null}
             </dl>
           </div>
-          {canManage && hasInbound ? (
+          {canManage && pendingReview ? (
+            // Příchozí zpráva tu je, ale nepsal ji prospekt - tvrdit, že
+            // odpověděl, by si odporovalo s výzvou nad vláknem.
+            <p className="px-1 text-xs text-zinc-500">
+              Zpráva přišla z jiné adresy než prospektovy, takže sekvence zatím jen stojí. Co s ní
+              bude dál, rozhodne tlačítko nahoře.
+            </p>
+          ) : canManage && hasInbound ? (
             <p className="px-1 text-xs text-zinc-500">
               Tento prospekt odpověděl, takže automatické follow-upy se zastavily. Odpověď odsud ho
               do sekvence nevrátí.

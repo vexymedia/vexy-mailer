@@ -4,6 +4,7 @@ import {
   INBOX_VIEWS,
   getInboxCounts,
   listConversations,
+  listConversationsNeedingReview,
   type InboxView,
 } from "@/lib/queries/inbox";
 import { PageHeader, EmptyState, DateTime } from "@/components/ui";
@@ -33,7 +34,7 @@ export default async function InboxPage({
   const params = await searchParams;
   const view = (INBOX_VIEWS.find((v) => v.key === params.view)?.key ?? "todo") as InboxView;
 
-  const [conversations, counts, campaigns, mailboxes] = await Promise.all([
+  const [conversations, counts, campaigns, mailboxes, needsReview] = await Promise.all([
     listConversations({
       view,
       campaignId: params.campaign || null,
@@ -43,6 +44,7 @@ export default async function InboxPage({
     getInboxCounts(),
     sql<{ id: string; name: string }[]>`select id, name from campaigns order by name`,
     sql<{ id: string; from_email: string }[]>`select id, from_email from mailboxes order by from_email`,
+    listConversationsNeedingReview(),
   ]);
 
   const query = (overrides: Record<string, string | undefined>) => {
@@ -127,6 +129,13 @@ export default async function InboxPage({
                     {c.company ? <span className="text-sm text-zinc-600">· {c.company}</span> : null}
                     {c.unread_count > 0 ? (
                       <span className="badge bg-blue-50 text-blue-700 ring-blue-200">nové</span>
+                    ) : null}
+                    {/* Odpověď od jiné adresy drží sekvenci kontaktu - to
+                        musí být vidět ve výpisu, ne až po otevření. */}
+                    {needsReview.has(c.id) ? (
+                      <span className="badge bg-amber-50 text-amber-800 ring-amber-300">
+                        jiný odesílatel — posoudit
+                      </span>
                     ) : null}
                     {/* V "K vyřízení" je nezařazeno každý řádek - odznak by
                         jen opakoval název záložky. */}

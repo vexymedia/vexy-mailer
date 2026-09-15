@@ -62,9 +62,14 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
   // ptala na `callable`, chyběla by u firmy mimo kampaň, zatímco tlačítko
   // u kontaktu o řádek níž by bylo aktivní.
   const queued = contacts.find((c) => c.callable && c.phone);
-  const dialable = queued ?? contacts.find((c) => c.phone && !c.do_not_call);
+  // Hlavičkové CTA nesmí vybrat kontakt, jehož klient firmu vyloučil:
+  // server by takový hovor odmítl a tlačítko by lhalo.
+  const dialable = queued ?? contacts.find((c) => c.phone && !c.do_not_call && !c.client_excluded);
+  // Naplánovat další krok jde jen tomu, komu se vůbec smí ozvat. Kontakt
+  // v kampani vyloučeného klienta by dostal termín, na který by ho fronta
+  // stejně nepustila.
   const openContacts = contacts
-    .filter((c) => c.campaign_contact_id && !c.do_not_call && c.call_status &&
+    .filter((c) => c.campaign_contact_id && !c.do_not_call && !c.client_excluded && c.call_status &&
                    !["meeting_booked", "won", "lost", "do_not_call", "max_attempts"].includes(c.call_status))
     .map((c) => ({
       id: c.campaign_contact_id as string,
@@ -108,6 +113,37 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
           </>
         }
       />
+
+      {/* Vyloučení nahoru, hned pod název firmy.
+          Je to stav, ve kterém se část akcí na téhle stránce chová jinak -
+          kdyby byl schovaný v pravém panelu, člověk by nejdřív klikl na
+          Zavolat a teprve pak se dozvěděl, proč to nejde. Schválně to
+          NEVYPADÁ jako globální blokace: firma je dál k oslovení pro
+          ostatní klienty a text to musí říct. */}
+      {exclusions.length > 0 ? (
+        <div
+          className="mb-6 rounded-md border border-amber-300 bg-amber-50 px-4 py-3"
+          role="status"
+        >
+          <p className="text-sm font-medium text-amber-900">
+            {exclusions.length === 1
+              ? `Nekontaktovat pro ${exclusions[0].client_name}`
+              : `Nekontaktovat pro ${exclusions.length} klienty: ${exclusions.map((e) => e.client_name).join(", ")}`}
+          </p>
+          <ul className="mt-1 space-y-0.5">
+            {exclusions.map((exclusion) => (
+              <li key={exclusion.id} className="text-xs text-amber-900">
+                <span className="font-medium">{exclusion.client_name}</span>
+                {" — "}
+                {exclusion.reason ?? "bez uvedení důvodu"}
+              </li>
+            ))}
+          </ul>
+          <p className="mt-1.5 text-xs text-amber-800/80">
+            Netýká se ostatních klientů — pro ně zůstává firma normálně k oslovení.
+          </p>
+        </div>
+      ) : null}
 
       {/* Proč ji řešíme a co je dál - to nejdůležitější hned nahoře. */}
       <div className="mb-6 grid gap-4 sm:grid-cols-3">
@@ -182,6 +218,14 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
                   const name =
                     [contact.first_name, contact.last_name].filter(Boolean).join(" ") || contact.email;
                   const blocked = contact.do_not_call || !contact.phone;
+                  // Vyloučení se vyhodnocuje na dvojici klient+firma, takže
+                  // je vždycky vlastností KONKRÉTNÍHO kontaktu: člověk
+                  // v kampani VEXY je vyloučený, kolega ve vedlejší kampani
+                  // ASN Plus ne. Proto se počítá tady, ne pro celou firmu.
+                  const excludedFor = contact.client_excluded ? contact.client_name : null;
+                  const excludedReason = excludedFor
+                    ? `Firma je vyloučená pro klienta ${excludedFor}.`
+                    : null;
                   return (
                     <li key={contact.id} className="px-5 py-4">
                       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -201,18 +245,22 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
                             contactId={contact.id}
                             campaignContactId={contact.campaign_contact_id ?? undefined}
                             browserCalling={browserCalling}
-                            disabled={contact.do_not_call || !contact.phone}
+                            disabled={contact.do_not_call || !contact.phone || Boolean(excludedFor)}
                             disabledReason={
-                              contact.do_not_call
+                              excludedReason ??
+                              (contact.do_not_call
                                 ? "Tento člověk je na seznamu „nevolat“."
-                                : "Kontakt nemá telefonní číslo."
+                                : "Kontakt nemá telefonní číslo.")
                             }
                             className="btn-go !py-1.5 text-sm"
                           >
                             Zavolat
                           </CallButton>
-                          {contact.suppressed ? (
-                            <span className="btn !py-1.5 cursor-not-allowed border border-zinc-200 bg-zinc-100 text-sm text-zinc-400">
+                          {contact.suppressed || excludedFor ? (
+                            <span
+                              title={excludedReason ?? "Adresa je na seznamu Nekontaktovat."}
+                              className="btn !py-1.5 cursor-not-allowed border border-zinc-200 bg-zinc-100 text-sm text-zinc-400"
+                            >
                               E-mail
                             </span>
                           ) : (
@@ -269,6 +317,11 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
                         {contact.do_not_call ? (
                           <span className="badge bg-orange-50 text-orange-700 ring-orange-200">nevolat</span>
                         ) : null}
+                        {excludedFor ? (
+                          <span className="badge bg-amber-50 text-amber-800 ring-amber-300">
+                            nekontaktovat pro {excludedFor}
+                          </span>
+                        ) : null}
                         {contact.campaign_name ? (
                           <span className="text-xs text-zinc-400">{contact.campaign_name}</span>
                         ) : null}
@@ -277,6 +330,13 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
                       {blocked && contact.do_not_call ? (
                         <p className="mt-2 rounded-md bg-orange-50 px-3 py-1.5 text-xs text-orange-800">
                           Tento člověk je na seznamu „nevolat“. Volat mu nelze a nedostane se do fronty.
+                        </p>
+                      ) : null}
+                      {excludedFor ? (
+                        <p className="mt-2 rounded-md bg-amber-50 px-3 py-1.5 text-xs text-amber-900">
+                          Firma je vyloučená pro klienta <strong>{excludedFor}</strong>, do jehož
+                          kampaně tenhle kontakt patří. Volání i e-maily jsou zastavené — pro jiné
+                          klienty ho ale oslovit jde.
                         </p>
                       ) : null}
 

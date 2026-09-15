@@ -282,11 +282,23 @@ export async function getConversation(id: string): Promise<ConversationDetail | 
            cc.next_call_at,
            cp.name as campaign_name,
            mb.from_email as mailbox_email, mb.from_name as mailbox_from_name, mb.enabled as mailbox_enabled,
-           cc.status as contact_status
+           cc.status as contact_status,
+           -- Vyloučení je vlastnost dvojice klient+firma, takže ho určuje
+           -- kampaň tohoto vlákna, ne kontakt sám. Stejné pravidlo jako
+           -- na detailu firmy; server ho vyhodnocuje znovu při startCall.
+           (cl.id is not null and exists (
+              select 1 from client_company_exclusions x
+               where x.company_id = c.company_id and x.client_id = cl.id
+            )) as client_excluded,
+           case when cl.id is not null and exists (
+              select 1 from client_company_exclusions x
+               where x.company_id = c.company_id and x.client_id = cl.id
+            ) then cl.name end as excluded_for_client
       from conversations cv
       join contacts c on c.id = cv.contact_id
       join mailboxes mb on mb.id = cv.mailbox_id
       left join campaigns cp on cp.id = cv.campaign_id
+      left join clients cl on cl.id = cp.client_id
       left join campaign_contacts cc on cc.id = cv.campaign_contact_id
      where cv.id = ${id}
   `;
@@ -513,4 +525,128 @@ export async function sendManualReply(
   });
 
   return { ok: true };
+}
+
+// ------------------------------------------- odpověď od jiné adresy
+
+/**
+ * Nevyřízená odpověď, která do vlákna patří podle hlaviček, ale nepřišla
+ * od prospekta.
+ *
+ * Vzniká přeposláním nebo odpovědí z Gmailu či jiné firemní domény.
+ * Dokud ji někdo neposoudí, stojí sekvence kontaktu - proto to musí být
+ * v konverzaci vidět a proto k tomu patří rozhodnutí, ne jen štítek.
+ */
+export interface PendingReview {
+  reply_id: string;
+  from_email: string;
+  subject: string | null;
+  received_at: Date;
+  campaign_contact_id: string;
+  contact_email: string;
+  /** Termín dalšího kroku, který čeká na rozhodnutí. Null = žádný nebyl. */
+  paused_next_send_at: Date | null;
+}
+
+export async function getPendingReview(conversationId: string): Promise<PendingReview | null> {
+  const [row] = await sql<PendingReview[]>`
+    select r.id as reply_id, r.from_email, r.subject, r.received_at,
+           r.campaign_contact_id, c.email as contact_email,
+           cc.paused_next_send_at
+      from conversations cv
+      join replies r on r.contact_id = cv.contact_id and r.mailbox_id = cv.mailbox_id
+      join campaign_contacts cc on cc.id = r.campaign_contact_id
+      join contacts c on c.id = cc.contact_id
+     where cv.id = ${conversationId}
+       and r.needs_review
+     order by r.received_at desc
+     limit 1
+  `;
+  return row ?? null;
+}
+
+/** Konverzace, které čekají na posouzení. Kvůli odznaku ve výpisu. */
+export async function listConversationsNeedingReview(): Promise<Set<string>> {
+  const rows = await sql<{ id: string }[]>`
+    select distinct cv.id
+      from conversations cv
+      join replies r on r.contact_id = cv.contact_id and r.mailbox_id = cv.mailbox_id
+     where r.needs_review
+  `;
+  return new Set(rows.map((r) => r.id));
+}
+
+export type ReviewVerdict = "relevant" | "unrelated";
+
+/**
+ * Uzavře posouzení odpovědi od jiné adresy.
+ *
+ *   relevant  → byl to prospekt z jiné adresy. Kontakt je "replied",
+ *               sekvence končí, uschovaný termín se zahodí.
+ *   unrelated → zpráva s prospektem nesouvisí. Sekvence se vrátí přesně
+ *               na termín, který měla PŘED pozastavením - ne "hned teď",
+ *               aby se po dlouhé pauze nevyrojilo všechno naráz.
+ */
+export async function resolveReview(
+  replyId: string,
+  verdict: ReviewVerdict,
+): Promise<{ ok: boolean; contactEmail?: string }> {
+  const { logActivity } = await import("../activity");
+
+  const [reply] = await sql<
+    { campaign_contact_id: string | null; from_email: string; contact_id: string | null }[]
+  >`
+    select campaign_contact_id, from_email, contact_id from replies
+     where id = ${replyId} and needs_review
+  `;
+  if (!reply || !reply.campaign_contact_id) return { ok: false };
+
+  const [contact] = await sql<
+    { email: string; campaign_id: string; paused_next_send_at: Date | null }[]
+  >`
+    select c.email, cc.campaign_id, cc.paused_next_send_at
+      from campaign_contacts cc
+      join contacts c on c.id = cc.contact_id
+     where cc.id = ${reply.campaign_contact_id}
+  `;
+
+  await sql.begin(async (tx) => {
+    await tx`update replies set needs_review = false where id = ${replyId}`;
+
+    if (verdict === "relevant") {
+      // Prospekt odpověděl, jen z jiné adresy. Stejný konec jako u běžné
+      // odpovědi: ven ze všech sekvencí, ne jen z téhle kampaně.
+      await tx`
+        update campaign_contacts
+           set status = 'replied', replied_at = coalesce(replied_at, now()),
+               next_send_at = null, paused_next_send_at = null, updated_at = now()
+         where contact_id = ${reply.contact_id}
+           and status in ('pending', 'scheduled', 'sent', 'failed')
+      `;
+    } else {
+      // Nesouvisí. Termín se vrátí takový, jaký byl - nic se nedohání.
+      await tx`
+        update campaign_contacts
+           set next_send_at = coalesce(paused_next_send_at, next_send_at),
+               paused_next_send_at = null,
+               updated_at = now()
+         where id = ${reply.campaign_contact_id}
+           and status in ('scheduled', 'sent')
+      `;
+    }
+  });
+
+  await logActivity({
+    level: "info",
+    action: verdict === "relevant" ? "Odpověď potvrzena jako relevantní" : "Zpráva vyhodnocena jako nesouvisející",
+    detail:
+      verdict === "relevant"
+        ? `${reply.from_email} je tentýž člověk jako ${contact?.email ?? "kontakt"} — sekvence ukončena.`
+        : `${reply.from_email} s ${contact?.email ?? "kontaktem"} nesouvisí — sekvence pokračuje podle původního harmonogramu.`,
+    campaignId: contact?.campaign_id ?? null,
+    contactId: reply.contact_id,
+    campaignContactId: reply.campaign_contact_id,
+  });
+
+  return { ok: true, contactEmail: contact?.email };
 }

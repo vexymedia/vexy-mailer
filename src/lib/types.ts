@@ -281,6 +281,13 @@ export interface ConversationDetail {
   mailbox_from_name: string;
   mailbox_enabled: boolean;
   contact_status: CampaignContactStatus | null;
+  /**
+   * Je firma kontaktu vyloučená pro klienta TÉHLE kampaně? Server takový
+   * hovor stejně odmítne, takže ho tlačítko nesmí nabízet.
+   */
+  client_excluded: boolean;
+  /** Jméno klienta, kvůli kterému se nevolá. Null, když se volat může. */
+  excluded_for_client: string | null;
 }
 
 export interface MessageRow {

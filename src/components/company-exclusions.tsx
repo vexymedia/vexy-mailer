@@ -4,6 +4,7 @@ import { useState } from "react";
 import { excludeCompanyAction, removeCompanyExclusionAction } from "@/lib/actions";
 import { ActionForm, SubmitButton } from "./action-form";
 import { DateTime } from "./ui";
+import { plural } from "@/lib/plan";
 
 /**
  * Klientská vyloučení na detailu firmy.
@@ -132,7 +133,10 @@ export function CompanyExclusions({
 
       {available.length === 0 && clients.length > 0 ? (
         <p className="mt-3 text-xs text-zinc-500">
-          Firma je vyloučená pro všechny klienty.
+          {/* Konkrétní počet, ne "pro všechny". Klientů může časem přibýt
+              a "pro všechny" by pak tiše znamenalo něco jiného - a hlavně
+              to zní jako globální blokace, což tohle není. */}
+          Firma je vyloučená pro {plural(exclusions.length, "klienta", "klienty", "klientů")}.
         </p>
       ) : null}
       {clients.length === 0 ? (

@@ -1,6 +1,11 @@
 "use client";
 
-import { classifyConversationAction, deleteConversationAction, sendReplyAction } from "@/lib/actions";
+import {
+  classifyConversationAction,
+  deleteConversationAction,
+  resolveReviewAction,
+  sendReplyAction,
+} from "@/lib/actions";
 import { ActionForm, SubmitButton } from "./action-form";
 import { CLASSIFICATIONS, type Classification } from "@/lib/types";
 
@@ -124,6 +129,72 @@ export function DeleteConversationButton({ conversationId }: { conversationId: s
       >
         Smazat konverzaci
       </SubmitButton>
+    </ActionForm>
+  );
+}
+
+/**
+ * Posouzení odpovědi, která přišla od jiné adresy.
+ *
+ * Ukazuje se jen když se na to čeká, a stojí nahoře nad vláknem: dokud
+ * to někdo nerozhodne, stojí sekvence kontaktu a je lepší, aby o tom
+ * člověk věděl hned, ne až se podiví, proč se nic neposílá.
+ *
+ * Dvě tlačítka a nic mezi tím. Třetí možnost („rozhodnu se potom")
+ * existuje sama od sebe: stačí odejít.
+ */
+export function ReviewDecision({
+  conversationId,
+  replyId,
+  fromEmail,
+  contactEmail,
+  pausedUntil,
+}: {
+  conversationId: string;
+  replyId: string;
+  fromEmail: string;
+  contactEmail: string;
+  pausedUntil: Date | null;
+}) {
+  return (
+    <ActionForm action={resolveReviewAction} className="card border-amber-300 bg-amber-50 p-4">
+      <input type="hidden" name="reply_id" value={replyId} />
+      <input type="hidden" name="conversation_id" value={conversationId} />
+
+      <h2 className="text-sm font-semibold text-amber-900">Odpověď přišla z jiné adresy</h2>
+      <p className="mt-1 text-sm text-amber-900">
+        Psal <span className="font-medium">{fromEmail}</span>, ale oslovili jsme{" "}
+        <span className="font-medium">{contactEmail}</span>. Podle hlaviček patří zpráva do tohoto
+        vlákna — může jít o tutéž osobu z jiné adresy, nebo o přeposlání někomu jinému.
+      </p>
+      <p className="mt-1 text-xs text-amber-800">
+        {pausedUntil
+          ? "Další kroky sekvence jsou zatím pozastavené."
+          : "Kontakt teď žádný naplánovaný krok nemá."}
+      </p>
+
+      <div className="mt-3 flex flex-wrap gap-2">
+        <SubmitButton
+          name="verdict"
+          value="relevant"
+          className="btn-primary !py-1.5 text-sm"
+          pendingLabel="Ukládám…"
+        >
+          Odpověděl nám prospekt
+        </SubmitButton>
+        <SubmitButton
+          name="verdict"
+          value="unrelated"
+          className="btn-secondary !py-1.5 text-sm"
+          pendingLabel="Ukládám…"
+        >
+          Nesouvisí — pokračovat v sekvenci
+        </SubmitButton>
+      </div>
+      <p className="mt-2 text-xs text-amber-800/80">
+        „Odpověděl nám prospekt“ sekvenci ukončí. „Nesouvisí“ ji vrátí na původní termín — nic
+        nahromaděného se neodešle naráz.
+      </p>
     </ActionForm>
   );
 }

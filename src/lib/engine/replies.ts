@@ -241,17 +241,31 @@ async function processMailbox(mailbox: Mailbox): Promise<ReplyPollSummary["mailb
 
       if (!target) continue; // a reply from someone who is not in a campaign
 
-      // Cizí odesílatel na našem vlákně. Zpráva už je uložená a označená
-      // ke kontrole; sekvence prospekta ale běží dál, protože prospekt
-      // sám nic nenapsal. Zastavit ji tady by znamenalo utnout člověka
-      // kvůli zprávě někoho jiného.
+      // ---------------------------------------- odpověď od jiné adresy
+      //
+      // Prospekt sám nic nenapsal, takže se za toho, kdo odpověděl,
+      // NEOZNAČÍ - to by ho utnulo kvůli cizí zprávě. Sekvence se ale
+      // ani nenechá běžet dál: kdyby to přece jen byl on z jiné adresy
+      // (Gmail, jiná firemní doména), přišel by mu za hodinu další cold
+      // e-mail hodinu poté, co odpověděl.
+      //
+      // Kroky se proto POZASTAVÍ a jejich termín se uschová. Rozhodne
+      // člověk v Komunikaci → K vyřízení; do té doby se nic neodešle.
       if (fromStranger) {
+        await sql`
+          update campaign_contacts
+             set paused_next_send_at = coalesce(paused_next_send_at, next_send_at),
+                 next_send_at = null,
+                 updated_at = now()
+           where id = ${target.campaign_contact_id}
+             and status in ('scheduled', 'sent')
+        `;
         await logActivity({
           level: "warn",
           action: "Odpověď od jiné adresy",
           detail:
             `${message.from} odpověděl na vlákno s ${target.contact_email}. ` +
-            "Sekvence pokračuje — zprávu posuďte ručně.",
+            "Další kroky jsou pozastavené, dokud zprávu někdo neposoudí.",
           campaignId: target.campaign_id,
           contactId: target.contact_id,
           campaignContactId: target.campaign_contact_id,

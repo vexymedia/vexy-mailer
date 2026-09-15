@@ -803,6 +803,34 @@ export async function classifyConversationAction(
   return { success: "Uloženo." };
 }
 
+/**
+ * Uzavře posouzení odpovědi, která přišla od jiné adresy.
+ *
+ * Dvě možnosti a nic mezi tím: buď to byl prospekt z jiné adresy (konec
+ * sekvence), nebo nesouvisející zpráva (sekvence pokračuje podle
+ * PŮVODNÍHO termínu, ne od teď).
+ */
+export async function resolveReviewAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  await requireAdmin();
+  const replyId = String(formData.get("reply_id") ?? "");
+  const verdict = String(formData.get("verdict") ?? "");
+  const conversationId = String(formData.get("conversation_id") ?? "");
+  if (verdict !== "relevant" && verdict !== "unrelated") return fail("Neplatné rozhodnutí.");
+
+  const { resolveReview } = await import("@/lib/queries/inbox");
+  const result = await resolveReview(replyId, verdict);
+  if (!result.ok) return fail("Tohle posouzení už někdo uzavřel.");
+
+  if (conversationId) revalidatePath(`/inbox/${conversationId}`);
+  revalidatePath("/inbox");
+  return {
+    success:
+      verdict === "relevant"
+        ? "Označeno jako odpověď prospekta. Další automatické kroky se neodešlou."
+        : "Uzavřeno jako nesouvisející. Sekvence pokračuje podle původního harmonogramu.",
+  };
+}
+
 export async function markReadAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
   await requireAdmin();
   const conversationId = String(formData.get("conversation_id") ?? "");

@@ -278,6 +278,17 @@ export interface CompanyContact {
   /** Nejnovější otevřený záznam kontaktu v kampani, pokud existuje. */
   campaign_contact_id: string | null;
   campaign_name: string | null;
+  /** Čí je ta kampaň. Null u kontaktu mimo kampaň nebo u historické kampaně. */
+  client_id: string | null;
+  client_name: string | null;
+  /**
+   * Je firma vyloučená pro klienta TÉHLE kampaně?
+   *
+   * Počítá se stejnou podmínkou, jakou používá poslední kontrola před
+   * odesláním a `startCall`. Obrazovka tak nemůže nabídnout akci, kterou
+   * server hned odmítne - a naopak ji nesmí schovat tam, kde by prošla.
+   */
+  client_excluded: boolean;
   call_status: string | null;
   call_attempts: number | null;
   next_call_at: Date | null;
@@ -356,6 +367,12 @@ export async function listCompanyContacts(companyId: string): Promise<CompanyCon
     select c.id, c.email, c.phone, c.first_name, c.last_name, c.position, c.is_primary,
            c.loom_url, c.loom_title, c.loom_sent_at, c.loom_note, c.call_opener,
            cc.id as campaign_contact_id, cp.name as campaign_name,
+           cp.client_id, cl.name as client_name,
+           exists (
+             select 1 from client_company_exclusions x
+              where x.company_id = c.company_id
+                and x.client_id = cp.client_id
+           ) as client_excluded,
            cc.call_status, cc.call_attempts, cc.next_call_at,
            cc.last_call_at, cc.last_call_outcome,
            cc.status as email_status,
@@ -366,7 +383,11 @@ export async function listCompanyContacts(companyId: string): Promise<CompanyCon
             and cc.call_status in ('new', 'in_progress', 'callback')
             and cc.call_attempts < cp.max_call_attempts
             and c.phone is not null and btrim(c.phone) <> ''
-            and not exists (select 1 from call_suppression cs2 where cs2.contact_id = c.id))
+            and not exists (select 1 from call_suppression cs2 where cs2.contact_id = c.id)
+            and not exists (
+              select 1 from client_company_exclusions x2
+               where x2.company_id = c.company_id and x2.client_id = cp.client_id
+            ))
              as callable
       from contacts c
       left join lateral (
@@ -376,6 +397,7 @@ export async function listCompanyContacts(companyId: string): Promise<CompanyCon
          limit 1
       ) cc on true
       left join campaigns cp on cp.id = cc.campaign_id
+      left join clients cl on cl.id = cp.client_id
      where c.company_id = ${companyId}
      order by c.is_primary desc, (c.phone is null or btrim(c.phone) = ''), c.created_at, c.id
   `;
