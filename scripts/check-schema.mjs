@@ -27,6 +27,7 @@ import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import { config as loadEnv } from "dotenv";
 import { MIGRATIONS, REQUIRED, findMissing } from "../src/lib/schema-contract.mjs";
+import { migrationUrl } from "./migrate.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 loadEnv({ path: join(root, ".env.local"), quiet: true });
@@ -43,9 +44,11 @@ await main();
 }
 
 async function main() {
-const url = process.env.DATABASE_URL;
+// Kontroluje se stav schématu, takže platí totéž co pro migrace: jede se
+// po MIGRATION_DATABASE_URL, když je nastavená.
+const url = migrationUrl();
 if (!url) {
-  console.error("Chybí DATABASE_URL.");
+  console.error("Chybí MIGRATION_DATABASE_URL ani DATABASE_URL.");
   process.exit(1);
 }
 

@@ -1,5 +1,10 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { pingDatabase, readSchemaState, schemaIsReady, missingCoreEnv } from "@/lib/system-status";
+import {
+  readRuntimeConnection,
+  readSchemaState,
+  schemaIsReady,
+  missingCoreEnv,
+} from "@/lib/system-status";
 
 export const dynamic = "force-dynamic";
 
@@ -29,14 +34,24 @@ export async function GET(request: NextRequest) {
   }
 
   const missingEnv = missingCoreEnv();
-  const ping = await pingDatabase();
-  if (!ping.ok) {
+
+  // Dvě nezávislé otázky, hlášené zvlášť. Na produkci se rozešly: schéma
+  // bylo v pořádku (15/15, žádné chybějící sloupce) a přesto padala každá
+  // stránka, protože runtime nedokázal otevřít spojení. Jedno společné
+  // „database: ok" by to zamlžilo.
+  const runtime = await readRuntimeConnection();
+  if (!runtime.ok) {
     return NextResponse.json(
       {
         status: "not_ready",
-        database: "unreachable",
-        // Už pročištěná hláška, viz safeDbError. Host ani uživatel v ní nejsou.
-        reason: ping.error,
+        runtime: {
+          database: "unreachable",
+          // Už pročištěná hláška, viz safeDbError. Host ani uživatel v ní nejsou.
+          reason: runtime.error,
+          // Jen režim, žádná část adresy.
+          mode: runtime.mode,
+          poolMax: runtime.poolMax,
+        },
         missingEnv,
         checkedAt: new Date().toISOString(),
       },
@@ -45,19 +60,39 @@ export async function GET(request: NextRequest) {
   }
 
   const schema = await readSchemaState();
-  const ready = schemaIsReady(schema);
+  const schemaReady = schemaIsReady(schema);
+  // Session pooler spojení otevře, ale při souběhu narazí na strop
+  // (EMAXCONNSESSION). Readiness to proto hlásí jako problém dřív, než se
+  // objeví pod zátěží.
+  const runtimeReady = runtime.mode !== "session";
+  const ready = schemaReady && runtimeReady;
+
   return NextResponse.json(
     {
       status: ready ? "ready" : "not_ready",
-      database: "ok",
-      migrations: {
-        applied: schema.appliedCount,
-        expected: schema.expectedCount,
-        missing: schema.missingMigrations,
+      runtime: {
+        database: "ok",
+        mode: runtime.mode,
+        poolMax: runtime.poolMax,
+        ...(runtimeReady
+          ? {}
+          : {
+              warning:
+                "DATABASE_URL vede přes session pooler (port 5432). Pro serverless " +
+                "patří transaction pooler (port 6543).",
+            }),
       },
-      // Sloupce, které aplikace čte a v databázi nejsou. Jména tabulek
-      // a sloupců jsou v repozitáři, takže tajná nejsou.
-      schemaGaps: schema.gaps.map((gap) => `${gap.table}.${gap.columns.join(",")}`),
+      schema: {
+        ready: schemaReady,
+        migrations: {
+          applied: schema.appliedCount,
+          expected: schema.expectedCount,
+          missing: schema.missingMigrations,
+        },
+        // Sloupce, které aplikace čte a v databázi nejsou. Jména tabulek
+        // a sloupců jsou v repozitáři, takže tajná nejsou.
+        gaps: schema.gaps.map((gap) => `${gap.table}.${gap.columns.join(",")}`),
+      },
       missingEnv,
       checkedAt: new Date().toISOString(),
     },

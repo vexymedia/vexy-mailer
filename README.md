@@ -180,10 +180,28 @@ příkazy z chatu.
 ### 1. Co nastavíte jednou
 
 V **Vercel → Settings → Environment Variables** pro *Production*:
-`DATABASE_URL`, `ENCRYPTION_KEY`, `SESSION_SECRET`, `CRON_SECRET`, `APP_URL`.
-Co znamenají a jak je vygenerovat, je v [`.env.example`](.env.example).
-Volání přes Twilio a přepisy přes OpenAI jsou nepovinné — bez nich funguje
-zbytek aplikace dál.
+`DATABASE_URL`, `MIGRATION_DATABASE_URL`, `ENCRYPTION_KEY`, `SESSION_SECRET`,
+`CRON_SECRET`, `APP_URL`. Co znamenají a jak je vygenerovat, je
+v [`.env.example`](.env.example). Volání přes Twilio a přepisy přes OpenAI
+jsou nepovinné — bez nich funguje zbytek aplikace dál.
+
+**Dvě adresy k téže databázi, a nejde je zaměnit.** Obě jsou v Supabase pod
+*Project Settings → Database → Connection string*, liší se portem:
+
+| Proměnná | Port | K čemu |
+| --- | --- | --- |
+| `DATABASE_URL` | **6543** (Transaction pooler) | Běžící aplikace. Spojení se vrací do poolu po každé transakci, takže ho serverless funkce nedrží. |
+| `MIGRATION_DATABASE_URL` | **5432** (Session pooler) | `npm run release`. Advisory zámek, kterým se domlouvají souběžná nasazení, je vázaný na sezení — v transakčním režimu by nedržel. |
+
+Se session poolerem v `DATABASE_URL` produkce spadne na
+`EMAXCONNSESSION — max clients reached in session mode`: session režim drží
+spojení po celou dobu sezení a strop 15 klientů vyčerpá pár souběžných
+instancí funkce. Aplikace k tomu drží jedno spojení na instanci a nepoužívá
+prepared statements, což transaction pooler vyžaduje.
+
+Pokud by `MIGRATION_DATABASE_URL` omylem vedla na port 6543, `release` se
+zastaví a řekne to — radši zastavené nasazení než tichá migrace bez
+funkčního zámku.
 
 V **Vercel → Settings → Build & Development Settings** přepněte *Build Command*
 na:
@@ -212,8 +230,11 @@ s tím, co chybí. Obrazovky fungují dál, aby to bylo kde přečíst.
 
 ### 3. Kde v UI ověříte stav
 
-**Nastavení → Stav systému.** Databáze, migrace, SMTP, IMAP, Twilio a veřejná
-adresa, každé zvlášť a s návodem, co doplnit. Rozlišuje *nakonfigurováno*
+**Nastavení → Stav systému.** Runtime připojení k databázi (včetně toho,
+kterým poolerem vede), migrace, SMTP, IMAP, Twilio a veřejná adresa, každé
+zvlášť a s návodem, co doplnit. Runtime a schéma jsou schválně dvě položky:
+můžou se rozejít a jednou se to už stalo — migrace hlásily 15/15 a přesto
+padala každá stránka. Rozlišuje *nakonfigurováno*
 (údaje existují) od *v pořádku* (opravdu se to povedlo ověřit) — že máte
 vyplněné Twilio ještě neznamená, že projde hovor.
 

@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import { closeDatabase, resetDatabase } from "./helpers/db";
 import { enableSimulateMode, seedCampaign } from "./helpers/fixtures";
@@ -78,15 +78,20 @@ describe("health endpoint", () => {
     expect(body.status).toBe("ok");
     // Kdyby liveness padalo s databází, hosting by instanci restartoval
     // dokola a tím by výpadek databáze nespravil.
-    expect(body).not.toHaveProperty("migrations");
+    expect(body).not.toHaveProperty("schema");
+    expect(body).not.toHaveProperty("runtime");
   });
 
   it("readiness na zdravé databázi je ready", async () => {
     const { status, body } = await health("?ready=1");
     expect(status).toBe(200);
     expect(body.status).toBe("ready");
-    expect(body.migrations.missing).toEqual([]);
-    expect(body.schemaGaps).toEqual([]);
+    // Runtime a schéma se hlásí ZVLÁŠŤ: na produkci se rozešly, schéma
+    // bylo 15/15 a přesto padala každá stránka.
+    expect(body.runtime.database).toBe("ok");
+    expect(body.schema.ready).toBe(true);
+    expect(body.schema.migrations.missing).toEqual([]);
+    expect(body.schema.gaps).toEqual([]);
   });
 
   it("readiness s chybějící migrací vrací 503 a jmenuje ji", async () => {
@@ -95,14 +100,36 @@ describe("health endpoint", () => {
     const { status, body } = await health("?ready=1");
     expect(status).toBe(503);
     expect(body.status).toBe("not_ready");
-    expect(body.migrations.missing).toContain(last);
+    // Runtime je v pořádku; pozadu je jen schéma.
+    expect(body.runtime.database).toBe("ok");
+    expect(body.schema.ready).toBe(false);
+    expect(body.schema.migrations.missing).toContain(last);
   });
 
   it("readiness pozná i chybějící sloupec při zapsané migraci", async () => {
     await sql`alter table companies drop column ico`;
     const { status, body } = await health("?ready=1");
     expect(status).toBe(503);
-    expect(body.schemaGaps.join(" ")).toContain("companies.ico");
+    expect(body.schema.gaps.join(" ")).toContain("companies.ico");
+  });
+
+  it("session pooler shodí readiness, i když spojení funguje", async () => {
+    // Přesně konfigurace, na které produkce spadla. Spojení otevřít jde,
+    // takže by to bez téhle kontroly hlásilo ready - a EMAXCONNSESSION by
+    // přišel až pod souběhem, tedy v provozu.
+    vi.stubEnv("DATABASE_URL",
+      "postgresql://u:p@aws-0-eu-central-1.pooler.supabase.com:5432/postgres");
+    const { status, body } = await health("?ready=1");
+    expect(status).toBe(503);
+    expect(body.runtime.mode).toBe("session");
+    expect(body.runtime.warning).toContain("6543");
+    vi.unstubAllEnvs();
+  });
+
+  it("readiness hlásí režim a velikost poolu, ne adresu", async () => {
+    const { body } = await health("?ready=1");
+    expect(["transaction", "session", "direct", "unset"]).toContain(body.runtime.mode);
+    expect(body.runtime.poolMax).toBe(1);
   });
 
   it("odpověď neobsahuje connection string ani jiné tajné hodnoty", async () => {
