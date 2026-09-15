@@ -87,7 +87,11 @@ export function connect(url) {
     // Jedno spojení: zámek i migrace musí jít po tomtéž sezení.
     max: 1,
     prepare: false,
-    ssl: url.includes("sslmode=disable") ? false : "prefer",
+    // Stejně jako v runtime klientovi: vyžadovat, ne preferovat. `prefer`
+    // by při nedostupném TLS tiše přešlo na nešifrované spojení, a přes
+    // tohle spojení jde celé schéma. Options přebíjejí parametry z URL,
+    // takže `?sslmode=require` v adrese by se stejně neuplatnilo.
+    ssl: url.includes("sslmode=disable") ? false : "require",
     onnotice: () => {},
   });
 }

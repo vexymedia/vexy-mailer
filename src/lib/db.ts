@@ -16,9 +16,11 @@ import { env } from "./env";
  *
  * Odsud dvě pravidla, která se nesmí porušit:
  *
- *   1. `max: 1`. Jedna instance funkce obslouží jeden request v čase,
- *      takže víc než jedno spojení jí není k čemu - jen by ho držela.
- *      Dotazy se při souběhu zařadí do fronty, nezaberou další spojení.
+ *   1. `max: 1`, jak Supabase pro serverless doporučuje. Instancí je
+ *      vedle sebe víc a s Fluid Compute může jedna obsloužit i několik
+ *      requestů naráz - o důvod víc držet na instanci jedno spojení
+ *      a nechat souběžné dotazy čekat ve frontě, místo aby si každý bral
+ *      další spojení a tím se násobily dvakrát.
  *
  *   2. `prepare: false`. Transaction pooler (port 6543) rozděluje spojení
  *      po jednotlivých transakcích, takže prepared statement založený
@@ -61,9 +63,12 @@ function createClient(): Sql {
     // různá chování podle tvaru adresy - to je přesně ten druh rozdílu,
     // který se projeví až na produkci.
     prepare: false,
-    // Supabase vyžaduje TLS; `sslmode=require` v adrese se respektuje,
-    // ale u přímých spojení, která ho vynechají, to říkáme explicitně.
-    ssl: url.includes("sslmode=disable") ? false : "prefer",
+    // TLS se vyžaduje, ne jen preferuje. `prefer` znamená „zkus TLS,
+    // a když nepůjde, jeď nešifrovaně" - to je pro produkční databázi
+    // špatná výchozí volba. Na `?sslmode=require` v adrese se navíc
+    // spoléhat nejde: postgres.js dává přednost options objektu před
+    // parametry z URL, takže by ho tenhle řádek přebil.
+    ssl: url.includes("sslmode=disable") ? false : "require",
     onnotice: () => {},
   });
 }
