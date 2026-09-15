@@ -19,6 +19,33 @@ export const maxDuration = 60;
  * harmless - it is safe to hammer this endpoint.
  */
 
+/**
+ * Jeden krok ticku, ohraničený v logu.
+ *
+ * Když request na produkci nedoběhne, z odpovědi se nic nedozvíte -
+ * odpověď totiž nikdy nevznikne. Jediné, co zbude, je log. Proto se
+ * začátek kroku loguje PŘED await: poslední řádek `>` bez odpovídajícího
+ * `<` říká přesně, na kterém awaitu to stojí.
+ *
+ * Kroky se sbírají i do úspěšné odpovědi, aby šlo vidět, kde se čas tráví,
+ * bez čtení logu.
+ */
+async function step<T>(
+  name: string,
+  steps: Record<string, number>,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const from = Date.now();
+  console.log(`[cron] > ${name}`);
+  try {
+    return await fn();
+  } finally {
+    const ms = Date.now() - from;
+    steps[name] = ms;
+    console.log(`[cron] < ${name} ${ms}ms`);
+  }
+}
+
 function authorise(request: NextRequest): boolean {
   const secret = process.env.CRON_SECRET;
   if (!secret) return false;
@@ -38,6 +65,8 @@ async function handle(request: NextRequest) {
   }
 
   const started = Date.now();
+  /** Doba jednotlivých kroků. Do odpovědi i do logu. */
+  const steps: Record<string, number> = {};
 
   // Zastaralé schéma = žádné skutečné akce.
   //
@@ -48,7 +77,7 @@ async function handle(request: NextRequest) {
   // měl kde přečíst.
   //
   // Je to kontrola, ne oprava: nic se tu samo nemigruje.
-  const schema = await readSchemaState();
+  const schema = await step("schema", steps, () => readSchemaState());
   if (!schemaIsReady(schema)) {
     return NextResponse.json(
       {
@@ -59,6 +88,7 @@ async function handle(request: NextRequest) {
           : "Databáze neodpovídá — worker nic neodeslal.",
         missingMigrations: schema.missingMigrations,
         schemaGaps: schema.gaps.map((gap) => `${gap.table}.${gap.columns.join(",")}`),
+        steps,
       },
       { status: 503 },
     );
@@ -66,23 +96,21 @@ async function handle(request: NextRequest) {
 
   try {
     // Dispatch first: sending is time-sensitive, reply polling is not.
-    const dispatch = await dispatchTick();
-    const replies = await pollReplies();
+    const dispatch = await step("dispatch", steps, () => dispatchTick());
+    const replies = await step("replies", steps, () => pollReplies());
     // Nahrávky a přepisy jsou na řadě poslední: e-mail i odpovědi jsou
     // časově citlivé. Dostanou, co ze šedesátivteřinového limitu funkce
     // zbylo, s rezervou na dokončení odpovědi.
-    const calls = await processCallPipeline({ deadline: started + 50_000 });
-    return NextResponse.json({
-      ok: true,
-      durationMs: Date.now() - started,
-      dispatch,
-      replies,
-      calls,
-    });
+    const calls = await step("calls", steps, () =>
+      processCallPipeline({ deadline: started + 50_000 }),
+    );
+    const durationMs = Date.now() - started;
+    console.log(`[cron] tick ok ${durationMs}ms`, steps);
+    return NextResponse.json({ ok: true, durationMs, steps, dispatch, replies, calls });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    console.error("[cron] tick failed", error);
-    return NextResponse.json({ ok: false, error: message }, { status: 500 });
+    console.error("[cron] tick failed", { steps, error });
+    return NextResponse.json({ ok: false, error: message, steps }, { status: 500 });
   }
 }
 
