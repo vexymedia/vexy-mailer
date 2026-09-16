@@ -252,19 +252,34 @@ async function processMailbox(mailbox: Mailbox): Promise<ReplyPollSummary["mailb
       // Kroky se proto POZASTAVÍ a jejich termín se uschová. Rozhodne
       // člověk v Komunikaci → K vyřízení; do té doby se nic neodešle.
       if (fromStranger) {
-        // Sekvence běží DÁL. `needs_review` je příznak příchozí zprávy,
-        // ne pauza kampaně: kdyby uměl zastavit odesílání, stačilo by
-        // komukoli zvenčí napsat do vlákna a naše oslovení by stálo.
-        // Nejistý inbound nesmí mít vliv na outbound harmonogram.
+        // Sekvence se POZASTAVÍ, dokud to někdo neposoudí.
         //
-        // Cena je jasná a zvolená vědomě: než někdo zprávu posoudí,
-        // může odejít další naplánovaný krok. To je očekávané.
+        // Nejde bezpečně určit, jestli píše prospekt z jiné adresy, nebo
+        // někdo cizí. Obě unáhlené odpovědi jsou špatně: označit ho za
+        // odpověděvšího by ho utnulo kvůli cizí zprávě, nechat sekvenci
+        // běžet by mu poslalo cold e-mail hodinu poté, co nám odpověděl.
+        //
+        // Pozastavuje se JEN ten kontakt, na který se vlákno spárovalo -
+        // ne všechny kontakty klienta. Kandidáta určuje thread, ne doména
+        // odesílatele, takže dopad je přesně jeden enrollment.
+        //
+        // `coalesce` na uschovaném termínu: druhá cizí zpráva do téhož
+        // vlákna nesmí přepsat uschovanou hodnotu nulou, kterou tam
+        // nechala ta první.
+        await sql`
+          update campaign_contacts
+             set paused_next_send_at = coalesce(paused_next_send_at, next_send_at),
+                 next_send_at = null,
+                 updated_at = now()
+           where id = ${target.campaign_contact_id}
+             and status in ('scheduled', 'sent')
+        `;
         await logActivity({
           level: "warn",
           action: "Odpověď od jiné adresy",
           detail:
             `${message.from} odpověděl na vlákno s ${target.contact_email}. ` +
-            "Kontakt zůstává v sekvenci, zpráva čeká na posouzení v Komunikaci.",
+            "Další kroky jsou pozastavené, dokud zprávu někdo neposoudí.",
           campaignId: target.campaign_id,
           contactId: target.contact_id,
           campaignContactId: target.campaign_contact_id,
@@ -320,16 +335,33 @@ async function processMailbox(mailbox: Mailbox): Promise<ReplyPollSummary["mailb
       // Immediate removal from the sequence: next_send_at is cleared, so the
       // dispatcher's candidate query can never pick this contact up again.
       //
-      // Every campaign this person is in stops, not only the one the reply was
-      // matched to. Somebody who has answered should not then receive a cold
-      // email from a different sequence, and the matched campaign is not always
-      // the one they care about.
+      // Dosah je KLIENT, ne jeden konkrétní běh a ne celá databáze.
+      //
+      // Uvnitř klienta se zastaví všechny jeho kampaně: kdo odpověděl, nesmí
+      // od téhož odesílatele dostat za dva dny cold e-mail z jiné sekvence.
+      //
+      // Přes klienty se ale nesahá. VEXY dělá managed outbound pro víc
+      // klientů naráz a tentýž člověk se běžně objeví u dvou z nich - každý
+      // s jinou nabídkou a jiným odesílatelem. Odpověď patří tomu klientovi,
+      // kterému člověk odpověděl; ukončit tím kampaň druhého klienta by
+      // znamenalo tiše mu sebrat práci, kterou si zaplatil, a on by se o tom
+      // nedozvěděl.
+      //
+      // `is not distinct from` kvůli kampaním bez klienta: NULL se páruje
+      // s NULL, ne s konkrétním klientem.
       const updated = await sql<{ id: string }[]>`
-        update campaign_contacts
+        update campaign_contacts cc
            set status = 'replied', replied_at = now(), next_send_at = null, updated_at = now()
-         where contact_id = ${target.contact_id}
-           and status in ('pending', 'scheduled', 'sent', 'failed')
-        returning id
+          from campaigns cp
+         where cc.campaign_id = cp.id
+           and cc.contact_id = ${target.contact_id}
+           and cc.status in ('pending', 'scheduled', 'sent', 'failed')
+           and cp.client_id is not distinct from (
+                 select owner.client_id
+                   from campaign_contacts matched
+                   join campaigns owner on owner.id = matched.campaign_id
+                  where matched.id = ${target.campaign_contact_id})
+        returning cc.id
       `;
       if (updated.length > 0) {
         matched++;

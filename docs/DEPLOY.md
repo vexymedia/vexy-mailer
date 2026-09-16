@@ -18,13 +18,33 @@ them alone.
 
 | Name | Value |
 | --- | --- |
-| `DATABASE_URL` | The Supabase **transaction pooler** string, port 6543 |
+| `DATABASE_URL` | Supabase **Transaction pooler**, port **6543** — runtime |
+| `MIGRATION_DATABASE_URL` | Supabase **Session pooler**, port **5432** — migrations only |
 | `ENCRYPTION_KEY` | `openssl rand -base64 32` |
 | `SESSION_SECRET` | `openssl rand -hex 32` |
 | `CRON_SECRET` | `openssl rand -hex 32` |
 | `APP_URL` | `https://your-app.vercel.app` |
 
-Two of these deserve care:
+**The two database URLs are not interchangeable.** Both come from
+*Project Settings → Database → Connection string* in Supabase and differ only
+by port:
+
+- **`DATABASE_URL` must be the transaction pooler (6543).** It is what the
+  running app uses. A session-pooler URL here holds a connection for the whole
+  session, and a handful of concurrent function instances exhaust the 15-client
+  ceiling: `EMAXCONNSESSION — max clients reached in session mode`. The app
+  keeps `max: 1` and `prepare: false` to match what a transaction pooler allows.
+- **`MIGRATION_DATABASE_URL` must be the session pooler (5432),** or a direct
+  connection. `npm run release` serialises concurrent deployments with
+  `pg_advisory_lock()`, which is a *session*-scoped lock: under transaction
+  pooling the connection returns to the pool after each commit and the lock
+  protects nothing. `release` refuses to run against a `:6543` URL rather than
+  migrate without a working lock.
+
+Migrations run once per deployment, so the session pooler's ceiling is not a
+problem for them.
+
+Two more deserve care:
 
 - **`ENCRYPTION_KEY` can never change** without invalidating every stored
   mailbox password. Keep a copy somewhere safe.

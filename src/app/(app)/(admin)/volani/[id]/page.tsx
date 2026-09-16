@@ -1,3 +1,4 @@
+import { requireUuid } from "@/lib/route-params";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getHeldCall, getCampaignCallingReport, listCallers } from "@/lib/queries/calling";
@@ -24,6 +25,8 @@ export default async function CallerWorkspacePage({
   searchParams: Promise<{ caller?: string }>;
 }) {
   const { id } = await params;
+  // Nesmyslné id z adresy je 404, ne pád na chybě typu v Postgresu.
+  requireUuid(id);
   await searchParams;
 
   const [selectedCallerId, callers] = await Promise.all([

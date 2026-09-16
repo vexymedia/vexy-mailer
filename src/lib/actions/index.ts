@@ -29,6 +29,8 @@ import { findUnknownVariables } from "@/lib/template";
 import {
   createContact,
   importContacts,
+  summariseImport,
+  describeImport,
   saveOutreachContext,
   suppressEmail,
   unsuppressEmail,
@@ -521,19 +523,27 @@ export async function importContactsAction(_prev: ActionState, formData: FormDat
   revalidatePath("/contacts");
   if (campaignId) revalidatePath(`/campaigns/${campaignId}`);
 
+  // Jeden součet, který sedí na počet řádků v souboru. Bez něj se ztrácely
+  // neplatné řádky mezi parserem a importem a nešlo doložit, kolik lidí
+  // se do kampaně opravdu dostalo - tedy kolik se má počítat do kvóty.
+  const summary = summariseImport(parsed, result, Boolean(campaignId));
+
   const notes: string[] = [];
   if (parsed.errors.length) notes.push(...parsed.errors.slice(0, 20));
   if (parsed.ignoredColumns.length) notes.push(`Ignorované sloupce: ${parsed.ignoredColumns.join(", ")}.`);
+  if (result.excluded) {
+    notes.push(`${result.excluded} kontaktů je z firem, které si tenhle klient vyloučil.`);
+  }
   if (result.suppressed.length) {
     notes.push(`${result.suppressed.length} adres je na seznamu Nekontaktovat a do kampaně se nepřidaly.`);
   }
+  if (!summary.reconciles) {
+    // Nemělo by nastat. Když ano, je lepší to říct, než tiše vydat číslo,
+    // podle kterého se fakturuje.
+    notes.push("Pozor: součet kategorií nesedí na počet řádků v souboru. Zkontrolujte import.");
+  }
 
-  return {
-    success:
-      `Naimportováno ${result.created} nových kontaktů; ${result.existing} už bylo známých.` +
-      (campaignId ? ` ${result.addedToCampaign} přidáno do kampaně, ${result.skippedFromCampaign} přeskočeno.` : ""),
-    problems: notes.length ? notes : undefined,
-  };
+  return { success: describeImport(summary), problems: notes.length ? notes : undefined };
 }
 
 export async function suppressEmailAction(_prev: ActionState, formData: FormData): Promise<ActionState> {

@@ -1,4 +1,3 @@
-import postgres from "postgres";
 import { sql } from "./db";
 import { MIGRATIONS, REQUIRED, findMissing, type SchemaGap } from "./schema-contract.mjs";
 import { missingTwilioEnv } from "./telephony/twilio";
@@ -181,6 +180,14 @@ async function readMailboxes(): Promise<MailboxSummary | null> {
 
 // ---------------------------------------------------------- celkový stav
 
+/** Jak se runtime režim pojmenuje na obrazovce. Bez hostitele a hesla. */
+const CONNECTION_LABEL: Record<ConnectionMode, string> = {
+  transaction: "Přes transaction pooler (port 6543) — pro serverless správně.",
+  session: "Přes session pooler (port 5432) — pro serverless nevhodné.",
+  direct: "Přímé spojení k Postgresu.",
+  unset: "Adresa databáze není nastavená.",
+};
+
 /** Názvy proměnných, bez kterých se aplikace vůbec nerozběhne. */
 export const CORE_ENV_VARS = ["DATABASE_URL", "ENCRYPTION_KEY", "SESSION_SECRET", "CRON_SECRET"] as const;
 
@@ -233,31 +240,54 @@ function publicUrlStatus(): SubsystemStatus {
 export async function getSystemStatus(): Promise<SystemStatus> {
   const [schema, mailboxes] = await Promise.all([readSchemaState(), readMailboxes()]);
   const subsystems: SubsystemStatus[] = [];
+  const mode = connectionMode();
+  const override = Number(process.env.DB_POOL_MAX);
+  const poolMax = Number.isFinite(override) && override > 0 ? override : 1;
 
   // ---- databáze -----------------------------------------------------
+  //
+  // Dvě různé otázky, které se na produkci rozešly: jestli runtime vůbec
+  // otevře spojení, a jestli je schéma na správné úrovni. Migrace hlásily
+  // 15/15 a přesto padala každá stránka. Proto to jsou dva řádky, ne jeden.
   const missingCore = missingCoreEnv();
   if (!schema.reachable) {
     subsystems.push({
       key: "database",
-      label: "Databáze",
+      label: "Databáze (runtime)",
       level: "attention",
       summary: schema.error ?? "K databázi se nepodařilo připojit.",
       action: missingCore.includes("DATABASE_URL")
         ? "Chybí proměnná DATABASE_URL."
-        : "Zkontrolujte DATABASE_URL v nastavení hostingu. U Supabase se používá " +
-          "connection pooler a adresa musí obsahovat ?sslmode=require.",
+        : "Zkontrolujte DATABASE_URL v nastavení hostingu. Na Vercelu sem patří " +
+          "Supabase TRANSACTION pooler (port 6543) a adresa musí obsahovat " +
+          "?sslmode=require.",
       missingEnv: missingCore.length > 0 ? missingCore : undefined,
+      details: [CONNECTION_LABEL[mode], `Nejvýš ${poolMax} spojení na instanci.`],
+    });
+  } else if (mode === "session") {
+    // Session pooler má strop 15 klientů a serverless ho vyčerpá. Tohle
+    // je přesně ta konfigurace, na které produkce spadla na
+    // EMAXCONNSESSION - takže se nesmí tvářit jako „v pořádku".
+    subsystems.push({
+      key: "database",
+      label: "Databáze (runtime)",
+      level: "attention",
+      summary: "Připojení funguje, ale vede přes SESSION pooler (port 5432).",
+      action:
+        "Přepněte DATABASE_URL na TRANSACTION pooler (port 6543). Session režim " +
+        "drží spojení po celou dobu sezení a při víc souběžných instancích " +
+        "narazí na strop (EMAXCONNSESSION).",
+      details: [CONNECTION_LABEL[mode], `Nejvýš ${poolMax} spojení na instanci.`],
     });
   } else {
     subsystems.push({
       key: "database",
-      label: "Databáze",
-      level: "ok",
+      label: "Databáze (runtime)",
+      level: missingCore.length > 0 ? "attention" : "ok",
       summary: "Připojení funguje.",
       missingEnv: missingCore.length > 0 ? missingCore : undefined,
-      ...(missingCore.length > 0
-        ? { action: `Chybí proměnné: ${missingCore.join(", ")}.`, level: "attention" as const }
-        : {}),
+      action: missingCore.length > 0 ? `Chybí proměnné: ${missingCore.join(", ")}.` : undefined,
+      details: [CONNECTION_LABEL[mode], `Nejvýš ${poolMax} spojení na instanci.`],
     });
   }
 
@@ -265,14 +295,14 @@ export async function getSystemStatus(): Promise<SystemStatus> {
   if (!schema.reachable) {
     subsystems.push({
       key: "migrations",
-      label: "Migrace",
+      label: "Migrace (schéma)",
       level: "unknown",
       summary: "Nešlo zjistit — databáze neodpovídá.",
     });
   } else if (schemaIsReady(schema)) {
     subsystems.push({
       key: "migrations",
-      label: "Migrace",
+      label: "Migrace (schéma)",
       level: "ok",
       summary: `Aktuální — všech ${schema.expectedCount} je aplikovaných.`,
     });
@@ -288,7 +318,7 @@ export async function getSystemStatus(): Promise<SystemStatus> {
     ];
     subsystems.push({
       key: "migrations",
-      label: "Migrace",
+      label: "Migrace (schéma)",
       level: "attention",
       summary:
         schema.missingMigrations.length > 0
@@ -410,27 +440,77 @@ export async function getSystemStatus(): Promise<SystemStatus> {
 }
 
 /**
- * Lehká varianta pro health endpoint: nesahá na sdílený pool.
+ * Rychlý dotaz do databáze pro health endpoint.
  *
- * Readiness probe může běžet každých pár sekund a nesmí kvůli tomu držet
- * spojení z poolu, který obsluhuje uživatele.
+ * Používá SDÍLENÉHO klienta, ne vlastní spojení. Původně si otevíral svoje
+ * s tím, že „nemá zdržovat pool uživatelů" - jenže v serverless je to přesně
+ * naopak: každý probe by byl další klient navíc a readiness se volá často.
+ * Tím se strop poolu nešetří, tím se vyčerpává.
+ *
+ * Sdílený klient má max 1 spojení, takže tenhle `select 1` se nejhůř zařadí
+ * za probíhající dotaz.
  */
 export async function pingDatabase(): Promise<{ ok: boolean; error?: string }> {
-  const url = process.env.DATABASE_URL;
-  if (!url) return { ok: false, error: "Chybí proměnná DATABASE_URL." };
-  const client = postgres(url, {
-    max: 1,
-    prepare: false,
-    connect_timeout: 5,
-    ssl: url.includes("sslmode=disable") ? false : "prefer",
-    onnotice: () => {},
-  });
+  if (!process.env.DATABASE_URL?.trim()) {
+    return { ok: false, error: "Chybí proměnná DATABASE_URL." };
+  }
   try {
-    await client`select 1`;
+    await sql`select 1`;
     return { ok: true };
   } catch (error) {
     return { ok: false, error: safeDbError(error) };
-  } finally {
-    await client.end({ timeout: 1 });
   }
+}
+
+// ------------------------------------------------- tvar runtime spojení
+
+/**
+ * Jak je runtime připojený. Žádný host, žádné heslo - jen režim.
+ *
+ *   transaction - Supabase transaction pooler (:6543). Tohle sem patří.
+ *   session     - session pooler (:5432). Strop 15 klientů, na serverless
+ *                 se vyčerpá a skončí to EMAXCONNSESSION.
+ *   direct      - přímé spojení k Postgresu.
+ *   unset       - proměnná chybí.
+ */
+export type ConnectionMode = "transaction" | "session" | "direct" | "unset";
+
+/**
+ * Určí režim z adresy. Vrací JEN výčtovou hodnotu, nikdy kus adresy -
+ * tenhle údaj se zobrazuje v prohlížeči.
+ *
+ * Port je to jediné, co Supabase pooler odlišuje: 6543 je transaction,
+ * 5432 session. Jméno hostitele je u obou stejné.
+ */
+export function connectionMode(url: string | undefined = process.env.DATABASE_URL): ConnectionMode {
+  const trimmed = url?.trim();
+  if (!trimmed) return "unset";
+  const pooler = trimmed.includes("pooler.supabase.com");
+  if (trimmed.includes(":6543")) return "transaction";
+  if (pooler) return "session";
+  return "direct";
+}
+
+/**
+ * Stav runtime spojení, oddělený od stavu schématu.
+ *
+ * Jsou to dvě různé otázky a na produkci se rozešly: migrace byly v pořádku
+ * (15/15, žádné chybějící sloupce) a přesto každá stránka padala, protože
+ * runtime nemohl otevřít spojení. Proto to health endpoint i Stav systému
+ * hlásí zvlášť.
+ */
+export interface RuntimeConnection {
+  ok: boolean;
+  mode: ConnectionMode;
+  /** Kolik spojení smí jedna instance držet. */
+  poolMax: number;
+  error?: string;
+}
+
+export async function readRuntimeConnection(): Promise<RuntimeConnection> {
+  const mode = connectionMode();
+  const override = Number(process.env.DB_POOL_MAX);
+  const poolMax = Number.isFinite(override) && override > 0 ? override : 1;
+  const ping = await pingDatabase();
+  return { ok: ping.ok, mode, poolMax, error: ping.error };
 }

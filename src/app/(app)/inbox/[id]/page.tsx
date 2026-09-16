@@ -1,3 +1,4 @@
+import { requireUuid } from "@/lib/route-params";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getConversation, getPendingReview, listMessages, markConversationRead } from "@/lib/queries/inbox";
@@ -29,6 +30,8 @@ export const dynamic = "force-dynamic";
  */
 export default async function ConversationPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
+  // Nesmyslné id z adresy je 404, ne pád na chybě typu v Postgresu.
+  requireUuid(id);
   const user = await requireUser();
   const canManage = user.role === "admin";
   // Jestli jde volat z prohlížeče, ví server. Klient si to nevymýšlí.
@@ -51,9 +54,9 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
   // Odeslané vlákno a vlákno s odpovědí se chovají jinak vůči kadenci,
   // takže si nemůžou nést stejnou poznámku.
   const hasInbound = messages.some((message) => message.direction === "inbound");
-  // Čeká tu odpověď od jiné adresy na posouzení? Sekvence kvůli tomu
-  // nestojí - o to větší důvod to dát nad vlákno, ne do postranního
-  // panelu: dokud to nikdo neposoudí, odcházejí další kroky.
+  // Čeká tu odpověď od nejisté adresy na posouzení? Dokud čeká, stojí
+  // sekvence toho kontaktu - takže to patří nad vlákno, ne do postranního
+  // panelu, kde by se to dalo přehlédnout.
   const pendingReview = canManage ? await getPendingReview(id) : null;
 
   return (
@@ -98,7 +101,7 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
             replyId={pendingReview.reply_id}
             fromEmail={pendingReview.from_email}
             contactEmail={pendingReview.contact_email}
-            nextSendAt={pendingReview.next_send_at}
+            pausedUntil={pendingReview.paused_next_send_at}
           />
         </div>
       ) : null}
@@ -231,8 +234,8 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
             // Příchozí zpráva tu je, ale nepsal ji prospekt - tvrdit, že
             // odpověděl, by si odporovalo s výzvou nad vláknem.
             <p className="px-1 text-xs text-zinc-500">
-              Zpráva přišla z jiné adresy než prospektovy, takže se za jeho odpověď nepovažuje a
-              sekvence běží dál. Posoudit ji jde tlačítkem nahoře.
+              Zpráva přišla z jiné adresy než prospektovy, takže se za jeho odpověď nepovažuje.
+              Další kroky sekvence zatím stojí — rozhodne o nich tlačítko nahoře.
             </p>
           ) : canManage && hasInbound ? (
             <p className="px-1 text-xs text-zinc-500">

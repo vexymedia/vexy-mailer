@@ -37,11 +37,61 @@ loadEnv({ path: join(root, ".env"), quiet: true });
 /** Číslo, na kterém se domluví všechna nasazení téhle aplikace. */
 const MIGRATION_LOCK = 4_120_250_915;
 
+/**
+ * Adresa pro migrace. Schválně JINÁ než runtime.
+ *
+ * Runtime jede přes transaction pooler (:6543), protože serverless
+ * potřebuje spojení vracet po každé transakci. Jenže právě to rozbíjí
+ * `pg_advisory_lock()`: zámek je vázaný na SEZENÍ, a v transakčním režimu
+ * se spojení po commitu vrátí do poolu a příští dotaz může jít po jiném
+ * fyzickém spojení. Zámek by pak nedržel nic - dvě souběžná nasazení by
+ * si o tom nic neřekla a migrovala naráz.
+ *
+ * Proto má migrace vlastní `MIGRATION_DATABASE_URL` mířící na SESSION
+ * pooler (:5432) nebo na přímé spojení. Migrace běží jednou za nasazení,
+ * takže jí strop session režimu nevadí.
+ *
+ * Když proměnná chybí, zkusí se DATABASE_URL - kvůli lokálnímu vývoji,
+ * kde je to jedna a tatáž přímá adresa.
+ */
+export function migrationUrl() {
+  return process.env.MIGRATION_DATABASE_URL?.trim() || process.env.DATABASE_URL?.trim() || "";
+}
+
+/** Vede adresa přes transaction pooler? Tam advisory zámek nedrží. */
+export function isTransactionPooler(url) {
+  return url.includes(":6543");
+}
+
+/**
+ * Proč se přes tuhle adresu migrovat nesmí. Null = smí se.
+ *
+ * Radši hlasité selhání než tichá migrace bez funkčního zámku: to druhé
+ * se projeví až tím, že dvě nasazení pustí tutéž migraci naráz.
+ */
+export function migrationUrlProblem(url = migrationUrl()) {
+  if (!url) return "Chybí MIGRATION_DATABASE_URL (ani DATABASE_URL).";
+  if (isTransactionPooler(url)) {
+    return (
+      "MIGRATION_DATABASE_URL vede přes transaction pooler (port 6543).\n" +
+      "  Tam nedrží pg_advisory_lock, takže by dvě souběžná nasazení mohla\n" +
+      "  migrovat naráz. Nastavte MIGRATION_DATABASE_URL na Supabase SESSION\n" +
+      "  pooler (port 5432); DATABASE_URL nechte na 6543 pro runtime."
+    );
+  }
+  return null;
+}
+
 export function connect(url) {
   return postgres(url, {
+    // Jedno spojení: zámek i migrace musí jít po tomtéž sezení.
     max: 1,
     prepare: false,
-    ssl: url.includes("sslmode=disable") ? false : "prefer",
+    // Stejně jako v runtime klientovi: vyžadovat, ne preferovat. `prefer`
+    // by při nedostupném TLS tiše přešlo na nešifrované spojení, a přes
+    // tohle spojení jde celé schéma. Options přebíjejí parametry z URL,
+    // takže `?sslmode=require` v adrese by se stejně neuplatnilo.
+    ssl: url.includes("sslmode=disable") ? false : "require",
     onnotice: () => {},
   });
 }
@@ -65,6 +115,13 @@ export function migrationDrift() {
 /**
  * Aplikuje, co chybí. Vrací přehled, nic nevypisuje sám - volající
  * rozhodne, jestli to jde do terminálu nebo do logu nasazení.
+ *
+ * @param {any} sql
+ * @param {{ force?: boolean,
+ *           onProgress?: (event: { file: string,
+ *                                  status: "skipped" | "applying" | "applied" }) => void
+ *                        | Promise<void> }} [options]
+ * @returns {Promise<Array<{ file: string, status: "skipped" | "applied" }>>}
  */
 export async function applyMigrations(sql, { force = false, onProgress } = {}) {
   const drift = migrationDrift();
@@ -77,32 +134,52 @@ export async function applyMigrations(sql, { force = false, onProgress } = {}) {
     applied_at timestamptz not null default now()
   )`;
 
-  // Dvě souběžná nasazení by jinak pustila tutéž migraci dvakrát. Zámek
-  // se drží po celou dobu spojení; druhý běh počká, než první doběhne,
-  // a pak už nemá co dělat.
-  await sql`select pg_advisory_lock(${MIGRATION_LOCK})`;
+  // Dvě souběžná nasazení by jinak pustila tutéž migraci dvakrát.
+  //
+  // `reserve()` vytáhne z poolu JEDNO spojení a drží ho po celý běh. To je
+  // podstatné: pg_advisory_lock je zámek SEZENÍ, takže musí být vzat
+  // i uvolněn po tomtéž spojení a všechno mezi tím musí jít po něm taky.
+  // Spoléhat na to, že při max:1 to stejně vyjde na totéž, by byla tichá
+  // domněnka o vnitřnostech knihovny.
+  const held = await sql.reserve();
   try {
-    const applied = new Set((await sql`select name from schema_migrations`).map((r) => r.name));
-    const results = [];
+    await held`select pg_advisory_lock(${MIGRATION_LOCK})`;
+    try {
+      const applied = new Set(
+        (await held`select name from schema_migrations`).map((r) => r.name),
+      );
+      const results = [];
 
-    for (const file of MIGRATIONS) {
-      if (applied.has(file) && !force) {
-        results.push({ file, status: "skipped" });
-        onProgress?.({ file, status: "skipped" });
-        continue;
+      for (const file of MIGRATIONS) {
+        if (applied.has(file) && !force) {
+          results.push({ file, status: "skipped" });
+          onProgress?.({ file, status: "skipped" });
+          continue;
+        }
+        onProgress?.({ file, status: "applying" });
+        // Migrace i její zápis v JEDNÉ transakci: buď obojí, nebo nic.
+        //
+        // Transakce se řídí ručně, protože rezervované spojení `begin()`
+        // nenabízí (na rozdíl od toho, co slibují typy) - a hlavně to
+        // musí proběhnout po TOMTÉŽ sezení, které drží advisory zámek.
+        await held`begin`;
+        try {
+          await held.unsafe(readFileSync(join(dir, file), "utf8"));
+          await held`insert into schema_migrations (name) values (${file}) on conflict (name) do nothing`;
+          await held`commit`;
+        } catch (error) {
+          await held`rollback`.catch(() => {});
+          throw error;
+        }
+        results.push({ file, status: "applied" });
+        onProgress?.({ file, status: "applied" });
       }
-      onProgress?.({ file, status: "applying" });
-      // Migrace i její zápis v jedné transakci: buď obojí, nebo nic.
-      await sql.begin(async (tx) => {
-        await tx.unsafe(readFileSync(join(dir, file), "utf8"));
-        await tx`insert into schema_migrations (name) values (${file}) on conflict (name) do nothing`;
-      });
-      results.push({ file, status: "applied" });
-      onProgress?.({ file, status: "applied" });
+      return results;
+    } finally {
+      await held`select pg_advisory_unlock(${MIGRATION_LOCK})`;
     }
-    return results;
   } finally {
-    await sql`select pg_advisory_unlock(${MIGRATION_LOCK})`;
+    held.release();
   }
 }
 
@@ -111,9 +188,11 @@ const isEntrypoint = process.argv[1]?.endsWith("migrate.mjs");
 if (isEntrypoint) await main();
 
 async function main() {
-  const url = process.env.DATABASE_URL;
-  if (!url) {
-    console.error("Chybí DATABASE_URL. Zkopírujte .env.example do .env.local a vyplňte ho.");
+  const url = migrationUrl();
+  const problem = migrationUrlProblem(url);
+  if (problem) {
+    console.error(problem);
+    console.error("  Zkopírujte .env.example do .env.local a vyplňte ho.");
     process.exit(1);
   }
 

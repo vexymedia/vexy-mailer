@@ -28,11 +28,21 @@
  *
  * Nic destruktivního: aplikují se jen migrace z repozitáře. Žádné mazání,
  * žádný reset, žádná „oprava" schématu podle rozdílu.
+ *
+ * Připojuje se přes MIGRATION_DATABASE_URL (session pooler), NE přes
+ * runtime DATABASE_URL (transaction pooler). Důvod je v migrate.mjs:
+ * advisory zámek je vázaný na sezení a v transakčním režimu by nedržel.
  */
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { config as loadEnv } from "dotenv";
-import { applyMigrations, connect, migrationDrift } from "./migrate.mjs";
+import {
+  applyMigrations,
+  connect,
+  migrationDrift,
+  migrationUrl,
+  migrationUrlProblem,
+} from "./migrate.mjs";
 import { MIGRATIONS, REQUIRED, findMissing } from "../src/lib/schema-contract.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -72,11 +82,20 @@ if (!checkOnly && vercelEnv && vercelEnv !== "production") {
   done(`release: nasazení typu "${vercelEnv}" databázi nemigruje. Přeskočeno.`);
 }
 
-const url = process.env.DATABASE_URL;
+// Migrace jezdí po vlastní adrese. Runtime DATABASE_URL se tu schválně
+// nepoužívá - viz migrationUrl() v migrate.mjs.
+const url = migrationUrl();
 if (!url) {
   // Build bez databáze je legitimní (lokální `npm run build`, CI bez
   // přístupu). Spadnout na tom by znamenalo, že se nedá ani sestavit.
-  done("release: DATABASE_URL není nastavená, databáze se nekontroluje. Přeskočeno.");
+  done("release: MIGRATION_DATABASE_URL ani DATABASE_URL nejsou nastavené, databáze se nekontroluje. Přeskočeno.");
+}
+
+// Adresa je, ale vede špatným poolerem. Tohle se přeskočit NESMÍ: tiše
+// migrovat bez funkčního zámku je horší než nemigrovat vůbec.
+const urlProblem = migrationUrlProblem(url);
+if (urlProblem) {
+  fail(`release: ${urlProblem}`);
 }
 
 // --- 2. seznam migrací vs. soubory ----------------------------------------

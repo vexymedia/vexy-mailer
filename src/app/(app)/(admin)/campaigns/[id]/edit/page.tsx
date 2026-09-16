@@ -1,3 +1,4 @@
+import { requireUuid } from "@/lib/route-params";
 import { notFound } from "next/navigation";
 import { sql } from "@/lib/db";
 import { getCampaignMailboxIds } from "@/lib/queries/campaigns";
@@ -11,6 +12,8 @@ export const dynamic = "force-dynamic";
 
 export default async function EditCampaignPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
+  // Nesmyslné id z adresy je 404, ne pád na chybě typu v Postgresu.
+  requireUuid(id);
   const [campaign] = await sql<Campaign[]>`select * from campaigns where id = ${id}`;
   if (!campaign) notFound();
   const [mailboxes, selected] = await Promise.all([

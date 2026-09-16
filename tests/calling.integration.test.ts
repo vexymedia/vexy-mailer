@@ -368,7 +368,9 @@ describe("calling never moves an e-mail", () => {
 
     const before = await row(ids[0]);
 
-    for (const outcome of ["no_answer", "callback", "do_not_call"] as const) {
+    // Průběžné výsledky, ne rozhodnutí o kontaktu. Ty se e-mailu nesmí
+    // dotknout. („nevolat“ je jiný případ a má vlastní test níž.)
+    for (const outcome of ["no_answer", "callback"] as const) {
       await calling.logCall({
         campaignContactId: ids[0],
         outcome,
@@ -383,17 +385,26 @@ describe("calling never moves an e-mail", () => {
     expect(after.next_send_at?.getTime()).toBe(before.next_send_at?.getTime());
     expect(after.sender_mailbox_id).toBe(before.sender_mailbox_id);
     // ...while the calling side did move.
-    expect(after.call_attempts).toBe(3);
-    expect(after.call_status).toBe("do_not_call");
+    expect(after.call_attempts).toBe(2);
+    expect(after.call_status).toBe("callback");
   });
 
-  it("does not put a do-not-call prospect on the e-mail suppression list", async () => {
+  it("„nevolat“ ukončí i e-mailovou sekvenci, ale na e-mailový seznam nesahá", async () => {
+    // ZMĚNA CHOVÁNÍ. Sekvence se zastaví - jinak by prospektovi přišel
+    // další cold e-mail hned poté, co řekl, že nechce být kontaktován.
+    //
+    // Globální `suppression_list` ale zůstává netknutý schválně: ten je
+    // o e-mailové adrese napříč všemi klienty, kdežto tohle rozhodnutí
+    // padlo v hovoru jednoho klienta.
     const { ids, callerId } = await seedCalling({ contacts: 1 });
     await calling.logCall({ campaignContactId: ids[0], outcome: "do_not_call", callerId });
 
     const [{ count }] = await sql<{ count: number }[]>`select count(*)::int from suppression_list`;
     expect(count).toBe(0);
-    expect((await row(ids[0])).status).not.toBe("unsubscribed");
+    const after = await row(ids[0]);
+    expect(after.status).toBe("unsubscribed");
+    expect(after.next_send_at).toBeNull();
+    expect(after.call_status).toBe("do_not_call");
   });
 
   it("still sends the e-mail sequence to a prospect who was merely called", async () => {
