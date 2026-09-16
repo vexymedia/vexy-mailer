@@ -26,6 +26,13 @@ export class TimeoutError extends Error {
  */
 export async function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+
+  // Když vyhraje timeout, `work` běží dál a může se později odmítnout.
+  // Bez tohohle by z toho byla neodchycená rejection - a ta v serverless
+  // runtime shodí celou instanci funkce, tedy i requesty, které s tím
+  // nemají nic společného.
+  work.catch(() => {});
+
   try {
     return await Promise.race([
       work,
@@ -54,9 +61,37 @@ export async function withTimeoutOr<T>(work: Promise<T>, ms: number, fallback: T
   }
 }
 
-/** Kolik smí čekat přihlašovací cesta. Člověk u formuláře čeká vteřiny. */
-export const LOGIN_DB_TIMEOUT_MS = 5000;
+/**
+ * Kolik smí trvat navázání spojení. Musí odpovídat `connect_timeout`
+ * v lib/db.ts - je to tatáž věc, jen v jiné jednotce.
+ */
+export const DB_CONNECT_BUDGET_MS = 5000;
+
+/**
+ * Kolik smí trvat samotný dotaz, jakmile spojení stojí.
+ */
+export const DB_QUERY_BUDGET_MS = 3000;
+
+/**
+ * Strop pro databázový krok přihlášení.
+ *
+ * SOUČET, ne libovolné číslo. Tohle je přesně ta chyba, kterou to tu
+ * jednou už mělo: strop byl 5000 ms a `connect_timeout` taky 5 s, takže
+ * na studeném serverless startu pokryl rozpočet jen navázání spojení
+ * a na dotaz nezbylo nic. Race byla prohraná předem a přihlášení hlásilo
+ * „databáze neodpovídá", i když databáze odpovídala normálně - readiness
+ * přes tentýž pool procházel.
+ *
+ * Strop na dotaz proto MUSÍ být větší než strop na spojení. Hlídá to test.
+ */
+export const LOGIN_DB_TIMEOUT_MS = DB_CONNECT_BUDGET_MS + DB_QUERY_BUDGET_MS;
 /** Kolik smí čekat kontrola přihlášení při vykreslení /login. Ještě míň. */
 export const SESSION_CHECK_TIMEOUT_MS = 2000;
-/** Readiness probe má odpovědět rychle, nebo říct, že to nejde. */
-export const READINESS_TIMEOUT_MS = 5000;
+/**
+ * Readiness probe má odpovědět rychle, nebo říct, že to nejde.
+ *
+ * Platí tu týž invariant jako u přihlášení: strop musí být větší než
+ * rozpočet na spojení, jinak by na studeném startu vypršel dřív, než se
+ * stihne připojit, a probe by hlásil „not_ready" u zdravé databáze.
+ */
+export const READINESS_TIMEOUT_MS = DB_CONNECT_BUDGET_MS + DB_QUERY_BUDGET_MS;
