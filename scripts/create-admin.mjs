@@ -70,7 +70,42 @@ if (!url) {
   process.exit(1);
 }
 
-const sql = postgres(url, { max: 1, prepare: false });
+/**
+ * Tvar adresy se ověří DŘÍV, než se předá do postgres().
+ *
+ * Při neplatné adrese vyhodí Node TypeError, jehož vlastnost `input`
+ * nese celou adresu - tedy i heslo - a ta skončí v terminálu a v historii.
+ * Takhle se heslo dá prozradit omylem: stačí, aby se do proměnné dostal
+ * kus dalšího příkazu nebo uvozovka navíc.
+ *
+ * Reprodukováno, ne odhadnuto.
+ */
+let parsed;
+try {
+  parsed = new URL(url);
+} catch {
+  console.error("DATABASE_URL není platná adresa.");
+  console.error("Musí obsahovat jen připojovací řetězec - bez uvozovek a bez dalších příkazů.");
+  process.exit(1);
+}
+if (!/^postgres(ql)?:$/.test(parsed.protocol)) {
+  console.error(`DATABASE_URL musí začínat "postgresql://", ne "${parsed.protocol}//".`);
+  process.exit(1);
+}
+// Host a port jsou pro kontrolu užitečné a tajné nejsou. Heslo ani
+// uživatel se nevypisují nikdy.
+console.log(`Připojuji se k ${parsed.hostname}:${parsed.port || 5432}.`);
+
+// Stejná pravidla jako runtime klient a migrační runner: Supabase
+// vyžaduje TLS a přes transaction pooler nefungují prepared statements.
+// Bez explicitního `ssl` by se spojení na pooler neotevřelo, pokud by
+// adresa ze schránky náhodou neměla `?sslmode=require` - a hláška by
+// vypadala jako chyba přihlašovacích údajů.
+const sql = postgres(url, {
+  max: 1,
+  prepare: false,
+  ssl: url.includes("sslmode=disable") ? false : "require",
+});
 
 try {
   const [table] = await sql`select to_regclass('public.users') as name`;
@@ -128,6 +163,19 @@ try {
     console.log(`Administrátor ${email} vytvořen.`);
   }
   console.log("Přihlaste se na /login tímhle e-mailem a heslem.");
+} catch (error) {
+  // Chyba z postgres.js může nést hosta, uživatele i celou adresu. Do
+  // terminálu proto jde jen to, co se s tím dá dělat.
+  const code = error?.code;
+  if (code === "28P01" || code === "28000") {
+    console.error("Databáze odmítla přihlašovací údaje. Zkontrolujte heslo v připojovací adrese.");
+  } else if (code === "ECONNREFUSED" || code === "ENOTFOUND" || code === "ETIMEDOUT") {
+    console.error(`K databázi se nepodařilo připojit (${parsed.hostname}:${parsed.port || 5432}).`);
+  } else {
+    console.error("Založení administrátora selhalo.");
+    console.error(`  ${error?.message ?? error}`);
+  }
+  process.exitCode = 1;
 } finally {
   await sql.end();
 }

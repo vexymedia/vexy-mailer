@@ -111,7 +111,23 @@ export async function loginAction(_prev: ActionState, formData: FormData): Promi
   const wrong = fail("Nesprávný e-mail nebo heslo.");
   if (!email || !password) return wrong;
 
-  const user = await getUserForLogin(email);
+  // Databáze může být nedostupná (výpadek, špatná adresa, vyčerpaný
+  // pooler). Bez tohohle se výjimka prohnala ven z akce a člověk dostal
+  // po patnácti sekundách čekání obecné „Application error" - tedy ani
+  // nevěděl, jestli má zkusit jiné heslo, nebo počkat. Změřeno, ne
+  // odhadnuto: 15 s a pád.
+  //
+  // Hláška je schválně jiná než u špatného hesla: tohle není chyba
+  // uživatele. Podrobnost jde do logu serveru, do prohlížeče nikdy -
+  // chyba z postgres.js běžně obsahuje hosta i uživatele.
+  let user: Awaited<ReturnType<typeof getUserForLogin>>;
+  try {
+    user = await getUserForLogin(email);
+  } catch (error) {
+    console.error("[login] dotaz na uživatele selhal", error);
+    return fail("Přihlášení se teď nepodařilo ověřit — databáze neodpovídá. Zkuste to prosím za chvíli.");
+  }
+
   if (!user || !user.is_active) {
     // Heslo se ověří i tak, aby se z rychlosti odpovědi nedalo poznat,
     // jestli účet existuje.
