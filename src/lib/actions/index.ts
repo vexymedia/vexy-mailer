@@ -13,6 +13,7 @@ import {
   sessionCookieOptions,
 } from "@/lib/auth";
 import { verifyPassword, passwordProblem } from "@/lib/password";
+import { LOGIN_DB_TIMEOUT_MS, withTimeout } from "@/lib/timeout";
 import {
   createUser,
   getUserForLogin,
@@ -120,9 +121,14 @@ export async function loginAction(_prev: ActionState, formData: FormData): Promi
   // Hláška je schválně jiná než u špatného hesla: tohle není chyba
   // uživatele. Podrobnost jde do logu serveru, do prohlížeče nikdy -
   // chyba z postgres.js běžně obsahuje hosta i uživatele.
+  //
+  // Časový strop: postgres.js nemá timeout na dotaz, takže se bez tohohle
+  // čekalo, dokud se nevzdá spojení. Měřeno: desítky sekund a tlačítko
+  // celou dobu v „Přihlašuji…". Pět sekund je hranice, po které už člověk
+  // radši uvidí chybu, než aby dál koukal na spinner.
   let user: Awaited<ReturnType<typeof getUserForLogin>>;
   try {
-    user = await getUserForLogin(email);
+    user = await withTimeout(getUserForLogin(email), LOGIN_DB_TIMEOUT_MS);
   } catch (error) {
     console.error("[login] dotaz na uživatele selhal", error);
     return fail("Přihlášení se teď nepodařilo ověřit — databáze neodpovídá. Zkuste to prosím za chvíli.");

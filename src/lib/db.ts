@@ -57,7 +57,11 @@ function createClient(): Sql {
   return postgres(url, {
     max: poolSize(),
     idle_timeout: 20,
-    connect_timeout: 15,
+    // Pět sekund, ne patnáct. Na navázání spojení přes pooler to bohatě
+    // stačí a je to doba, po kterou se dá u formuláře čekat. Patnáct
+    // znamenalo, že se nedostupná databáze projevila až dávno poté, co
+    // to člověk vzdal.
+    connect_timeout: 5,
     // Nikdy prepared statements. Přes transaction pooler nefungují a přes
     // přímé spojení je nepotřebujeme natolik, aby stálo za to mít dvě
     // různá chování podle tvaru adresy - to je přesně ten druh rozdílu,

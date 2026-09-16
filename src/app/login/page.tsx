@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 import { isAuthenticated } from "@/lib/auth";
+import { SESSION_CHECK_TIMEOUT_MS, withTimeoutOr } from "@/lib/timeout";
 import { loginAction } from "@/lib/actions";
 import { ActionForm, SubmitButton } from "@/components/action-form";
 
@@ -17,7 +18,19 @@ export default async function LoginPage({
 }: {
   searchParams: Promise<{ next?: string }>;
 }) {
-  if (await isAuthenticated()) redirect("/");
+  // Přihlašovací stránka se MUSÍ načíst i bez databáze.
+  //
+  // `isAuthenticated()` sahá na databázi, ale jen když prohlížeč posílá
+  // session cookie. Bez cookie se stránka načetla vždycky; s cookie
+  // čekala na databázi - a při jejím výpadku skončila chybou 500 po
+  // 37 sekundách. Člověk se tak nedostal ani k formuláři, kterým by se
+  // přihlásil.
+  //
+  // Když se do dvou sekund nedozvíme, jestli je někdo přihlášený,
+  // ukážeme formulář. Přihlášený uživatel tím nic neztratí: klikne na
+  // kteroukoli stránku a dostane se dál. Nepřihlášený dostane přesně to,
+  // pro co přišel.
+  if (await withTimeoutOr(isAuthenticated(), SESSION_CHECK_TIMEOUT_MS, false)) redirect("/");
   const { next } = await searchParams;
 
   return (
