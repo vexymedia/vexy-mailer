@@ -202,8 +202,14 @@ describe("výpadek databáze", () => {
     // skončil obecným „Application error". Člověk netušil, jestli má
     // zkusit jiné heslo, nebo počkat.
     const users = await import("@/lib/queries/users");
-    vi.spyOn(users, "getUserForLogin").mockRejectedValue(
-      Object.assign(new Error("connect ECONNREFUSED 10.0.0.1:6543"), { code: "ECONNREFUSED" }),
+    vi.spyOn(users, "findUserForLogin").mockImplementation(
+      () =>
+        Object.assign(
+          Promise.reject(
+            Object.assign(new Error("connect ECONNREFUSED 10.0.0.1:6543"), { code: "ECONNREFUSED" }),
+          ),
+          { cancel: () => {} },
+        ) as never,
     );
 
     const result = await login(form("vojtechsustal@seznam.cz", PASSWORD));
@@ -299,17 +305,37 @@ describe("co pod časovým stropem neběží", () => {
 // ================================ rozlišení timeoutu od ostatních chyb
 
 describe("hlášky rozlišují, co se stalo", () => {
+  /** Tvar, který vrací postgres.js: thenable, který se dá zrušit. */
+  const fakeQuery = <T,>(work: Promise<T>, cancel = () => {}) =>
+    Object.assign(work, { cancel }) as never;
+
   it("vypršený strop se hlásí jako „neodpověděla včas“", async () => {
     const users = await import("@/lib/queries/users");
-    vi.spyOn(users, "getUserForLogin").mockImplementation(() => new Promise(() => {}));
+    vi.spyOn(users, "findUserForLogin").mockImplementation(() =>
+      fakeQuery(new Promise(() => {})),
+    );
     const result = await login(form("vojtechsustal@seznam.cz", PASSWORD));
     expect(result.error).toContain("neodpověděla včas");
   }, 20_000);
 
+  it("vypršený strop dotaz opravdu zruší", async () => {
+    // Bez zrušení zůstane dotaz viset na spojení a při `max: 1` se za něj
+    // zařadí každé další přihlášení v téhle instanci.
+    const users = await import("@/lib/queries/users");
+    const cancel = vi.fn();
+    vi.spyOn(users, "findUserForLogin").mockImplementation(() =>
+      fakeQuery(new Promise(() => {}), cancel),
+    );
+    await login(form("vojtechsustal@seznam.cz", PASSWORD));
+    expect(cancel).toHaveBeenCalledTimes(1);
+  }, 20_000);
+
   it("chyba z databáze se hlásí jako „neodpovídá“", async () => {
     const users = await import("@/lib/queries/users");
-    vi.spyOn(users, "getUserForLogin").mockRejectedValue(
-      Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }),
+    vi.spyOn(users, "findUserForLogin").mockImplementation(() =>
+      fakeQuery(
+        Promise.reject(Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" })),
+      ),
     );
     const result = await login(form("vojtechsustal@seznam.cz", PASSWORD));
     expect(result.error).toContain("neodpovídá");
@@ -318,8 +344,10 @@ describe("hlášky rozlišují, co se stalo", () => {
 
   it("žádná z hlášek nenese host, uživatele ani kód", async () => {
     const users = await import("@/lib/queries/users");
-    vi.spyOn(users, "getUserForLogin").mockRejectedValue(
-      new Error("connect ECONNREFUSED db.tajny.supabase.co:6543 user=postgres"),
+    vi.spyOn(users, "findUserForLogin").mockImplementation(() =>
+      fakeQuery(
+        Promise.reject(new Error("connect ECONNREFUSED db.tajny.supabase.co:6543 user=postgres")),
+      ),
     );
     const result = await login(form("vojtechsustal@seznam.cz", PASSWORD));
     for (const secret of ["tajny", "6543", "postgres", "ECONNREFUSED"]) {
@@ -346,5 +374,102 @@ describe("timeout po sobě neuklizený nenechá", () => {
 
     process.off("unhandledRejection", onUnhandled);
     expect(unhandled).toEqual([]);
+  });
+});
+
+describe("vypršený strop nesmí zablokovat pool", () => {
+  /**
+   * Tohle je ten test, který by produkční výpadek odhalil.
+   *
+   * postgres.js ruší svůj jediný časovač na první ReadyForQuery, takže
+   * dotaz na navázaném spojení nemá strop žádný. Když se ho aplikace jen
+   * přestane držet, dotaz zůstane viset NA SPOJENÍ - a protože postgres.js
+   * další dotazy zařazuje i na obsazené spojení, při `max: 1` se za něj
+   * postaví každé další přihlášení v téhle instanci. Z jednoho zádrhelu
+   * je trvale rozbitá instance.
+   */
+  it("po zrušení dotazu projde další dotaz na témže spojení hned", async () => {
+    const postgres = (await import("postgres")).default;
+    const { TEST_DATABASE_URL } = await import("./helpers/db");
+    const { withQueryTimeout, TimeoutError } = await import("@/lib/timeout");
+    const sql = postgres(TEST_DATABASE_URL, { max: 1, prepare: false, ssl: false, onnotice: () => {} });
+
+    try {
+      const blokujici = sql`select pg_sleep(20)`;
+      await expect(withQueryTimeout(blokujici, 300)).rejects.toBeInstanceOf(TimeoutError);
+
+      // Přesně to, co v produkci dělá další přihlášení v téže instanci.
+      const zacatek = Date.now();
+      const [row] = await sql<{ ok: number }[]>`select 1 as ok`;
+      expect(row.ok).toBe(1);
+      expect(Date.now() - zacatek).toBeLessThan(2000);
+    } finally {
+      await sql.end({ timeout: 0 }).catch(() => {});
+    }
+  }, 30_000);
+
+  it("dotaz, který doběhne včas, se neruší", async () => {
+    const { withQueryTimeout } = await import("@/lib/timeout");
+    const cancel = vi.fn();
+    const query = Object.assign(Promise.resolve(["hotovo"]), { cancel });
+
+    await expect(withQueryTimeout(query, 5000)).resolves.toEqual(["hotovo"]);
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
+  it("selhání samotného zrušení neshodí přihlašovací cestu", async () => {
+    const { withQueryTimeout, TimeoutError } = await import("@/lib/timeout");
+    // Pooler nemusí CancelRequest propustit. Když zrušení selže, nejsme
+    // na tom hůř než před opravou - ale hlášku musí uživatel dostat.
+    const query = Object.assign(new Promise(() => {}), {
+      cancel: () => {
+        throw new Error("pooler zrušení nepropustil");
+      },
+    });
+
+    await expect(withQueryTimeout(query, 50)).rejects.toBeInstanceOf(TimeoutError);
+  });
+
+  it("zrušený dotaz nezpůsobí neodchycenou chybu", async () => {
+    const { withQueryTimeout, TimeoutError } = await import("@/lib/timeout");
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+
+    let odmitnout: (e: Error) => void = () => {};
+    const query = Object.assign(
+      new Promise((_, reject) => {
+        odmitnout = reject;
+      }),
+      // Zrušení dotaz odmítne - přesně jako postgres.js po CancelRequest.
+      { cancel: () => setTimeout(() => odmitnout(new Error("57014")), 30) },
+    );
+
+    await expect(withQueryTimeout(query, 20)).rejects.toBeInstanceOf(TimeoutError);
+    await new Promise((r) => setTimeout(r, 300));
+
+    process.off("unhandledRejection", onUnhandled);
+    expect(unhandled).toEqual([]);
+  });
+});
+
+describe("klient je pro serverless nastavený bezpečně", () => {
+  it("drží max 1 spojení, bez prepared statements a s omezenou životností", async () => {
+    const { sql } = await import("@/lib/db");
+    const options = (sql as unknown as {
+      options: { max: number; prepare: boolean; max_lifetime: number | null; connect_timeout: number };
+    }).options;
+
+    // Násobí se to počtem živých instancí, ne jedničkou. Viz lib/db.ts.
+    expect(options.max).toBe(1);
+    // Transaction pooler prepared statements neumí.
+    expect(options.prepare).toBe(false);
+    // Zmrazená serverless instance se nesmí probudit s letitým socketem.
+    expect(options.max_lifetime).toBeGreaterThan(0);
+    expect(options.max_lifetime).toBeLessThanOrEqual(600);
+    // Životnost spojení musí být delší než strop přihlášení, jinak by se
+    // spojení zahazovalo pod rukama běžícímu dotazu.
+    const { LOGIN_DB_TIMEOUT_MS } = await import("@/lib/timeout");
+    expect((options.max_lifetime ?? 0) * 1000).toBeGreaterThan(LOGIN_DB_TIMEOUT_MS);
   });
 });

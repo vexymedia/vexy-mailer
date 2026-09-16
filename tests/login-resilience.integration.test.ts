@@ -86,8 +86,11 @@ describe("/login nečeká na databázi", () => {
 describe("odeslání formuláře při nedostupné databázi", () => {
   it("skončí do stropu a vrátí srozumitelnou chybu", async () => {
     const users = await import("@/lib/queries/users");
-    // Dotaz, který nikdy nedoběhne - jako zaseklé spojení.
-    vi.spyOn(users, "getUserForLogin").mockImplementation(() => new Promise(() => {}));
+    // Dotaz, který nikdy nedoběhne - jako zaseklé spojení. Tvar odpovídá
+    // postgres.js: thenable, který se dá zrušit.
+    vi.spyOn(users, "findUserForLogin").mockImplementation(
+      () => Object.assign(new Promise(() => {}), { cancel: () => {} }) as never,
+    );
 
     const { LOGIN_DB_TIMEOUT_MS } = await import("@/lib/timeout");
     const actions = await import("@/lib/actions");
@@ -110,7 +113,12 @@ describe("odeslání formuláře při nedostupné databázi", () => {
 
   it("hláška o výpadku se liší od hlášky o špatném heslu", async () => {
     const users = await import("@/lib/queries/users");
-    vi.spyOn(users, "getUserForLogin").mockRejectedValue(new Error("spojení selhalo"));
+    vi.spyOn(users, "findUserForLogin").mockImplementation(
+      () =>
+        Object.assign(Promise.reject(new Error("spojení selhalo")), {
+          cancel: () => {},
+        }) as never,
+    );
     const actions = await import("@/lib/actions");
     const data = new FormData();
     data.set("email", "kdokoli@vexy.test");

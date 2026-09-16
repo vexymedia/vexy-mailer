@@ -67,6 +67,22 @@ function createClient(): Sql {
     // různá chování podle tvaru adresy - to je přesně ten druh rozdílu,
     // který se projeví až na produkci.
     prepare: false,
+    // Spojení se po pěti minutách zahodí a otevře znovu.
+    //
+    // Tohle je serverless: mezi requesty se instance ZMRAZÍ. Časovače
+    // neběží, a když pooler nebo NAT mezitím spojení tiše zahodí bez FIN,
+    // instance se probudí s polomrtvým socketem. postgres.js na něm dotaz
+    // vesele odešle - a protože po navázání spojení už žádný strop nemá
+    // (connectTimer se ruší na první ReadyForQuery), čeká se na odpověď,
+    // která nikdy nepřijde. Kratší životnost spojení tomuhle oknu brání.
+    //
+    // Běžící dotaz to neutne: postgres.js spojení ukončí až ve chvíli, kdy
+    // na něm nic neběží.
+    max_lifetime: 300,
+    // Deset sekund, ne šedesát. TCP keepalive je jediné, co polomrtvý
+    // socket odhalí samo od sebe - a čím dřív začne sondovat, tím dřív se
+    // z „čeká se navěky" stane chyba, kterou jde ohlásit.
+    keep_alive: 10,
     // TLS se vyžaduje, ne jen preferuje. `prefer` znamená „zkus TLS,
     // a když nepůjde, jeď nešifrovaně" - to je pro produkční databázi
     // špatná výchozí volba. Na `?sslmode=require` v adrese se navíc
@@ -74,6 +90,12 @@ function createClient(): Sql {
     // parametry z URL, takže by ho tenhle řádek přebil.
     ssl: url.includes("sslmode=disable") ? false : "require",
     onnotice: () => {},
+    // Zavřená spojení se logují. Jediné id, nic víc - žádná adresa, žádné
+    // údaje. Když se přihlášení zadrhne, je z logu poznat, jestli se pod
+    // ním spojení zavíralo (zastaralý socket), nebo drželo (čekání na zámek).
+    onclose: (connId: number) => {
+      console.log(`[db] spojení ${connId} zavřeno`);
+    },
   });
 }
 

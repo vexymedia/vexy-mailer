@@ -13,10 +13,17 @@ import {
   sessionCookieOptions,
 } from "@/lib/auth";
 import { verifyPassword, passwordProblem } from "@/lib/password";
-import { LOGIN_DB_TIMEOUT_MS, TimeoutError, withTimeout } from "@/lib/timeout";
+import {
+  DB_QUERY_BUDGET_MS,
+  LOGIN_DB_TIMEOUT_MS,
+  TimeoutError,
+  withQueryTimeout,
+  withTimeoutOr,
+} from "@/lib/timeout";
+import { pingDatabase } from "@/lib/system-status";
 import {
   createUser,
-  getUserForLogin,
+  findUserForLogin,
   setUserActive,
   setUserPassword,
   updateUser,
@@ -119,7 +126,7 @@ export async function loginAction(_prev: ActionState, formData: FormData): Promi
   const password = String(formData.get("password") ?? "");
   const wrong = fail("Nesprávný e-mail nebo heslo.");
   // E-mail ani heslo se do logu nedostanou. Jen to, jestli dorazily.
-  phase("formulář", `email=${email ? "ano" : "ne"} heslo=${password ? "ano" : "ne"}`);
+  phase("start", `email=${email ? "ano" : "ne"} heslo=${password ? "ano" : "ne"}`);
   if (!email || !password) return wrong;
 
   // ---------------------------------------------------- dotaz na uživatele
@@ -132,11 +139,13 @@ export async function loginAction(_prev: ActionState, formData: FormData): Promi
   // Strop se týká VÝHRADNĚ tohohle dotazu. Ověření hesla ani vydání cookie
   // pod ním neběží: scrypt je práce procesoru a cookie je zápis do hlavičky,
   // takže by se jejich pomalost mylně hlásila jako problém s databází.
-  let user: Awaited<ReturnType<typeof getUserForLogin>>;
+  let user: Awaited<ReturnType<typeof findUserForLogin>>[number] | null;
   const dbStarted = Date.now();
+  const query = findUserForLogin(email);
   try {
     phase("dotaz-start");
-    user = await withTimeout(getUserForLogin(email), LOGIN_DB_TIMEOUT_MS);
+    const [row] = await withQueryTimeout(query, LOGIN_DB_TIMEOUT_MS);
+    user = row ?? null;
     phase("dotaz-hotov", `${Date.now() - dbStarted}ms nalezen=${user ? "ano" : "ne"}`);
   } catch (error) {
     // Jako problém s databází se hlásí jen to, co jím opravdu je: vypršený
@@ -144,15 +153,40 @@ export async function loginAction(_prev: ActionState, formData: FormData): Promi
     // tou hláškou schovalo a hledalo by se to špatně.
     const timedOut = error instanceof TimeoutError;
     const code = (error as { code?: string })?.code;
-    console.error(
-      `[login ${rid}] dotaz-selhal ${Date.now() - dbStarted}ms ` +
-        `${timedOut ? `timeout po ${LOGIN_DB_TIMEOUT_MS}ms` : `kód=${code ?? "neznámý"}`}`,
-      error,
-    );
+    const waited = Date.now() - dbStarted;
+
+    if (timedOut) {
+      // Kde přesně se to zadrhlo. postgres.js nastavuje `state` ve chvíli,
+      // kdy dotaz dostane živé spojení a odejde na síť - takže tohle
+      // rozlišuje „nedostali jsme spojení" od „spojení stálo a databáze
+      // neodpověděla". Bez toho se ty dva případy neliší a hledají se
+      // úplně jinde.
+      const sent = Boolean((query as { state?: unknown }).state);
+      const where = sent ? "spojení-stálo/bez-odpovědi" : "čekání-na-spojení";
+      // A jestli je mimo provozu celá cesta k databázi, nebo jen tenhle
+      // dotaz. `select 1` nesahá na žádnou tabulku, takže projde i tehdy,
+      // když je `users` zamčená nebo nedostupná. Běží po zrušení dotazu,
+      // tedy na uvolněném spojení.
+      const probeStarted = Date.now();
+      const probe = await withTimeoutOr(pingDatabase(), DB_QUERY_BUDGET_MS, {
+        ok: false,
+        error: "sonda sama nedoběhla",
+      });
+      console.error(
+        `[login ${rid}] dotaz-timeout ${waited}ms strop=${LOGIN_DB_TIMEOUT_MS}ms ` +
+          `fáze=${where} (${Date.now() - probeStarted}ms) ` +
+          (probe.ok
+            ? "sonda=select-1-prošel → vázne dotaz na users, ne databáze jako celek"
+            : `sonda=select-1-selhal (${probe.error}) → vázne celá cesta k databázi`),
+      );
+      return fail(
+        "Přihlášení se teď nepodařilo ověřit — databáze neodpověděla včas. Zkuste to prosím za chvíli.",
+      );
+    }
+
+    console.error(`[login ${rid}] dotaz-selhal ${waited}ms kód=${code ?? "neznámý"}`, error);
     return fail(
-      timedOut
-        ? "Přihlášení se teď nepodařilo ověřit — databáze neodpověděla včas. Zkuste to prosím za chvíli."
-        : "Přihlášení se teď nepodařilo ověřit — databáze neodpovídá. Zkuste to prosím za chvíli.",
+      "Přihlášení se teď nepodařilo ověřit — databáze neodpovídá. Zkuste to prosím za chvíli.",
     );
   }
 
@@ -162,6 +196,7 @@ export async function loginAction(_prev: ActionState, formData: FormData): Promi
   // a na vytížené serverless instanci může trvat déle než obvykle - to
   // ale není důvod tvrdit, že neodpovídá databáze.
   const pwStarted = Date.now();
+  phase("heslo-start");
   if (!user || !user.is_active) {
     // Heslo se ověří i tak, aby se z rychlosti odpovědi nedalo poznat,
     // jestli účet existuje.
@@ -179,9 +214,12 @@ export async function loginAction(_prev: ActionState, formData: FormData): Promi
   //
   // Session je podepsaná cookie, ne řádek v databázi. Tady se tedy
   // nesahá na databázi vůbec.
+  const sessionStarted = Date.now();
+  phase("session-start");
   const store = await cookies();
   store.set(SESSION_COOKIE, createSessionToken(user.id), sessionCookieOptions);
-  phase("cookie-nastavena");
+  // Token se do logu NIKDY nedostane, jen jak dlouho trvalo ho vydat.
+  phase("session-hotova", `${Date.now() - sessionStarted}ms`);
 
   const next = String(formData.get("next") ?? "");
   // Caller nemá co dělat na admin přehledu: jde rovnou do práce.
