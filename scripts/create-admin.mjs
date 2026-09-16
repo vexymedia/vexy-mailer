@@ -70,7 +70,16 @@ if (!url) {
   process.exit(1);
 }
 
-const sql = postgres(url, { max: 1, prepare: false });
+// Stejná pravidla jako runtime klient a migrační runner: Supabase
+// vyžaduje TLS a přes transaction pooler nefungují prepared statements.
+// Bez explicitního `ssl` by se spojení na pooler neotevřelo, pokud by
+// adresa ze schránky náhodou neměla `?sslmode=require` - a hláška by
+// vypadala jako chyba přihlašovacích údajů.
+const sql = postgres(url, {
+  max: 1,
+  prepare: false,
+  ssl: url.includes("sslmode=disable") ? false : "require",
+});
 
 try {
   const [table] = await sql`select to_regclass('public.users') as name`;
