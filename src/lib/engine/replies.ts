@@ -252,19 +252,34 @@ async function processMailbox(mailbox: Mailbox): Promise<ReplyPollSummary["mailb
       // Kroky se proto POZASTAVÍ a jejich termín se uschová. Rozhodne
       // člověk v Komunikaci → K vyřízení; do té doby se nic neodešle.
       if (fromStranger) {
-        // Sekvence běží DÁL. `needs_review` je příznak příchozí zprávy,
-        // ne pauza kampaně: kdyby uměl zastavit odesílání, stačilo by
-        // komukoli zvenčí napsat do vlákna a naše oslovení by stálo.
-        // Nejistý inbound nesmí mít vliv na outbound harmonogram.
+        // Sekvence se POZASTAVÍ, dokud to někdo neposoudí.
         //
-        // Cena je jasná a zvolená vědomě: než někdo zprávu posoudí,
-        // může odejít další naplánovaný krok. To je očekávané.
+        // Nejde bezpečně určit, jestli píše prospekt z jiné adresy, nebo
+        // někdo cizí. Obě unáhlené odpovědi jsou špatně: označit ho za
+        // odpověděvšího by ho utnulo kvůli cizí zprávě, nechat sekvenci
+        // běžet by mu poslalo cold e-mail hodinu poté, co nám odpověděl.
+        //
+        // Pozastavuje se JEN ten kontakt, na který se vlákno spárovalo -
+        // ne všechny kontakty klienta. Kandidáta určuje thread, ne doména
+        // odesílatele, takže dopad je přesně jeden enrollment.
+        //
+        // `coalesce` na uschovaném termínu: druhá cizí zpráva do téhož
+        // vlákna nesmí přepsat uschovanou hodnotu nulou, kterou tam
+        // nechala ta první.
+        await sql`
+          update campaign_contacts
+             set paused_next_send_at = coalesce(paused_next_send_at, next_send_at),
+                 next_send_at = null,
+                 updated_at = now()
+           where id = ${target.campaign_contact_id}
+             and status in ('scheduled', 'sent')
+        `;
         await logActivity({
           level: "warn",
           action: "Odpověď od jiné adresy",
           detail:
             `${message.from} odpověděl na vlákno s ${target.contact_email}. ` +
-            "Kontakt zůstává v sekvenci, zpráva čeká na posouzení v Komunikaci.",
+            "Další kroky jsou pozastavené, dokud zprávu někdo neposoudí.",
           campaignId: target.campaign_id,
           contactId: target.contact_id,
           campaignContactId: target.campaign_contact_id,

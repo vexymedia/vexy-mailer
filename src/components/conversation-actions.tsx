@@ -145,25 +145,23 @@ export function DeleteConversationButton({ conversationId }: { conversationId: s
  * existuje sama od sebe: stačí odejít.
  */
 /**
- * Posouzení odpovědi od jiné adresy.
+ * Posouzení odpovědi od nejisté adresy.
  *
- * Posouzení NIC nepozastavuje - sekvence běží celou dobu. Nejistá příchozí
- * zpráva nesmí umět zastavit naše oslovení, jinak by stačilo komukoli
- * zvenčí napsat do vlákna. Texty to musí říkat přesně tak, jak to je:
- * dřív tu stálo, že kroky stojí, a to by uživatele mátlo.
+ * Dokud to někdo neposoudí, sekvence toho kontaktu STOJÍ. Texty to musí
+ * říkat přesně: uživatel se podle nich rozhoduje, jak moc spěchá.
  */
 export function ReviewDecision({
   conversationId,
   replyId,
   fromEmail,
   contactEmail,
-  nextSendAt,
+  pausedUntil,
 }: {
   conversationId: string;
   replyId: string;
   fromEmail: string;
   contactEmail: string;
-  nextSendAt: Date | null;
+  pausedUntil: Date | null;
 }) {
   return (
     <ActionForm action={resolveReviewAction} className="card border-amber-300 bg-amber-50 p-4">
@@ -177,11 +175,13 @@ export function ReviewDecision({
         vlákna — může jít o tutéž osobu z jiné adresy, nebo o přeposlání někomu jinému.
       </p>
       <p className="mt-1 text-xs text-amber-800">
-        Sekvence kontaktu běží dál.{" "}
-        {nextSendAt ? (
-          <>Další krok odejde <DateTime value={nextSendAt} />, pokud to teď neukončíte.</>
+        {pausedUntil ? (
+          <>
+            Další kroky sekvence stojí. Byly naplánované na{" "}
+            <DateTime value={pausedUntil} />.
+          </>
         ) : (
-          "Další krok naplánovaný nemá."
+          "Kontakt teď žádný naplánovaný krok neměl."
         )}
       </p>
 
@@ -200,12 +200,13 @@ export function ReviewDecision({
           className="btn-secondary !py-1.5 text-sm"
           pendingLabel="Ukládám…"
         >
-          Nesouvisí
+          Nesouvisející zpráva
         </SubmitButton>
       </div>
       <p className="mt-2 text-xs text-amber-800/80">
-        „Odpověděl nám prospekt“ kontakt označí za odpověděvšího a sekvenci ukončí. „Nesouvisí“ jen
-        zavře tohle posouzení — harmonogram zůstane, jaký je.
+        „Odpověděl nám prospekt“ kontakt označí za odpověděvšího a sekvenci ukončí.
+        „Nesouvisející zpráva“ jen zavře tohle posouzení a sekvence pokračuje od původního termínu —
+        nic nahromaděného se neodešle naráz.
       </p>
     </ActionForm>
   );

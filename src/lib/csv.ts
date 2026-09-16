@@ -24,6 +24,18 @@ export interface CsvParseResult {
   errors: string[];
   /** Header names in the file that were not recognised. */
   ignoredColumns: string[];
+  /**
+   * Kolik datových řádků soubor měl (bez hlavičky).
+   *
+   * Drží se proto, aby šel sestavit součet, který sedí: VEXY prodává
+   * „až 300 relevantních lidí" a klient musí vidět, co se stalo s každým
+   * řádkem, ne jen kolik jich prošlo.
+   */
+  totalRows: number;
+  /** Řádek bez e-mailu nebo s neplatnou adresou. */
+  invalid: number;
+  /** Tatáž adresa v souboru podruhé. */
+  duplicatesInFile: number;
 }
 
 /** Splits CSV text into a matrix of raw string cells. */
@@ -191,9 +203,15 @@ export function parseContactsCsv(input: string): CsvParseResult {
   const errors: string[] = [];
   const rows: ParsedContactRow[] = [];
 
+  let invalid = 0;
+  let duplicatesInFile = 0;
+
   const matrix = parseCsv(input, detectDelimiter(input));
   if (matrix.length === 0) {
-    return { rows, errors: ["Soubor je prázdný."], ignoredColumns: [] };
+    return {
+      rows, errors: ["Soubor je prázdný."], ignoredColumns: [],
+      totalRows: 0, invalid: 0, duplicatesInFile: 0,
+    };
   }
 
   const header = matrix[0];
@@ -217,6 +235,9 @@ export function parseContactsCsv(input: string): CsvParseResult {
         `Nenalezen sloupec "email". Rozpoznané hlavičky: ${header.map((h) => h.trim()).join(", ") || "(žádné)"}.`,
       ],
       ignoredColumns,
+      totalRows: Math.max(0, matrix.length - 1),
+      invalid: 0,
+      duplicatesInFile: 0,
     };
   }
 
@@ -241,16 +262,19 @@ export function parseContactsCsv(input: string): CsvParseResult {
     }
 
     if (!record.email) {
+      invalid++;
       errors.push(`Řádek ${line}: chybí e-mailová adresa, řádek přeskočen.`);
       continue;
     }
     const email = normaliseEmail(record.email);
     if (!isValidEmail(email)) {
+      invalid++;
       errors.push(`Řádek ${line}: "${record.email}" není platná e-mailová adresa, řádek přeskočen.`);
       continue;
     }
     // Deduplicate inside the file itself; DB-level dedupe happens on insert.
     if (seen.has(email)) {
+      duplicatesInFile++;
       errors.push(`Řádek ${line}: ${email} je v souboru víckrát, pozdější řádek přeskočen.`);
       continue;
     }
@@ -268,7 +292,12 @@ export function parseContactsCsv(input: string): CsvParseResult {
     });
   }
 
-  return { rows, errors, ignoredColumns };
+  return {
+    rows, errors, ignoredColumns,
+    totalRows: Math.max(0, matrix.length - 1),
+    invalid,
+    duplicatesInFile,
+  };
 }
 
 // ---------------------------------------------- klientský vylučovací seznam

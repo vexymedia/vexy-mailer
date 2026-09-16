@@ -13,6 +13,7 @@ const LINKS = [
   { href: "/calleri", label: "Calleři" },
   { href: "/mailboxes", label: "Schránky" },
   { href: "/suppression", label: "Nekontaktovat" },
+  { href: "/prilezitosti", label: "Příležitosti" },
   { href: "/activity", label: "Aktivita" },
   { href: "/settings", label: "Nastavení" },
 ];

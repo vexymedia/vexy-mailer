@@ -32,6 +32,7 @@ export const MIGRATIONS = [
   "0013_clients.sql",
   "0014_scheduler_pools_and_classification.sql",
   "0015_exclusions_ico_and_review.sql",
+  "0016_review_pause.sql",
 ];
 
 /**
@@ -62,6 +63,7 @@ export const REQUIRED = [
   { since: "0015", feature: "IČO firmy", table: "companies", columns: ["ico"] },
   { since: "0015", feature: "Autor vyloučení", table: "client_company_exclusions", columns: ["created_by"] },
   { since: "0015", feature: "Odpovědi ke kontrole", table: "replies", columns: ["needs_review"] },
+  { since: "0016", feature: "Pozastavení na dobu posouzení", table: "campaign_contacts", columns: ["paused_next_send_at"] },
 ];
 
 /**

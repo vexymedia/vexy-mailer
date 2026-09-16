@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { TEST_DATABASE_URL, closeDatabase, configureTestEnv } from "./helpers/db";
-import { MIGRATIONS } from "@/lib/schema-contract.mjs";
+import { MIGRATIONS, REQUIRED } from "@/lib/schema-contract.mjs";
 
 const run = promisify(execFile);
 
@@ -171,8 +171,14 @@ describe("databáze pozadu za aplikací", () => {
   it("release ji dorovná a skončí úspěchem", async () => {
     const url = await freshDatabase();
     await script("migrate.mjs", { url });
+
+    // Sloupec, který přidává právě poslední migrace - aby se test nerozbil,
+    // až nějaká další přibude.
+    const [need] = REQUIRED.filter((r) => r.since === last.slice(0, 4));
+    expect(need, `poslední migrace ${last} nic nepřidává do kontraktu`).toBeTruthy();
+
     await query(url, `delete from schema_migrations where name = '${last}'`);
-    await query(url, "alter table companies drop column ico");
+    await query(url, `alter table ${need.table} drop column ${need.columns[0]}`);
 
     const release = await script("release.mjs", { url });
     expect(release.code).toBe(0);
@@ -180,7 +186,8 @@ describe("databáze pozadu za aplikací", () => {
 
     const [row] = await query<{ count: string }>(
       url,
-      "select count(*) from information_schema.columns where table_name='companies' and column_name='ico'",
+      `select count(*) from information_schema.columns
+        where table_name='${need.table}' and column_name='${need.columns[0]}'`,
     );
     expect(Number(row.count)).toBe(1);
   });

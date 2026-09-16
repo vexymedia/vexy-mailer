@@ -544,15 +544,15 @@ export interface PendingReview {
   received_at: Date;
   campaign_contact_id: string;
   contact_email: string;
-  /** Termín dalšího kroku. Sekvence běží dál, tohle je jen informace. */
-  next_send_at: Date | null;
+  /** Termín, který čeká na rozhodnutí. Null = kontakt žádný krok neměl. */
+  paused_next_send_at: Date | null;
 }
 
 export async function getPendingReview(conversationId: string): Promise<PendingReview | null> {
   const [row] = await sql<PendingReview[]>`
     select r.id as reply_id, r.from_email, r.subject, r.received_at,
            r.campaign_contact_id, c.email as contact_email,
-           cc.next_send_at
+           cc.paused_next_send_at
       from conversations cv
       join replies r on r.contact_id = cv.contact_id and r.mailbox_id = cv.mailbox_id
       join campaign_contacts cc on cc.id = r.campaign_contact_id
@@ -579,20 +579,34 @@ export async function listConversationsNeedingReview(): Promise<Set<string>> {
 export type ReviewVerdict = "relevant" | "unrelated";
 
 /**
- * Uzavře posouzení odpovědi od jiné adresy.
+ * Uzavře posouzení odpovědi od nejisté adresy.
  *
- *   relevant  → byl to prospekt z jiné adresy. Kontakt je "replied",
- *               sekvence končí.
- *   unrelated → zpráva s prospektem nesouvisí. Zavře se jen příznak;
- *               obchodní stav ani harmonogram se NEMĚNÍ, protože
- *               sekvence po celou dobu normálně běžela. Když mezitím
- *               odešel další naplánovaný krok, je to v pořádku.
+ *   relevant  → psal prospekt, jen z jiné adresy. Kontakt je "replied"
+ *               a sekvence končí - ve všech kampaních TOHOTO klienta,
+ *               v žádné cizí (viz engine/replies.ts).
+ *   unrelated → zpráva s prospektem nesouvisí. Zavře se posouzení
+ *               a sekvence se vrátí tam, kde stála.
+ *
+ * Obnovení je schválně opatrné. Vrací se jen to, co pozastavil TENHLE
+ * případ, a jen pokud mezitím nenastalo něco, co má přednost:
+ *
+ *   * kontakt už není v běžícím stavu (odpověděl, odhlásil se, dokončil),
+ *   * čeká na něj ještě jiné neuzavřené posouzení,
+ *   * uschovaný termín chybí, protože nebylo co pozastavit.
+ *
+ * Když původní termín mezitím uplynul, nevrací se do minulosti - to by
+ * znamenalo odeslání v nejbližším ticku, klidně o třetí ráno. Použije se
+ * nejbližší otevření odesílacího okna kampaně.
+ *
+ * Odsud se NIKDY neodesílá. Jen se nastaví termín; zbytek je práce
+ * dispatcheru, který si znovu ověří kampaň, kontakt i odesílatele.
  */
 export async function resolveReview(
   replyId: string,
   verdict: ReviewVerdict,
-): Promise<{ ok: boolean; contactEmail?: string }> {
+): Promise<{ ok: boolean; contactEmail?: string; resumed?: boolean }> {
   const { logActivity } = await import("../activity");
+  const { nextWindowOpen } = await import("../schedule");
 
   const [reply] = await sql<
     { campaign_contact_id: string | null; from_email: string; contact_id: string | null }[]
@@ -602,25 +616,38 @@ export async function resolveReview(
   `;
   if (!reply || !reply.campaign_contact_id) return { ok: false };
 
-  const [contact] = await sql<{ email: string; campaign_id: string }[]>`
-    select c.email, cc.campaign_id
+  const [contact] = await sql<
+    {
+      email: string;
+      campaign_id: string;
+      status: string;
+      paused_next_send_at: Date | null;
+      send_days: number[];
+      send_start_minute: number;
+      send_end_minute: number;
+      timezone: string;
+    }[]
+  >`
+    select c.email, cc.campaign_id, cc.status, cc.paused_next_send_at,
+           cp.send_days, cp.send_start_minute, cp.send_end_minute, cp.timezone
       from campaign_contacts cc
       join contacts c on c.id = cc.contact_id
+      join campaigns cp on cp.id = cc.campaign_id
      where cc.id = ${reply.campaign_contact_id}
   `;
+
+  let resumed = false;
 
   await sql.begin(async (tx) => {
     await tx`update replies set needs_review = false where id = ${replyId}`;
 
     if (verdict === "relevant") {
-      // Teprve TEĎHLE se sekvence zastavuje - ručním potvrzením člověka,
-      // ne příchodem nejisté zprávy. Dosah je stejný jako u automaticky
-      // rozpoznané odpovědi: všechny kampaně TOHOTO klienta, žádná cizí.
-      // Viz engine/replies.ts, kde je to vysvětlené celé.
+      // Teprve TEĎHLE se sekvence ukončuje - ručním potvrzením člověka,
+      // ne příchodem nejisté zprávy. Dosah je klient, ne celá databáze.
       await tx`
         update campaign_contacts cc
            set status = 'replied', replied_at = coalesce(cc.replied_at, now()),
-               next_send_at = null, updated_at = now()
+               next_send_at = null, paused_next_send_at = null, updated_at = now()
           from campaigns cp
          where cc.campaign_id = cp.id
            and cc.contact_id = ${reply.contact_id}
@@ -631,10 +658,49 @@ export async function resolveReview(
                    join campaigns owner on owner.id = matched.campaign_id
                   where matched.id = ${reply.campaign_contact_id})
       `;
+      return;
     }
-    // "unrelated" se schválně nedotkne campaign_contacts: sekvence nikdy
-    // nestála, takže není co obnovovat a přepočítávat by znamenalo měnit
-    // harmonogram kvůli cizí zprávě.
+
+    // --- nesouvisí: obnovit, ale jen když se to smí -------------------
+    //
+    // Další neuzavřené posouzení téhož kontaktu má přednost: dokud visí,
+    // sekvence stojí dál. Jinak by druhá cizí zpráva zůstala viset
+    // a kontakt by se mezitím rozjel.
+    const [{ pending }] = await tx<{ pending: number }[]>`
+      select count(*)::int as pending from replies
+       where campaign_contact_id = ${reply.campaign_contact_id}
+         and needs_review and id <> ${replyId}
+    `;
+    if (pending > 0) return;
+    if (!contact?.paused_next_send_at) return;
+    // Mezitím odpověděl, odhlásil se nebo dojel - to má přednost.
+    if (!["scheduled", "sent"].includes(contact.status)) {
+      await tx`update campaign_contacts set paused_next_send_at = null, updated_at = now()
+                where id = ${reply.campaign_contact_id}`;
+      return;
+    }
+
+    const original = contact.paused_next_send_at;
+    const resumeAt =
+      original.getTime() > Date.now()
+        ? original
+        : nextWindowOpen(
+            {
+              sendDays: contact.send_days,
+              sendStartMinute: contact.send_start_minute,
+              sendEndMinute: contact.send_end_minute,
+              timezone: contact.timezone,
+            },
+            new Date(),
+          );
+
+    await tx`
+      update campaign_contacts
+         set next_send_at = ${resumeAt}, paused_next_send_at = null, updated_at = now()
+       where id = ${reply.campaign_contact_id}
+         and status in ('scheduled', 'sent')
+    `;
+    resumed = true;
   });
 
   await logActivity({
@@ -643,11 +709,12 @@ export async function resolveReview(
     detail:
       verdict === "relevant"
         ? `${reply.from_email} je tentýž člověk jako ${contact?.email ?? "kontakt"} — sekvence ukončena.`
-        : `${reply.from_email} s ${contact?.email ?? "kontaktem"} nesouvisí — posouzení uzavřeno, harmonogram beze změny.`,
+        : `${reply.from_email} s ${contact?.email ?? "kontaktem"} nesouvisí — ` +
+          (resumed ? "sekvence pokračuje podle původního harmonogramu." : "sekvence zůstává zastavená."),
     campaignId: contact?.campaign_id ?? null,
     contactId: reply.contact_id,
     campaignContactId: reply.campaign_contact_id,
   });
 
-  return { ok: true, contactEmail: contact?.email };
+  return { ok: true, contactEmail: contact?.email, resumed };
 }

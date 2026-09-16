@@ -447,3 +447,82 @@ async function makePrimary(companyId: string, contactId: string): Promise<void> 
      where company_id = ${companyId}
   `;
 }
+
+// ------------------------------------------------ souhrn jednoho importu
+
+/**
+ * Co se stalo s každým řádkem souboru.
+ *
+ * VEXY prodává „až 300 relevantních lidí měsíčně", ne 300 řádků v CSV.
+ * Klient i operátor proto musí vidět rozdíl mezi „nahráli jsme 350 řádků"
+ * a „do kampaně se dostalo 300 lidí, které je podle pravidel možné
+ * oslovit". Bez toho se kvóta počítá z čísla, které nic neznamená.
+ *
+ * Kategorie jsou schválně disjunktní a jejich součet musí dát `totalRows`.
+ * Když nesedí, něco po cestě mizí potichu - a právě to se dřív dělo mezi
+ * parserem (neplatné řádky končily jako text v `errors`) a importem.
+ */
+export interface ImportSummary {
+  /** Datových řádků v souboru, bez hlavičky. */
+  totalRows: number;
+  /** Neplatná nebo chybějící e-mailová adresa. */
+  invalid: number;
+  /** Tatáž adresa v souboru podruhé. */
+  duplicatesInFile: number;
+  /** Adresa na globálním seznamu Nekontaktovat. */
+  suppressed: number;
+  /** Firma je pro klienta téhle kampaně vyloučená. */
+  excluded: number;
+  /** Do kampaně už patřil dřív. */
+  alreadyInCampaign: number;
+  /**
+   * Skutečně přijatí do kampaně. TOHLE je číslo, které se počítá do kvóty:
+   * lidé, kterým se podle pravidel smí napsat nebo zavolat.
+   */
+  acceptedIntoCampaign: number;
+  /** Kontakt vznikl, ale do kampaně se nezařazoval (import bez kampaně). */
+  createdWithoutCampaign: number;
+  /** Sedí součet kategorií na počet řádků? */
+  reconciles: boolean;
+}
+
+/**
+ * Smíří výsledek parseru s výsledkem importu do jednoho součtu.
+ *
+ * Čistá funkce, aby šla ověřit bez databáze.
+ */
+export function summariseImport(
+  parsed: { totalRows: number; invalid: number; duplicatesInFile: number },
+  result: ImportResult,
+  intoCampaign: boolean,
+): ImportSummary {
+  const acceptedIntoCampaign = intoCampaign ? result.addedToCampaign : 0;
+  const createdWithoutCampaign = intoCampaign ? 0 : result.created + result.existing;
+  const summary: Omit<ImportSummary, "reconciles"> = {
+    totalRows: parsed.totalRows,
+    invalid: parsed.invalid,
+    duplicatesInFile: parsed.duplicatesInFile,
+    suppressed: result.suppressed.length,
+    excluded: result.excluded,
+    alreadyInCampaign: result.alreadyInCampaign,
+    acceptedIntoCampaign,
+    createdWithoutCampaign,
+  };
+  const accounted =
+    summary.invalid + summary.duplicatesInFile + summary.suppressed + summary.excluded +
+    summary.alreadyInCampaign + summary.acceptedIntoCampaign + summary.createdWithoutCampaign;
+  return { ...summary, reconciles: accounted === summary.totalRows };
+}
+
+/** Souhrn v jedné větě, tak jak ho uvidí uživatel po importu. */
+export function describeImport(summary: ImportSummary): string {
+  const parts: string[] = [];
+  if (summary.acceptedIntoCampaign) parts.push(`${summary.acceptedIntoCampaign} přijato do kampaně`);
+  if (summary.createdWithoutCampaign) parts.push(`${summary.createdWithoutCampaign} kontaktů uloženo`);
+  if (summary.alreadyInCampaign) parts.push(`${summary.alreadyInCampaign} už v kampani bylo`);
+  if (summary.excluded) parts.push(`${summary.excluded} z vyloučených firem`);
+  if (summary.suppressed) parts.push(`${summary.suppressed} na seznamu Nekontaktovat`);
+  if (summary.duplicatesInFile) parts.push(`${summary.duplicatesInFile} duplicit v souboru`);
+  if (summary.invalid) parts.push(`${summary.invalid} neplatných řádků`);
+  return `Ze ${summary.totalRows} řádků: ${parts.join(", ") || "nic ke zpracování"}.`;
+}
