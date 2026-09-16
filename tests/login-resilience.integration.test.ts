@@ -99,7 +99,9 @@ describe("odeslání formuláře při nedostupné databázi", () => {
     const result = await actions.loginAction({}, data);
     const ms = Date.now() - t0;
 
-    expect(result.error).toContain("databáze neodpovídá");
+    // Vypršený strop se hlásí jinak než chyba z databáze - ať se
+    // v logu i v hlášce pozná, co se stalo.
+    expect(result.error).toContain("neodpověděla včas");
     // Tohle je jádro věci: akce se VRÁTÍ, takže tlačítko vypadne
     // z „Přihlašuji…" a formulář jde použít znovu.
     expect(ms).toBeLessThan(LOGIN_DB_TIMEOUT_MS + 2000);
@@ -179,5 +181,32 @@ describe("funkční přihlášení", () => {
     // Token z toho uživatele se dá zpětně přečíst - to je obsah cookie.
     expect(readSessionUserId(createSessionToken(user!.id))).toBe(user!.id);
     void sql;
+  });
+});
+
+// ============ týž invariant platí i pro readiness, ne jen pro přihlášení
+
+describe("rozpočet readiness", () => {
+  it("je větší než rozpočet na spojení", async () => {
+    // Jinak by probe na studeném startu hlásil „not_ready" u zdravé
+    // databáze - tedy přesně tu chybu, co položila přihlášení, jen na
+    // jiné obrazovce.
+    const { READINESS_TIMEOUT_MS, DB_CONNECT_BUDGET_MS } = await import("@/lib/timeout");
+    expect(READINESS_TIMEOUT_MS).toBeGreaterThan(DB_CONNECT_BUDGET_MS);
+  });
+
+  it("žádný strop na přihlašovací cestě není kratší než spojení", async () => {
+    // Kontrola celé rodiny konstant najednou, ať se nezavede další.
+    const t = await import("@/lib/timeout");
+    for (const [name, value] of [
+      ["LOGIN_DB_TIMEOUT_MS", t.LOGIN_DB_TIMEOUT_MS],
+      ["READINESS_TIMEOUT_MS", t.READINESS_TIMEOUT_MS],
+    ] as const) {
+      expect(value, `${name} musí přesáhnout rozpočet na spojení`)
+        .toBeGreaterThan(t.DB_CONNECT_BUDGET_MS);
+    }
+    // Kontrola session na /login je výjimka: ta se smí vzdát dřív,
+    // protože fail-open znamená „ukaž formulář", ne chybu.
+    expect(t.SESSION_CHECK_TIMEOUT_MS).toBeLessThan(t.DB_CONNECT_BUDGET_MS);
   });
 });

@@ -236,3 +236,115 @@ describe("výpadek databáze", () => {
     expect(result.error).not.toContain("postgres");
   });
 });
+
+// ================================ rozpočty na databázi musí dávat smysl
+
+describe("časové rozpočty přihlašovací cesty", () => {
+  it("strop na dotaz je VĚTŠÍ než strop na spojení", async () => {
+    // Tohle je invariant, jehož porušení položilo produkci. Když se strop
+    // na dotaz rovnal `connect_timeout`, pokryl na studeném serverless
+    // startu jen navázání spojení a na dotaz nezbylo nic - race byla
+    // prohraná předem a přihlášení hlásilo „databáze neodpovídá",
+    // přestože readiness přes tentýž pool procházel.
+    const { LOGIN_DB_TIMEOUT_MS, DB_CONNECT_BUDGET_MS, DB_QUERY_BUDGET_MS } =
+      await import("@/lib/timeout");
+    expect(LOGIN_DB_TIMEOUT_MS).toBeGreaterThan(DB_CONNECT_BUDGET_MS);
+    expect(LOGIN_DB_TIMEOUT_MS).toBe(DB_CONNECT_BUDGET_MS + DB_QUERY_BUDGET_MS);
+  });
+
+  it("rozpočet na spojení odpovídá connect_timeout databázového klienta", async () => {
+    // Dvě čísla popisující tutéž věc. Kdyby se rozešla, invariant výš by
+    // hlídal nesmysl.
+    const { DB_CONNECT_BUDGET_MS } = await import("@/lib/timeout");
+    const { sql } = await import("@/lib/db");
+    const connectSeconds = (sql as unknown as { options: { connect_timeout: number } })
+      .options.connect_timeout;
+    expect(connectSeconds * 1000).toBe(DB_CONNECT_BUDGET_MS);
+  });
+
+  it("celý strop se vejde do deseti sekund", async () => {
+    const { LOGIN_DB_TIMEOUT_MS } = await import("@/lib/timeout");
+    expect(LOGIN_DB_TIMEOUT_MS).toBeLessThan(10_000);
+  });
+});
+
+// ============================ strop se týká JEN databáze, ničeho jiného
+
+describe("co pod časovým stropem neběží", () => {
+  it("pomalé ověření hesla se nehlásí jako problém s databází", async () => {
+    // scrypt je práce procesoru. Na vytížené instanci může trvat déle,
+    // ale to není důvod tvrdit, že neodpovídá databáze.
+    await makeAdmin();
+    const password = await import("@/lib/password");
+    const { LOGIN_DB_TIMEOUT_MS } = await import("@/lib/timeout");
+    vi.spyOn(password, "verifyPassword").mockImplementation(async () => {
+      await new Promise((r) => setTimeout(r, LOGIN_DB_TIMEOUT_MS + 500));
+      return false;
+    });
+
+    const result = await login(form("vojtechsustal@seznam.cz", "JineHeslo-2026"));
+    // Odmítnuté heslo, ne hláška o databázi.
+    expect(result.error).toBe("Nesprávný e-mail nebo heslo.");
+  }, 20_000);
+
+  it("chyba při vydávání cookie se nehlásí jako problém s databází", async () => {
+    await makeAdmin();
+    cookieStore.set.mockImplementationOnce(() => {
+      throw new Error("cookie store selhal");
+    });
+    await expect(login(form("vojtechsustal@seznam.cz", PASSWORD))).rejects.toThrow("cookie store");
+  });
+});
+
+// ================================ rozlišení timeoutu od ostatních chyb
+
+describe("hlášky rozlišují, co se stalo", () => {
+  it("vypršený strop se hlásí jako „neodpověděla včas“", async () => {
+    const users = await import("@/lib/queries/users");
+    vi.spyOn(users, "getUserForLogin").mockImplementation(() => new Promise(() => {}));
+    const result = await login(form("vojtechsustal@seznam.cz", PASSWORD));
+    expect(result.error).toContain("neodpověděla včas");
+  }, 20_000);
+
+  it("chyba z databáze se hlásí jako „neodpovídá“", async () => {
+    const users = await import("@/lib/queries/users");
+    vi.spyOn(users, "getUserForLogin").mockRejectedValue(
+      Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }),
+    );
+    const result = await login(form("vojtechsustal@seznam.cz", PASSWORD));
+    expect(result.error).toContain("neodpovídá");
+    expect(result.error).not.toContain("včas");
+  });
+
+  it("žádná z hlášek nenese host, uživatele ani kód", async () => {
+    const users = await import("@/lib/queries/users");
+    vi.spyOn(users, "getUserForLogin").mockRejectedValue(
+      new Error("connect ECONNREFUSED db.tajny.supabase.co:6543 user=postgres"),
+    );
+    const result = await login(form("vojtechsustal@seznam.cz", PASSWORD));
+    for (const secret of ["tajny", "6543", "postgres", "ECONNREFUSED"]) {
+      expect(result.error).not.toContain(secret);
+    }
+  });
+});
+
+// ============================== visící promise nesmí shodit instanci
+
+describe("timeout po sobě neuklizený nenechá", () => {
+  it("pozdní odmítnutí prohrané práce nezpůsobí neodchycenou chybu", async () => {
+    // Když vyhraje timeout, původní dotaz běží dál a může se později
+    // odmítnout. Neodchycená rejection v serverless runtime shodí celou
+    // instanci funkce - tedy i requesty, které s tím nemají nic společného.
+    const { withTimeout, TimeoutError } = await import("@/lib/timeout");
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+
+    const pozdniChyba = new Promise((_, reject) => setTimeout(() => reject(new Error("pozdě")), 100));
+    await expect(withTimeout(pozdniChyba, 20)).rejects.toBeInstanceOf(TimeoutError);
+    await new Promise((r) => setTimeout(r, 300));
+
+    process.off("unhandledRejection", onUnhandled);
+    expect(unhandled).toEqual([]);
+  });
+});

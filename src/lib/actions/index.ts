@@ -13,7 +13,7 @@ import {
   sessionCookieOptions,
 } from "@/lib/auth";
 import { verifyPassword, passwordProblem } from "@/lib/password";
-import { LOGIN_DB_TIMEOUT_MS, withTimeout } from "@/lib/timeout";
+import { LOGIN_DB_TIMEOUT_MS, TimeoutError, withTimeout } from "@/lib/timeout";
 import {
   createUser,
   getUserForLogin,
@@ -107,48 +107,88 @@ const DUMMY_HASH =
  * e-maily v systému jsou.
  */
 export async function loginAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  // Krátké id requestu, aby šly fáze v logu spárovat i při souběhu.
+  // Není to nic tajného, jen náhodné číslo pro čtení logu.
+  const rid = Math.random().toString(36).slice(2, 8);
+  const t0 = Date.now();
+  /** Fáze se loguje PŘED await, aby bylo z logu poznat i to, co nedoběhlo. */
+  const phase = (name: string, extra = "") =>
+    console.log(`[login ${rid}] ${name} +${Date.now() - t0}ms${extra ? ` ${extra}` : ""}`);
+
   const email = String(formData.get("email") ?? "").trim();
   const password = String(formData.get("password") ?? "");
   const wrong = fail("Nesprávný e-mail nebo heslo.");
+  // E-mail ani heslo se do logu nedostanou. Jen to, jestli dorazily.
+  phase("formulář", `email=${email ? "ano" : "ne"} heslo=${password ? "ano" : "ne"}`);
   if (!email || !password) return wrong;
 
-  // Databáze může být nedostupná (výpadek, špatná adresa, vyčerpaný
-  // pooler). Bez tohohle se výjimka prohnala ven z akce a člověk dostal
-  // po patnácti sekundách čekání obecné „Application error" - tedy ani
-  // nevěděl, jestli má zkusit jiné heslo, nebo počkat. Změřeno, ne
-  // odhadnuto: 15 s a pád.
+  // ---------------------------------------------------- dotaz na uživatele
   //
-  // Hláška je schválně jiná než u špatného hesla: tohle není chyba
-  // uživatele. Podrobnost jde do logu serveru, do prohlížeče nikdy -
-  // chyba z postgres.js běžně obsahuje hosta i uživatele.
+  // Strop je SOUČET rozpočtu na spojení a na dotaz - viz lib/timeout.ts.
+  // Když byl roven `connect_timeout`, pokryl na studeném serverless startu
+  // jen navázání spojení a na dotaz nezbylo nic. Přihlášení pak hlásilo
+  // „databáze neodpovídá", přestože readiness přes tentýž pool procházel.
   //
-  // Časový strop: postgres.js nemá timeout na dotaz, takže se bez tohohle
-  // čekalo, dokud se nevzdá spojení. Měřeno: desítky sekund a tlačítko
-  // celou dobu v „Přihlašuji…". Pět sekund je hranice, po které už člověk
-  // radši uvidí chybu, než aby dál koukal na spinner.
+  // Strop se týká VÝHRADNĚ tohohle dotazu. Ověření hesla ani vydání cookie
+  // pod ním neběží: scrypt je práce procesoru a cookie je zápis do hlavičky,
+  // takže by se jejich pomalost mylně hlásila jako problém s databází.
   let user: Awaited<ReturnType<typeof getUserForLogin>>;
+  const dbStarted = Date.now();
   try {
+    phase("dotaz-start");
     user = await withTimeout(getUserForLogin(email), LOGIN_DB_TIMEOUT_MS);
+    phase("dotaz-hotov", `${Date.now() - dbStarted}ms nalezen=${user ? "ano" : "ne"}`);
   } catch (error) {
-    console.error("[login] dotaz na uživatele selhal", error);
-    return fail("Přihlášení se teď nepodařilo ověřit — databáze neodpovídá. Zkuste to prosím za chvíli.");
+    // Jako problém s databází se hlásí jen to, co jím opravdu je: vypršený
+    // strop, nebo chyba, která z databáze přišla. Cokoli jiného by se pod
+    // tou hláškou schovalo a hledalo by se to špatně.
+    const timedOut = error instanceof TimeoutError;
+    const code = (error as { code?: string })?.code;
+    console.error(
+      `[login ${rid}] dotaz-selhal ${Date.now() - dbStarted}ms ` +
+        `${timedOut ? `timeout po ${LOGIN_DB_TIMEOUT_MS}ms` : `kód=${code ?? "neznámý"}`}`,
+      error,
+    );
+    return fail(
+      timedOut
+        ? "Přihlášení se teď nepodařilo ověřit — databáze neodpověděla včas. Zkuste to prosím za chvíli."
+        : "Přihlášení se teď nepodařilo ověřit — databáze neodpovídá. Zkuste to prosím za chvíli.",
+    );
   }
 
+  // ------------------------------------------------------- ověření hesla
+  //
+  // Schválně MIMO časový strop. scrypt je práce procesoru, ne databáze,
+  // a na vytížené serverless instanci může trvat déle než obvykle - to
+  // ale není důvod tvrdit, že neodpovídá databáze.
+  const pwStarted = Date.now();
   if (!user || !user.is_active) {
     // Heslo se ověří i tak, aby se z rychlosti odpovědi nedalo poznat,
     // jestli účet existuje.
     await verifyPassword(password, DUMMY_HASH);
+    phase("heslo-hotovo", `${Date.now() - pwStarted}ms výsledek=odmítnuto-účet`);
     return wrong;
   }
-  if (!(await verifyPassword(password, user.password_hash))) return wrong;
+  if (!(await verifyPassword(password, user.password_hash))) {
+    phase("heslo-hotovo", `${Date.now() - pwStarted}ms výsledek=odmítnuto-heslo`);
+    return wrong;
+  }
+  phase("heslo-hotovo", `${Date.now() - pwStarted}ms výsledek=ok`);
 
+  // --------------------------------------------------- session a redirect
+  //
+  // Session je podepsaná cookie, ne řádek v databázi. Tady se tedy
+  // nesahá na databázi vůbec.
   const store = await cookies();
   store.set(SESSION_COOKIE, createSessionToken(user.id), sessionCookieOptions);
+  phase("cookie-nastavena");
 
   const next = String(formData.get("next") ?? "");
   // Caller nemá co dělat na admin přehledu: jde rovnou do práce.
   const home = user.role === "caller" ? "/osloveni" : "/";
-  redirect(next.startsWith("/") && next !== "/login" ? next : home);
+  const target = next.startsWith("/") && next !== "/login" ? next : home;
+  phase("redirect", `cíl=${target} celkem=${Date.now() - t0}ms`);
+  redirect(target);
 }
 
 export async function logoutAction(): Promise<void> {
