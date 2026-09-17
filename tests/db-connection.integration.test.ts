@@ -42,10 +42,19 @@ function options(sql: unknown) {
 // ========================================== runtime klient je serverless
 
 describe("runtime klient", () => {
-  it("drží nejvýš JEDNO spojení", () => {
-    // Tohle je to číslo, které produkci položilo. S max:5 a deseti
-    // souběžnými instancemi je to 50 klientů proti stropu 15.
-    expect(options(db.sql).max).toBe(1);
+  it("pool je omezený, ale ne na jedno spojení", () => {
+    // Obě krajnosti už produkci položily, každá jinak.
+    //
+    // Nahoře: `max: 5` krát deset souběžných instancí je padesát klientů
+    // proti stropu 15 session pooleru → EMAXCONNSESSION.
+    //
+    // Dole: `max: 1` znamená, že se na jedné Vercel instanci seřadí za
+    // jedno spojení všechny souběžné requesty. Přihlášení pak spadlo na
+    // svůj strop s „fáze=čekání-na-spojení" a stránky visely do 300 s,
+    // přestože databáze byla v pořádku.
+    const max = options(db.sql).max;
+    expect(max).toBeGreaterThan(1);
+    expect(max).toBeLessThanOrEqual(10);
   });
 
   it("nepoužívá prepared statements", () => {
@@ -68,16 +77,34 @@ describe("runtime klient", () => {
     expect(cached).toBe(db.sql);
   });
 
-  it("DB_POOL_MAX umí pool zvětšit pro nasazení na dlouhoběžící server", async () => {
-    // Únikový východ pro jeden dlouhoběžící proces. Na Vercelu se
-    // nenastavuje - a když není, platí 1.
+  const TRANSACTION = "postgres://u:p@aws-0-eu-central-1.pooler.supabase.com:6543/postgres";
+  const SESSION = "postgres://u:p@aws-0-eu-central-1.pooler.supabase.com:5432/postgres";
+
+  it("DB_POOL_MAX přebije výchozí hodnotu, nesmysly se ignorují", async () => {
     const { poolSizeFor } = await import("@/lib/db");
-    expect(poolSizeFor(undefined)).toBe(1);
-    expect(poolSizeFor("")).toBe(1);
-    expect(poolSizeFor("nesmysl")).toBe(1);
-    expect(poolSizeFor("0")).toBe(1);
-    expect(poolSizeFor("-3")).toBe(1);
-    expect(poolSizeFor("10")).toBe(10);
+    expect(poolSizeFor("10", TRANSACTION)).toBe(10);
+    expect(poolSizeFor("3", SESSION)).toBe(3);
+    for (const junk of ["", "nesmysl", "0", "-3", undefined]) {
+      expect(poolSizeFor(junk, SESSION)).toBe(1);
+    }
+  });
+
+  it("session pooler zůstává na jednom spojení", async () => {
+    // Port 5432 má strop 15 klientů na projekt (EMAXCONNSESSION). Tam
+    // víc spojení na instanci znamená vyčerpat ho o to dřív.
+    const { poolSizeFor } = await import("@/lib/db");
+    expect(poolSizeFor(undefined, SESSION)).toBe(1);
+  });
+
+  it("transaction pooler musí unést víc než jedno spojení", async () => {
+    // Tohle je ta regrese, která stála tři dny. S `max: 1` se na jedné
+    // Vercel instanci seřadí za jedno spojení všechny souběžné requesty
+    // a přihlášení spadne na svůj strop s „fáze=čekání-na-spojení",
+    // přestože databáze je v pořádku.
+    const { poolSizeFor } = await import("@/lib/db");
+    expect(poolSizeFor(undefined, TRANSACTION)).toBeGreaterThan(1);
+    // Přímé spojení (bez pooleru) taky není omezené stropem session módu.
+    expect(poolSizeFor(undefined, "postgres://u:p@db.example.com:5432/postgres")).toBeGreaterThan(1);
   });
 });
 
@@ -113,8 +140,10 @@ describe("žádné další pooly v runtime kódu", () => {
   });
 
   it("opakovaný ping nepřidává spojení", async () => {
+    // Podstatné je, že strop poolu je za běhu pořád týž - ne jaké má číslo.
+    const before = options(db.sql).max;
     for (let i = 0; i < 5; i++) expect((await status.pingDatabase()).ok).toBe(true);
-    expect(options(db.sql).max).toBe(1);
+    expect(options(db.sql).max).toBe(before);
   });
 });
 
