@@ -107,8 +107,34 @@ function createClient(): Sql {
  * stránku, pro route handler, pro server action) a každá kopie by si
  * otevřela vlastní pool. Sdílení přes globalThis tomu brání.
  */
-export const sql: Sql = globalForDb.__vexySql ?? createClient();
+export let sql: Sql = globalForDb.__vexySql ?? createClient();
 globalForDb.__vexySql = sql;
+
+/**
+ * Zahodí klienta a postaví nový.
+ *
+ * Tohle je záchranná brzda, ne běžná cesta. Měřeno na produkci: když se
+ * jedno spojení zasekne, postgres.js na něm nemá strop a nikdo ho neuvolní.
+ * Při `max: 1` se za něj zařadí všechno ostatní - přihlášení spadne po
+ * svém stropu (`fáze=čekání-na-spojení`), ale stránky strop nemají a visí,
+ * dokud je po 300 sekundách nezabije Vercel. Instance tak zůstane rozbitá,
+ * dokud ji hosting nerecykluje, i když databáze je celou dobu v pořádku -
+ * readiness i cron na jiných instancích běží normálně.
+ *
+ * Výměnou klienta se ta instance uzdraví sama: další request dostane
+ * čerstvý pool. `sql` je schválně `let` a ne `const` - ESM export je živá
+ * vazba, takže moduly, které si ho naimportovaly, uvidí nového klienta
+ * bez jakéhokoli zásahu.
+ *
+ * Starý klient se ukončí na pozadí. Čekat na něj nemá smysl: právě proto,
+ * že nereaguje, se zahazuje.
+ */
+export function resetDbClient(): void {
+  const poisoned = sql;
+  sql = createClient();
+  globalForDb.__vexySql = sql;
+  void poisoned.end({ timeout: 0 }).catch(() => {});
+}
 
 /** Postgres unique-violation SQLSTATE. */
 export const UNIQUE_VIOLATION = "23505";

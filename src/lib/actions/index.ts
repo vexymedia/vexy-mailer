@@ -4,7 +4,7 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { cookies } from "next/headers";
 import { z } from "zod";
-import { sql } from "@/lib/db";
+import { resetDbClient, sql } from "@/lib/db";
 import {
   createSessionToken,
   requireAdmin,
@@ -179,6 +179,15 @@ export async function loginAction(_prev: ActionState, formData: FormData): Promi
             ? "sonda=select-1-prošel → vázne dotaz na users, ne databáze jako celek"
             : `sonda=select-1-selhal (${probe.error}) → vázne celá cesta k databázi`),
       );
+
+      // Ani `select 1` neprošel: pool je zaseklý, ne databáze. Bez tohohle
+      // zůstane instance rozbitá, dokud ji hosting nerecykluje - stránky
+      // na ní visí do 300 sekund, protože strop mají jen přihlášení
+      // a readiness. Zahodit klienta je jediné, čím se to odsud spraví.
+      if (!probe.ok) {
+        console.error(`[login ${rid}] pool-zaseknutý → zahazuji klienta`);
+        resetDbClient();
+      }
       return fail(
         "Přihlášení se teď nepodařilo ověřit — databáze neodpověděla včas. Zkuste to prosím za chvíli.",
       );

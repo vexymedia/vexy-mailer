@@ -473,3 +473,41 @@ describe("klient je pro serverless nastavený bezpečně", () => {
     expect((options.max_lifetime ?? 0) * 1000).toBeGreaterThan(LOGIN_DB_TIMEOUT_MS);
   });
 });
+
+describe("zaseknutý pool se dá zahodit", () => {
+  /**
+   * Bez tohohle zůstane instance rozbitá, dokud ji hosting nerecykluje.
+   * Měřeno na produkci: GET / skončil 504 po 300 sekundách, protože stránky
+   * na rozdíl od přihlášení žádný strop nemají a čekaly na spojení, které
+   * se nikdy neuvolnilo.
+   */
+  it("výměna klienta je vidět i v modulech, které si `sql` naimportovaly", async () => {
+    const db = await import("@/lib/db");
+    const before = db.sql;
+
+    db.resetDbClient();
+
+    // ESM export je živá vazba - kdyby to webpack nebo vitest rozbily,
+    // moduly by dál držely zaseknutého klienta a oprava by byla k ničemu.
+    expect(db.sql).not.toBe(before);
+    const [row] = await db.sql<{ ok: number }[]>`select 1 as ok`;
+    expect(row.ok).toBe(1);
+  }, 20_000);
+
+  it("dotaz s modulovým fragmentem funguje i po výměně klienta", async () => {
+    // `users.ts` si drží COLUMNS = sql`...` z původního klienta. Kdyby
+    // fragment po výměně přestal platit, rozbilo by se přihlášení právě
+    // ve chvíli, kdy se ho snažíme zachránit.
+    await makeAdmin();
+    const db = await import("@/lib/db");
+    const usersQueries = await import("@/lib/queries/users");
+    const [{ id }] = await db.sql<{ id: string }[]>`select id from users limit 1`;
+
+    db.resetDbClient();
+
+    const user = await usersQueries.getUser(id);
+    expect(user?.email).toBe("vojtechsustal@seznam.cz");
+    const forLogin = await usersQueries.getUserForLogin("vojtechsustal@seznam.cz");
+    expect(forLogin?.password_hash).toBeTruthy();
+  }, 20_000);
+});
