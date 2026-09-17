@@ -46,6 +46,63 @@ export async function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
 }
 
 /**
+ * Dotaz, který se dá zrušit.
+ *
+ * `sql\`...\`` z postgres.js je thenable s metodou `cancel()`. Typ sem
+ * nejde importovat bez generik, která se na volajícím místě stejně
+ * neuplatní, takže tohle je ta nejmenší část, na které nám záleží.
+ */
+export interface CancellableQuery<T> extends PromiseLike<T> {
+  cancel(): void;
+}
+
+/**
+ * Jako `withTimeout`, ale vypršení strop dotaz SKUTEČNĚ zruší.
+ *
+ * Tohle je ten rozdíl, na kterém přihlášení padalo. postgres.js ruší svůj
+ * jediný časovač (`connectTimer`) na první ReadyForQuery, takže dotaz na
+ * navázaném spojení nemá strop žádný. Když se ho `withTimeout` jen
+ * přestane držet, dotaz zůstane viset NA SPOJENÍ - a postgres.js další
+ * dotazy přiřazuje i na obsazené spojení (`busy.shift()`). Při `max: 1`
+ * se tak za zadrhnutý dotaz zařadí každé další přihlášení v téhle
+ * instanci a selhává stejně. Z jednorázového zádrhelu je trvalý výpadek.
+ *
+ * `cancel()` pošle databázi CancelRequest po samostatném spojení. Dotaz
+ * skončí, spojení se vrátí do poolu použitelné a další přihlášení má
+ * čistý start.
+ *
+ * Když zrušení samo selže (pooler ho nepropustí, spojení je mrtvé),
+ * nejsme na tom hůř než předtím - proto se chyba jen spolkne.
+ */
+export async function withQueryTimeout<T>(query: CancellableQuery<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const work = Promise.resolve(query);
+
+  // Po zrušení se dotaz odmítne. Nikdo už na něj nečeká, takže bez
+  // tohohle by z toho byla neodchycená rejection - a ta v serverless
+  // runtime shodí celou instanci i s cizími requesty.
+  work.catch(() => {});
+
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          try {
+            query.cancel();
+          } catch {
+            // Zrušit to nešlo. Pořád platí, že na dotaz nikdo nečeká.
+          }
+          reject(new TimeoutError(ms));
+        }, ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
  * Výsledek, nebo náhradní hodnota - když práce selže nebo nedoběhne včas.
  *
  * Pro místa, kde je odpověď "nevím" použitelná. Typicky přihlašovací

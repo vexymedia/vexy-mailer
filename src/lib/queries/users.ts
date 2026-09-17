@@ -67,10 +67,26 @@ export async function getUser(id: string): Promise<User | null> {
  * rozhoduje přihlašovací cesta, ne tenhle dotaz. Kdyby filtroval sám,
  * nešlo by rozlišit „neexistuje“ od „je vypnutý“ ani v logu.
  */
-export async function getUserForLogin(email: string): Promise<UserWithHash | null> {
-  const [row] = await sql<UserWithHash[]>`
+export function findUserForLogin(email: string) {
+  return sql<UserWithHash[]>`
     select ${COLUMNS}, password_hash from users where lower(email) = ${normaliseEmail(email)}
   `;
+}
+
+/**
+ * Nedokončený dotaz vrací zvlášť, protože se musí dát ZRUŠIT.
+ *
+ * postgres.js po navázání spojení dotazu žádný strop nedává. Když se
+ * odpovědi nedočká, `await` se dá přerušit v aplikaci - jenže spojení tím
+ * zůstane obsazené a při `max: 1` se za něj zařadí každý další dotaz
+ * v téhle instanci. Z jednoho zadrhnutého přihlášení se tak stane
+ * instance, na které přihlášení nefunguje už nikdy.
+ *
+ * `Query.cancel()` je jediné, co tomu brání: pošle databázi CancelRequest
+ * a spojení se vrátí do poolu použitelné. Viz `withQueryTimeout`.
+ */
+export async function getUserForLogin(email: string): Promise<UserWithHash | null> {
+  const [row] = await findUserForLogin(email);
   return row ?? null;
 }
 
