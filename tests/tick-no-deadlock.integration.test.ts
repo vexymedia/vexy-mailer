@@ -12,9 +12,14 @@ import { clearPacing, enableSimulateMode, seedCampaign } from "./helpers/fixture
  * napořád.
  *
  * Tenhle soubor to měří, místo aby se o tom usuzovalo z kódu. Všechno
- * běží proti skutečnému Postgresu s `max: 1` (což je produkční hodnota)
- * a s tvrdým časovým limitem: kdyby deadlock existoval, test nedoběhne
- * a spadne na timeoutu, ne na assertu.
+ * běží proti skutečnému Postgresu s `max: 1` a s tvrdým časovým limitem:
+ * kdyby deadlock existoval, test nedoběhne a spadne na timeoutu, ne na
+ * assertu.
+ *
+ * Jednička už produkční hodnota není - na transaction pooleru dusila
+ * souběžné requesty, viz lib/db.ts. Tenhle soubor si ji ale vynucuje
+ * schválně: je to nejtěsnější pool, jaký může nastat (`DB_POOL_MAX=1`
+ * nebo session pooler), a právě v něm musí tick doběhnout.
  *
  * Hlídá čtyři věci:
  *   1. tick skončí,
@@ -27,6 +32,9 @@ const BASE = "https://vexy.test";
 const CRON_SECRET = "test-cron-secret";
 /** Krátký limit schválně: deadlock se pozná tím, že se do něj nevejde. */
 const LIMIT = 20_000;
+
+// MUSÍ být před prvním importem `@/lib/db` - klient se staví při importu.
+process.env.DB_POOL_MAX = "1";
 
 let sql: typeof import("@/lib/db").sql;
 
@@ -76,7 +84,7 @@ async function lockRow(name = "dispatch") {
 // ============================================ pool je opravdu jednomístný
 
 describe("výchozí bod", () => {
-  it("test běží se stejným poolem jako produkce", () => {
+  it("test běží s nejtěsnějším možným poolem", () => {
     // Kdyby se tohle rozešlo, celý soubor by netestoval to, co má.
     expect((sql as unknown as { options: { max: number } }).options.max).toBe(1);
   });
