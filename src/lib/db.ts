@@ -39,13 +39,42 @@ const globalForDb = globalThis as unknown as { __vexySql?: Sql };
 /**
  * Kolik spojení smí jedna instance držet.
  *
- * Výchozí 1, protože tohle běží serverless. `DB_POOL_MAX` je únikový
- * východ pro nasazení na dlouhoběžící server (jeden proces, žádné
- * násobení instancemi) - na Vercelu se nenastavuje.
+ * Bylo tu `1` a stálo to tři dny hledání. Tohle je ta oprava, tak sem
+ * patří i důvod, proč se k jedničce nevracet.
+ *
+ * Jednička sem přišla jako oprava EMAXCONNSESSION - „max clients reached
+ * in SESSION mode". To je strop SESSION pooleru (port 5432): patnáct
+ * klientů na celý projekt, takže pár souběžných instancí ho vyčerpá.
+ * Tam jednička smysl dávala.
+ *
+ * Jenže runtime dávno jede přes TRANSACTION pooler (port 6543) a ten je
+ * postavený přesně na opak - unese stovky klientských spojení a rozdává
+ * je po jednotlivých transakcích. Pravidlo zůstalo, režim se změnil.
+ *
+ * Čím to bylo na produkci vidět: Vercel s Fluid Compute cpe do jedné
+ * instance víc souběžných requestů a s `max: 1` se všechny seřadily za
+ * jedno spojení. Samotný Přehled vystřelí přes `Promise.all` osmnáct
+ * dotazů. Přihlášení, které má strop 8 sekund, pak spadlo jako první:
+ *
+ *     [login] dotaz-timeout 8001ms fáze=čekání-na-spojení
+ *     GET /   504 Task timed out after 300 seconds
+ *
+ * Databáze přitom byla celou dobu v pořádku - readiness hlásil `ready`
+ * a cron běžel, protože byly na jiných instancích.
+ *
+ * Proto se výchozí hodnota liší podle režimu, ne podle toho, že je to
+ * serverless. Session pooler zůstává na jedničce, protože tam ten strop
+ * pořád platí. `DB_POOL_MAX` obojí přebije.
  */
-export function poolSizeFor(raw: string | undefined): number {
+const TRANSACTION_POOL_MAX = 10;
+const SESSION_POOL_MAX = 1;
+
+export function poolSizeFor(raw: string | undefined, url = process.env.DATABASE_URL): number {
   const override = Number(raw);
-  return Number.isFinite(override) && override > 0 ? override : 1;
+  if (Number.isFinite(override) && override > 0) return override;
+  // Session pooler: adresa Supabase pooleru BEZ transakčního portu.
+  const sessionPooler = Boolean(url?.includes("pooler.supabase.com") && !url.includes(":6543"));
+  return sessionPooler ? SESSION_POOL_MAX : TRANSACTION_POOL_MAX;
 }
 
 function poolSize(): number {

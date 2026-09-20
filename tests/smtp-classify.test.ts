@@ -150,3 +150,32 @@ describe("classifySmtpError, connection-level failures", () => {
     });
   });
 });
+
+describe("heslo, které nejde rozšifrovat", () => {
+  /**
+   * Když se změní ENCRYPTION_KEY, uložená hesla se jím dešifrovat nedají.
+   * AES-GCM to ohlásí jako „Unsupported state or unable to authenticate
+   * data" - z toho člověk nepozná, že stačí zadat heslo znovu. IMAP to
+   * rozlišuje odjakživa, SMTP tu syrovou hlášku pouštěl ven.
+   */
+  it("pozná chybu z dešifrování, ne ze spojení", async () => {
+    const { isDecryptionFailure } = await import("@/lib/smtp");
+
+    expect(isDecryptionFailure(new Error("Unsupported state or unable to authenticate data"))).toBe(true);
+    expect(isDecryptionFailure(new Error("Malformed encrypted secret"))).toBe(true);
+    expect(isDecryptionFailure(new Error("ENCRYPTION_KEY must decode to exactly 32 bytes"))).toBe(true);
+  });
+
+  it("běžné chyby spojení za dešifrování nepovažuje", async () => {
+    const { isDecryptionFailure } = await import("@/lib/smtp");
+
+    for (const message of [
+      "Invalid login: 535 Authentication failed",
+      "connect ETIMEDOUT 1.2.3.4:465",
+      "Greeting never received",
+      "self signed certificate in certificate chain",
+    ]) {
+      expect(isDecryptionFailure(new Error(message))).toBe(false);
+    }
+  });
+});

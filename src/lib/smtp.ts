@@ -195,6 +195,18 @@ export interface ConnectionTestResult {
   error?: string;
 }
 
+/**
+ * Hláška pro heslo, které nejde rozšifrovat.
+ *
+ * Když se změní ENCRYPTION_KEY, uložená hesla se jím dešifrovat nedají
+ * a AES-GCM to ohlásí jako „Unsupported state or unable to authenticate
+ * data". Z toho člověk nepozná vůbec nic - vypadá to jako chyba serveru,
+ * ne jako heslo, které stačí zadat znovu. IMAP tohle rozlišuje odjakživa,
+ * viz lib/imap.ts; SMTP tu syrovou hlášku pouštěl ven.
+ */
+const UNDECRYPTABLE =
+  "Uložené SMTP heslo se nepodařilo rozšifrovat — zadejte ho prosím znovu a schránku uložte.";
+
 /** Verifies SMTP credentials without sending anything. */
 export async function testSmtpConnection(mailbox: Mailbox): Promise<ConnectionTestResult> {
   let transport: Transporter | null = null;
@@ -203,8 +215,24 @@ export async function testSmtpConnection(mailbox: Mailbox): Promise<ConnectionTe
     await transport.verify();
     return { ok: true };
   } catch (error) {
+    if (isDecryptionFailure(error)) return { ok: false, error: UNDECRYPTABLE };
     return { ok: false, error: classifySmtpError(error).message };
   } finally {
     transport?.close();
   }
+}
+
+/**
+ * Selhalo to na rozšifrování hesla, ne na spojení?
+ *
+ * `buildTransport` volá `decryptSecret` ještě předtím, než se kamkoli
+ * připojí, takže tahle chyba přichází výhradně odtud.
+ */
+export function isDecryptionFailure(error: unknown): boolean {
+  const message = (error as { message?: string })?.message ?? "";
+  return (
+    message.includes("Unsupported state or unable to authenticate data") ||
+    message.includes("Malformed encrypted secret") ||
+    message.includes("ENCRYPTION_KEY must decode")
+  );
 }

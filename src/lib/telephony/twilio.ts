@@ -71,6 +71,50 @@ export interface AccessTokenOptions {
 }
 
 /**
+ * Identita klienta v podobě, kterou Twilio přijme.
+ *
+ * Voice povoluje v identitě POUZE `A-Z`, `a-z`, `0-9` a `_`. Cokoli
+ * jiného - tečka, zavináč, mezera, a hlavně POMLČKA - je pro signalizaci
+ * neplatný tvar a Twilio odmítne `Device.connect()` chybou
+ *
+ *     MalformedRequestError (31100)
+ *
+ * ještě předtím, než vznikne hovor. V Programmable Voice logu proto po
+ * takovém pokusu není vůbec nic: TwiML webhook se nezavolá.
+ *
+ * Přesně na tom tenhle produkt stál. Identita se skládala jako
+ * `caller_${callers.id}`, jenže `callers.id` je `uuid` - tedy pět skupin
+ * oddělených pomlčkami:
+ *
+ *     caller_e24b9c24-333c-48ad-9afe-6e336fd84626
+ *
+ * Testy to neodhalily, protože používaly `caller_1` - hodnotu, jaká
+ * v produkci nemůže vzniknout.
+ *
+ * Pomlčky se mění na podtržítka, ne mažou: u UUID jsou na pevných
+ * pozicích, takže převod zůstává jednoznačný a identita je v Twilio logu
+ * pořád čitelná a dohledatelná.
+ */
+const IDENTITY_MAX = 256;
+
+export function toVoiceIdentity(raw: string, fallback = "vexy_operator"): string {
+  const safe = raw.replace(/[^A-Za-z0-9_]/g, "_").slice(0, IDENTITY_MAX);
+  // Ze samých podtržítek se identita poznat nedá - to je stejně k ničemu
+  // jako prázdná hodnota.
+  return /[A-Za-z0-9]/.test(safe) ? safe : fallback;
+}
+
+/**
+ * Zamaskované SID aplikace do diagnostiky.
+ *
+ * SID není heslo, ale do logu ani do prohlížeče nepatří celé. Tohle
+ * stačí k ověření, že je nastavená ta správná TwiML aplikace.
+ */
+export function maskSid(sid: string): string {
+  return sid.length <= 10 ? "…" : `${sid.slice(0, 6)}…${sid.slice(-4)}`;
+}
+
+/**
  * Access Token pro Voice SDK.
  *
  * Podepisuje se TAJEMSTVÍM API KLÍČE, ne Auth Tokenem. To je důležité:
@@ -87,8 +131,13 @@ export function createVoiceAccessToken(
   const ttl = Math.min(Math.max(options.ttlSeconds ?? 3600, 60), 24 * 3600);
   const { AccessToken } = twilio.jwt;
 
+  // Projde tudy KAŽDÝ token, ne jen ten z jednoho endpointu. Kdyby se
+  // čistilo až na volajícím místě, stačilo by jedno nové a chyba 31100 je
+  // zpátky - a projeví se až v prohlížeči, ne tady.
+  const identity = toVoiceIdentity(options.identity);
+
   const token = new AccessToken(config.accountSid, config.apiKeySid, config.apiKeySecret, {
-    identity: options.identity,
+    identity,
     ttl,
   });
   token.addGrant(
@@ -105,7 +154,7 @@ export function createVoiceAccessToken(
     Buffer.from(jwt.split(".")[1], "base64url").toString("utf8"),
   ) as { exp: number };
 
-  return { token: jwt, identity: options.identity, expiresAt: payload.exp * 1000 };
+  return { token: jwt, identity, expiresAt: payload.exp * 1000 };
 }
 
 // --------------------------------------------------------- podpis webhooku

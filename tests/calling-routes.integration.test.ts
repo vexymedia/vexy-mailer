@@ -131,6 +131,50 @@ describe("token endpoint", () => {
     expect(response.headers.get("cache-control")).toContain("no-store");
   });
 
+  it("identita z uuid callera je pro Twilio Voice platná", async () => {
+    // Tohle je ta chyba, která volání z prohlížeče úplně zablokovala.
+    //
+    // Identita se skládá jako `caller_${callers.id}` a `callers.id` je
+    // uuid, tedy hodnota S POMLČKAMI. Twilio Voice v identitě povoluje
+    // jen A-Z a-z 0-9 _ a takový Device.connect() odmítne chybou
+    // MalformedRequestError (31100) JEŠTĚ PŘED vytvořením hovoru - takže
+    // v Programmable Voice logu po pokusu není vůbec nic.
+    //
+    // Schválně se tu bere caller z databáze, ne vymyšlené "caller_1":
+    // právě na té vymyšlené hodnotě to starší testy minuly.
+    const calling = await import("@/lib/queries/calling");
+    selectedCaller = await calling.createCaller({ name: "Nela", email: null, phone: null });
+    expect(selectedCaller).toContain("-");
+
+    const { GET } = await import("@/app/api/calling/token/route");
+    const response = await GET();
+    const body = (await response.json()) as { token: string; identity: string };
+
+    const grants = (
+      JSON.parse(Buffer.from(body.token.split(".")[1], "base64url").toString()) as {
+        grants: { identity: string };
+      }
+    ).grants;
+
+    expect(body.identity).toMatch(/^[A-Za-z0-9_]+$/);
+    expect(grants.identity).toBe(body.identity);
+    // Callera musí jít v Twilio logu pořád dohledat.
+    expect(body.identity).toContain(selectedCaller!.replace(/-/g, "_"));
+  });
+
+  it("SID TwiML aplikace se posílá jen zamaskované", async () => {
+    const { GET } = await import("@/app/api/calling/token/route");
+    const response = await GET();
+    const body = (await response.json()) as { twimlApp: string };
+    const raw = JSON.stringify(body);
+
+    expect(body.twimlApp).toBeTruthy();
+    expect(raw).not.toContain(TWILIO_ENV.TWILIO_TWIML_APP_SID);
+    // A hlavně: tajemství API klíče ani Auth Token tudy neodcházejí.
+    expect(raw).not.toContain(TWILIO_ENV.TWILIO_API_KEY_SECRET);
+    expect(raw).not.toContain(TWILIO_ENV.TWILIO_AUTH_TOKEN);
+  });
+
   it("řekne, co chybí, místo aby spadl", async () => {
     delete process.env.TWILIO_API_KEY_SECRET;
     const { GET } = await import("@/app/api/calling/token/route");

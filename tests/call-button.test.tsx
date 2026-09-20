@@ -74,7 +74,13 @@ class FakeDevice extends FakeEmitter {
   destroy() { this.destroyed = true; }
 }
 
-vi.mock("@twilio/voice-sdk", () => ({ Device: FakeDevice }));
+// `Call` je tu proto, že provider z něj bere `Call.Codec` pro
+// codecPreferences. Mock musí odpovídat skutečnému modulu - kdyby ne,
+// spadne to až v prohlížeči, ne tady. Hodnoty jsou ty, které SDK opravdu
+// posílá po drátě.
+const FakeCall = { Codec: { Opus: "opus", PCMU: "pcmu" } };
+
+vi.mock("@twilio/voice-sdk", () => ({ Device: FakeDevice, Call: FakeCall }));
 
 // Post-call panel sahá na serverové akce; tady se testuje cockpit, ne
 // formulář výsledku - ten má vlastní testy na serverové straně.
@@ -291,6 +297,34 @@ describe("kliknutí spustí Twilio flow a otevře cockpit", () => {
     // Twilio dostane jen id hovoru, které vydal náš server.
     expect(FakeDevice.last?.connectParams).toEqual({ callId: CALL.callId });
     expect(FakeDevice.last?.token).toBe("fake.jwt.token");
+  });
+
+  it("Device se zapíná s přesnějšími signalizačními chybami", async () => {
+    // Bez tohohle vrací SDK na celou třídu problémů jednu obecnou chybu.
+    // Právě proto se „MalformedRequestError (31100)" hledala tak dlouho:
+    // z hlášky nešlo poznat, co přesně signalizace odmítla.
+    await renderApp();
+    await clickCall();
+
+    const options = FakeDevice.last?.options as {
+      enableImprovedSignalingErrorPrecision?: boolean;
+      codecPreferences?: string[];
+    };
+    expect(options.enableImprovedSignalingErrorPrecision).toBe(true);
+    // Kodeky se posílají jako hodnoty z Call.Codec, ne jako `as never`.
+    expect(options.codecPreferences).toEqual(["opus", "pcmu"]);
+  });
+
+  it("outbound hovor jde přes params, ne jako holý argument", async () => {
+    // Tvar, který @twilio/voice-sdk 2.x vyžaduje. Cokoli jiného skončí
+    // chybou od Twilio backendu, ne srozumitelným selháním v kódu.
+    await renderApp();
+    await clickCall();
+
+    expect(FakeDevice.last?.connectParams).toEqual({ callId: CALL.callId });
+    // Prohlížeč telefonní číslo neposílá. Kdyby ano, byl by to otevřený
+    // dialer placený z našeho účtu - číslo si dohledá TwiML webhook.
+    expect(JSON.stringify(FakeDevice.last?.connectParams)).not.toContain(CALL.destination);
   });
 
   it("otevře cockpit s kontaktem a stavem hovoru", async () => {

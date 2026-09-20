@@ -460,8 +460,11 @@ describe("klient je pro serverless nastavený bezpečně", () => {
       options: { max: number; prepare: boolean; max_lifetime: number | null; connect_timeout: number };
     }).options;
 
-    // Násobí se to počtem živých instancí, ne jedničkou. Viz lib/db.ts.
-    expect(options.max).toBe(1);
+    // Omezený, ale ne na jedno spojení: jednička na transaction pooleru
+    // znamená, že se přihlášení seřadí za každý jiný request na téže
+    // instanci. Viz lib/db.ts.
+    expect(options.max).toBeGreaterThan(1);
+    expect(options.max).toBeLessThanOrEqual(10);
     // Transaction pooler prepared statements neumí.
     expect(options.prepare).toBe(false);
     // Zmrazená serverless instance se nesmí probudit s letitým socketem.
