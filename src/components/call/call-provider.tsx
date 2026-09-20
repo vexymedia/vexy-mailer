@@ -145,6 +145,40 @@ async function requestMicrophone(): Promise<{ ok: true } | { ok: false; error: s
   }
 }
 
+/**
+ * Chyba od Twilia tak, aby z ní šlo něco poznat.
+ *
+ * Z „MalformedRequestError (31100)" v konzoli se nedalo zjistit nic - ani
+ * čí token to byl, ani v jakém stavu zařízení bylo. Tohle vypisuje kód,
+ * jméno, hlášku, stav zařízení a původní chybu.
+ *
+ * Token, tajemství API klíče ani Auth Token se sem nikdy nedostanou:
+ * vypisují se jen pole chyby a stav zařízení.
+ */
+function logVoiceError(where: string, error: unknown, device?: Device | null): void {
+  const e = (error ?? {}) as {
+    code?: number;
+    name?: string;
+    message?: string;
+    description?: string;
+    explanation?: string;
+    causes?: string[];
+    solutions?: string[];
+    originalError?: unknown;
+  };
+  console.error(`[voice] ${where} chyba`, {
+    code: e.code ?? null,
+    name: e.name ?? null,
+    message: e.message ?? null,
+    description: e.description ?? null,
+    explanation: e.explanation ?? null,
+    causes: e.causes ?? null,
+    solutions: e.solutions ?? null,
+    deviceState: device?.state ?? null,
+    originalError: e.originalError ?? null,
+  });
+}
+
 export function CallProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<CallUiState>("idle");
   const [call, setCall] = useState<ActiveCall | null>(null);
@@ -184,7 +218,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
     }
     const data = (await response.json()) as
       | { configured: false; missing: string[] }
-      | { configured: true; token: string };
+      | { configured: true; token: string; identity: string; twimlApp: string };
     if (!data.configured) {
       setConfigured(false);
       setMissingEnv(data.missing);
@@ -202,14 +236,25 @@ export function CallProvider({ children }: { children: ReactNode }) {
     setMissingEnv([]);
 
     // Až tady: SDK je velké a v úvodním bundlu nemá co dělat.
-    const { Device } = await import("@twilio/voice-sdk");
+    const { Call, Device } = await import("@twilio/voice-sdk");
+    // Identita a SID aplikace nejsou tajné a bez nich se chyba 31100
+    // nedá odladit: neřekne, ČÍ token to byl ani na kterou TwiML aplikaci
+    // mířil. Token se neloguje nikdy.
+    console.info(
+      `[voice] device identita=${data.identity} app=${data.twimlApp}`,
+    );
     const device = new Device(data.token, {
       // Opus zní na hovoru lépe než PCMU a Twilio si ho s telefonní sítí
       // přeloží samo.
-      codecPreferences: ["opus", "pcmu"] as never,
-      logLevel: "error" as never,
+      codecPreferences: [Call.Codec.Opus, Call.Codec.PCMU],
+      logLevel: "error",
+      // Bez tohohle vrací SDK jednu obecnou chybu na celou třídu problémů.
+      // Právě proto se chyba 31100 hledala tak dlouho: nebylo z ní poznat,
+      // co přesně signalizace odmítla.
+      enableImprovedSignalingErrorPrecision: true,
     });
     device.on("error", (deviceError: unknown) => {
+      logVoiceError("device", deviceError, device);
       setError(callErrorMessage(deviceError));
       setErrorCode(callErrorCode(deviceError));
       setState((current) => (current === "idle" ? "idle" : "failed"));
@@ -280,6 +325,13 @@ export function CallProvider({ children }: { children: ReactNode }) {
       setCockpitOpen(true);
 
       try {
+        // Číslo si dohledá TwiML webhook podle `callId` - prohlížeč ho
+        // neposílá schválně, jinak by to byl otevřený dialer placený
+        // z našeho účtu. Do logu ale patří, ať je vidět, co se vytáčí.
+        console.info(
+          `[voice] connect callId=${payload.call.callId} ` +
+            `cíl=${payload.call.destination} stav=${device.state}`,
+        );
         const connection = await device.connect({ params: { callId: payload.call.callId } });
         connectionRef.current = connection;
         // Od téhle chvíle hlídá další spuštění stav hovoru.
@@ -324,6 +376,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
           setState("ended");
         });
         connection.on("error", (callError: unknown) => {
+          logVoiceError("hovor", callError, deviceRef.current);
           connectionRef.current = null;
           setReconnecting(false);
           setError(callErrorMessage(callError));
@@ -331,6 +384,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
           setState("failed");
         });
       } catch (connectError) {
+        logVoiceError("connect", connectError, deviceRef.current);
         setErrorCode(callErrorCode(connectError));
         fail(callErrorMessage(connectError));
       }

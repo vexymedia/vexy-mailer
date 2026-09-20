@@ -228,3 +228,81 @@ describe("duration", () => {
     expect(formatDuration(null)).toBe("—");
   });
 });
+
+describe("identita pro Twilio Voice", () => {
+  /**
+   * Tohle je ten test, který 31100 odhalí.
+   *
+   * Voice povoluje v identitě jen A-Z a-z 0-9 _. Produkční identita se
+   * skládá jako `caller_${callers.id}`, jenže `callers.id` je uuid -
+   * tedy hodnota s pomlčkami. Twilio takový Device.connect() odmítne
+   * chybou MalformedRequestError (31100) ještě předtím, než vznikne
+   * hovor, takže v Programmable Voice logu po pokusu není vůbec nic.
+   *
+   * Starší testy to minuly, protože používaly `caller_1` - hodnotu, jaká
+   * v produkci nemůže vzniknout.
+   */
+  const VOICE_SAFE = /^[A-Za-z0-9_]+$/;
+  // Skutečný tvar z produkce: gen_random_uuid().
+  const CALLER_UUID = "e24b9c24-333c-48ad-9afe-6e336fd84626";
+
+  it("uuid callera projde jako platná identita", async () => {
+    const { toVoiceIdentity } = await import("@/lib/telephony/twilio");
+    const identity = toVoiceIdentity(`caller_${CALLER_UUID}`);
+
+    expect(identity).toMatch(VOICE_SAFE);
+    expect(identity).toBe("caller_e24b9c24_333c_48ad_9afe_6e336fd84626");
+  });
+
+  it("převod uuid zůstává jednoznačný, takže se callery nezamění", async () => {
+    const { toVoiceIdentity } = await import("@/lib/telephony/twilio");
+    const a = toVoiceIdentity(`caller_${CALLER_UUID}`);
+    const b = toVoiceIdentity("caller_11111111-2222-3333-4444-555555555555");
+    expect(a).not.toBe(b);
+  });
+
+  it("zakázané znaky neprojdou v žádné podobě", async () => {
+    const { toVoiceIdentity } = await import("@/lib/telephony/twilio");
+    for (const raw of [
+      "vojtech@vexy.cz",
+      "caller.1",
+      "caller 1",
+      "caller-1",
+      "caller/1",
+      "čaller_ěščř",
+    ]) {
+      expect(toVoiceIdentity(raw)).toMatch(VOICE_SAFE);
+    }
+  });
+
+  it("z hodnoty bez jediného písmene nebo číslice se nestane prázdná identita", async () => {
+    const { toVoiceIdentity } = await import("@/lib/telephony/twilio");
+    // Prázdná identita je pro Twilio stejně neplatná jako pomlčka.
+    expect(toVoiceIdentity("---")).toBe("vexy_operator");
+    expect(toVoiceIdentity("")).toBe("vexy_operator");
+  });
+
+  it("identita se vejde do stropu délky", async () => {
+    const { toVoiceIdentity } = await import("@/lib/telephony/twilio");
+    expect(toVoiceIdentity("x".repeat(400)).length).toBe(256);
+  });
+
+  it("token podepsaný pro uuid callera nese už očištěnou identitu", async () => {
+    // Nestačí čistit v endpointu: kdyby token vznikal jinde, chyba 31100
+    // se vrátí. Proto to hlídá sama createVoiceAccessToken.
+    const { token } = createVoiceAccessToken(CONFIG, { identity: `caller_${CALLER_UUID}` });
+    const grants = decode(token.split(".")[1]).grants as { identity: string };
+
+    expect(grants.identity).toMatch(VOICE_SAFE);
+    expect(grants.identity).not.toContain("-");
+  });
+
+  it("maskované SID aplikace neodhalí celou hodnotu", async () => {
+    const { maskSid } = await import("@/lib/telephony/twilio");
+    const masked = maskSid(CONFIG.twimlAppSid);
+
+    expect(masked).not.toBe(CONFIG.twimlAppSid);
+    expect(masked.startsWith("AP")).toBe(true);
+    expect(masked.length).toBeLessThan(CONFIG.twimlAppSid.length);
+  });
+});
